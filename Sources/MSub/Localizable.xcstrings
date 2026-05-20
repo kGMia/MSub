@@ -1,0 +1,720 @@
+{
+  "sourceLanguage" : "en",
+  "version" : "1.0",
+  "strings" : {
+    "app.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "MSub" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "MSub" } }
+      }
+    },
+    "backend.start" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Start Backend" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "启动后端" } }
+      }
+    },
+    "backend.stop" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Stop Backend" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "停止后端" } }
+      }
+    },
+    "backend.check" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Check" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "检查连接" } }
+      }
+    },
+    "backend.connected" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Backend connected" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "后端已连接" } }
+      }
+    },
+    "backend.disconnected" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Backend not connected" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "后端未连接" } }
+      }
+    },
+    "backend.running" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Backend running" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "后端运行中" } }
+      }
+    },
+    "backend.stopped" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Backend stopped" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "后端已停止" } }
+      }
+    },
+    "input.section" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Input" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "输入" } }
+      }
+    },
+    "input.choose" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Choose Media" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "选择媒体" } }
+      }
+    },
+    "input.drop" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Drop a video or audio file" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "拖入视频或音频文件" } }
+      }
+    },
+    "input.none" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "No file selected" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "尚未选择文件" } }
+      }
+    },
+    "settings.output" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Output" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "输出" } }
+      }
+    },
+    "settings.model" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Model" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "模型" } }
+      }
+    },
+    "settings.format" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Format" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "格式" } }
+      }
+    },
+    "settings.mode" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Mode" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "分段模式" } }
+      }
+    },
+    "settings.language" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Language" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "界面语言" } }
+      }
+    },
+    "settings.segmentation" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Segmentation" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "语音分段" } }
+      }
+    },
+    "settings.recognition" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Recognition" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "识别" } }
+      }
+    },
+    "settings.advanced" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Advanced" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "高级参数" } }
+      }
+    },
+    "settings.preset" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Scene preset" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "场景预设" } }
+      }
+    },
+    "settings.threshold" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Threshold dB" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "阈值 dB" } }
+      }
+    },
+    "settings.maxSegment" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Max segment" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "最大分段" } }
+      }
+    },
+    "settings.silence" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Silence gap" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "静音间隔" } }
+      }
+    },
+    "settings.search" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Cut search" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "切点搜索" } }
+      }
+    },
+    "settings.minSpeech" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Min speech" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "最短语音" } }
+      }
+    },
+    "settings.padding" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Boundary pad" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "边界留白" } }
+      }
+    },
+    "settings.minSegment" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Min segment" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "最短分段" } }
+      }
+    },
+    "settings.fixedChunk" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Fixed chunk" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "固定切片" } }
+      }
+    },
+    "settings.beam" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Beam" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Beam" } }
+      }
+    },
+    "settings.confidence" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Min confidence" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "最低置信度" } }
+      }
+    },
+    "settings.lineChars" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Line chars" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "每行字数" } }
+      }
+    },
+    "preset.balanced" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Balanced" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "平衡" } }
+      }
+    },
+    "preset.dialogue" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Live dialogue" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "现场对话" } }
+      }
+    },
+    "preset.lowVoice" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Low voice" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "低音量/低频" } }
+      }
+    },
+    "preset.noisy" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Noisy" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "嘈杂环境" } }
+      }
+    },
+    "preset.fastCut" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Fast cuts" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "短句快切" } }
+      }
+    },
+    "preset.sensitive" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Sensitive" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "更灵敏" } }
+      }
+    },
+    "preset.reset" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Reset" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "重置" } }
+      }
+    },
+    "preset.apply" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Apply preset" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "应用预设" } }
+      }
+    },
+    "preset.balanced.help" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "General defaults for clear recordings, ordinary speaking pace, and most videos." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "通用默认值。适合清晰录音、普通语速和多数视频。" } }
+      }
+    },
+    "preset.dialogue.help" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Splits more actively around pauses, useful for live dialogue, interviews, and meetings." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "更积极地按停顿切分，适合多人现场对话、访谈和会议片段。" } }
+      }
+    },
+    "preset.lowVoice.help" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Lowers the energy threshold and adds boundary padding to catch quiet, low-frequency, or distant speech." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "降低能量阈值并增加边界留白，减少低音量、低频或离麦较远语音被漏掉的概率。" } }
+      }
+    },
+    "preset.noisy.help" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Raises the threshold and filters short noise bursts for loud background noise or keyboard/environment sounds." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "提高阈值并过滤更短噪声，适合背景声较强、键盘声或环境声明显的素材。" } }
+      }
+    },
+    "preset.fastCut.help" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Shortens max segments and silence bridging for short utterances, fast edits, and finer subtitles." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "缩短最大分段和静音合并，适合短句、快节奏剪辑和需要更碎字幕的场景。" } }
+      }
+    },
+    "preset.sensitive.help" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Catches weaker speech than Balanced, with a higher chance of including breath or background sounds." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "比平衡模式更容易捕获弱语音，但也可能多切出呼吸声或环境声。" } }
+      }
+    },
+    "action.preview" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Preview" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "预览分段" } }
+      }
+    },
+    "action.transcribe" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Transcribe" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "开始识别" } }
+      }
+    },
+    "action.save" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Save Result" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "保存结果" } }
+      }
+    },
+    "action.copy" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Copy Text" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "复制文本" } }
+      }
+    },
+    "segments.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Segments" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "分段" } }
+      }
+    },
+    "segments.empty" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Preview segments to populate the timeline." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "先预览分段，时间轴会显示在这里。" } }
+      }
+    },
+    "segments.noPreview" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "No preview" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂无预览" } }
+      }
+    },
+    "segments.count" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "segments" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "个分段" } }
+      }
+    },
+    "segments.avg" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Avg" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "平均" } }
+      }
+    },
+    "segments.max" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Max" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "最长" } }
+      }
+    },
+    "segments.speech" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Speech" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "语音占比" } }
+      }
+    },
+    "output.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Subtitle Output" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "字幕结果" } }
+      }
+    },
+    "output.placeholder" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Subtitle preview will appear here after transcription." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "识别完成后，字幕预览会显示在这里。" } }
+      }
+    },
+    "status.ready" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Ready" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "就绪" } }
+      }
+    },
+    "status.connected" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connected" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已连接" } }
+      }
+    },
+    "status.detecting" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Detecting speech segments" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在检测语音分段" } }
+      }
+    },
+    "status.previewReady" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Segment preview ready" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "分段预览完成" } }
+      }
+    },
+    "status.previewFailed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Segment preview failed" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "分段预览失败" } }
+      }
+    },
+    "status.starting" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Starting job" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在创建识别任务" } }
+      }
+    },
+    "status.loading" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Loading model" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在加载模型" } }
+      }
+    },
+    "status.transcribing" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Transcribing" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在识别" } }
+      }
+    },
+    "status.done" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Done" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "完成" } }
+      }
+    },
+    "status.failed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Transcription failed" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "识别失败" } }
+      }
+    },
+    "status.saved" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Result saved" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "结果已保存" } }
+      }
+    },
+    "status.saving" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Saving result" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在保存结果" } }
+      }
+    },
+    "status.copied" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Copied subtitle text" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已复制字幕文本" } }
+      }
+    },
+    "error.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Error" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "错误" } }
+      }
+    },
+    "button.ok" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "OK" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "好" } }
+      }
+    },
+    "help.model" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Hugging Face model id or local model directory. Use the local FireRedASR2-AED-mlx path to avoid network downloads." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Hugging Face 模型 ID 或本地模型目录。当前建议使用本地 FireRedASR2-AED-mlx 权重路径，避免联网下载。" } }
+      }
+    },
+    "help.format" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "SRT/VTT are subtitle formats, TXT is a plain transcript, JSON is best for downstream tooling." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "SRT/VTT 用于字幕软件，TXT 用于纯文本稿，JSON 用于后续程序处理。" } }
+      }
+    },
+    "help.mode" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "VAD segments by detected speech activity and is usually better for subtitle sync; fixed chunks are a fallback." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "VAD 会按实际语音活动分段，通常更适合字幕同步；固定切片只作为回退方案。" } }
+      }
+    },
+    "help.preset" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Applies a starting point for segmentation and recognition settings. You can still fine-tune manually." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "一键调整下方分段和识别参数。预设只是起点，仍可继续手动微调。" } }
+      }
+    },
+    "help.threshold" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Speech energy threshold. Higher is stricter and reduces noise; lower catches quieter speech." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "语音能量阈值。数值越高越严格，噪声更少但可能漏掉轻声；数值越低越灵敏。" } }
+      }
+    },
+    "help.maxSegment" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Maximum duration for one recognition segment. Shorter gives tighter subtitles; too short can lose context." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "单个识别分段允许的最长时间。越短字幕越碎、越贴近语音；过短可能损失上下文。" } }
+      }
+    },
+    "help.silence" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Silences shorter than this are bridged. Lower values split more; higher values merge more." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "短于此值的静音会被合并到同一段。调小会切得更碎，调大会减少碎片。" } }
+      }
+    },
+    "help.search" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Search window around a long-segment cut point for the quietest frame. Larger can find more natural cuts." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "长分段切开时，在目标切点附近搜索最安静位置的范围。增大可找到更自然切点。" } }
+      }
+    },
+    "help.minSpeech" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Detected speech shorter than this is treated as noise. Raise for noisy audio; lower for quiet speech." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "短于此值的语音活动会被视为噪声。嘈杂素材可调高，低音量语音可调低。" } }
+      }
+    },
+    "help.padding" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Extra time before and after each segment. More avoids clipped words; less makes subtitles tighter." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "给每段开头和结尾额外保留的时间。增加可避免吞字，减少可让字幕出现/消失更贴合语音。" } }
+      }
+    },
+    "help.minSegment" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Tiny split remainders below this are merged. Lower it to keep more short subtitles." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "切分后过短的小段会被合并。降低它会保留更多短字幕。" } }
+      }
+    },
+    "help.fixedChunk" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Chunk length used by fixed mode. It mostly does not affect VAD mode." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "固定切片模式下每段时长。VAD 模式下基本不影响结果。" } }
+      }
+    },
+    "help.beam" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Model decoding beam width. Larger can be steadier but slower; 3 or 4 is usually enough locally." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "模型解码搜索宽度。更大可能略稳但更慢；本地实时调试通常 3 或 4 足够。" } }
+      }
+    },
+    "help.confidence" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Drops recognized pieces below this confidence. No effect if the model does not return confidence; raise slightly for noisy audio." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "丢弃低于此置信度的识别片段。模型不返回置信度时不会生效；嘈杂素材可略微调高。" } }
+      }
+    },
+    "help.lineChars" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Subtitle line wrapping width. 14-20 works well for Chinese; set 0 to disable wrapping." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "字幕换行宽度。中文通常 14-20 较舒服，设为 0 可关闭自动换行。" } }
+      }
+    },
+    "tab.segments" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Segments" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "分段" } }
+      }
+    },
+    "tab.output" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Output" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "字幕" } }
+      }
+    },
+    "tab.batch" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Batch" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "批量" } }
+      }
+    },
+    "preview.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Preview" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "预览" } }
+      }
+    },
+    "preview.show" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Show preview" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "显示预览" } }
+      }
+    },
+    "preview.unsupported" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Preview not available for this file." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "此文件无法显示预览。" } }
+      }
+    },
+    "batch.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Batch Queue" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "批量任务" } }
+      }
+    },
+    "batch.add" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Add Files" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "添加文件" } }
+      }
+    },
+    "batch.run" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Run Batch" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "开始批量" } }
+      }
+    },
+    "batch.stop" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Stop" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "停止" } }
+      }
+    },
+    "batch.clear" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Clear Completed" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "清除已完成" } }
+      }
+    },
+    "batch.remove" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Remove" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "移除" } }
+      }
+    },
+    "batch.empty" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "No files in queue. Add files to start batch processing." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "队列为空。添加文件以开始批量处理。" } }
+      }
+    },
+    "batch.outputDir" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Output folder" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "输出文件夹" } }
+      }
+    },
+    "batch.outputDir.choose" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Choose…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "选择…" } }
+      }
+    },
+    "batch.outputDir.default" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Same as source file" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "与源文件同目录" } }
+      }
+    },
+    "batch.status.pending" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pending" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "等待中" } }
+      }
+    },
+    "batch.status.running" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Running" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "进行中" } }
+      }
+    },
+    "batch.status.done" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Done" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已完成" } }
+      }
+    },
+    "batch.status.failed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Failed" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "失败" } }
+      }
+    },
+    "batch.status.cancelled" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Cancelled" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已取消" } }
+      }
+    },
+    "prefs.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Settings" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "偏好设置" } }
+      }
+    },
+    "prefs.general" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "General" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "通用" } }
+      }
+    },
+    "prefs.model" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Model" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "模型" } }
+      }
+    },
+    "prefs.appearance" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Appearance" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "外观" } }
+      }
+    },
+    "prefs.defaultFormat" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Default output format" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "默认输出格式" } }
+      }
+    },
+    "prefs.defaultMode" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Default segment mode" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "默认分段模式" } }
+      }
+    },
+    "prefs.modelPath" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Default model path" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "默认模型路径" } }
+      }
+    },
+    "prefs.modelPath.choose" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Browse…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "浏览…" } }
+      }
+    },
+    "prefs.uiLanguage" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Interface language" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "界面语言" } }
+      }
+    }
+  }
+}

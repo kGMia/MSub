@@ -1,0 +1,353 @@
+{
+  "builtTestProducts" : [
+
+  ],
+  "copyCommands" : {
+
+  },
+  "explicitTargetDependencyImportCheckingMode" : {
+    "none" : {
+
+    }
+  },
+  "generatedSourceTargetSet" : [
+
+  ],
+  "pluginDescriptions" : [
+
+  ],
+  "swiftCommands" : {
+    "C.HuzSubtitleMac-arm64-apple-macosx-debug.module" : {
+      "executable" : "/Library/Developer/CommandLineTools/usr/bin/swiftc",
+      "fileList" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/sources",
+      "importPath" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/APIClient.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/BackendService.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/ContentView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/HuzSubtitleMacApp.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/Localization.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/Models.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/Settings.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/sources"
+        }
+      ],
+      "isLibrary" : false,
+      "moduleName" : "HuzSubtitleMac",
+      "moduleOutputPath" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/Modules/HuzSubtitleMac.swiftmodule",
+      "objects" : [
+        "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/APIClient.swift.o",
+        "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/BackendService.swift.o",
+        "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/ContentView.swift.o",
+        "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/HuzSubtitleMacApp.swift.o",
+        "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/Localization.swift.o",
+        "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/Models.swift.o",
+        "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/Settings.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx14.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-j10",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-Xfrontend",
+        "-entry-point-function-name",
+        "-Xfrontend",
+        "HuzSubtitleMac_main",
+        "-swift-version",
+        "6",
+        "-I",
+        "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+        "-L",
+        "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+        "-plugin-path",
+        "/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "huzsubtitlemac"
+      ],
+      "outputFileMapPath" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/APIClient.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/BackendService.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/ContentView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/HuzSubtitleMacApp.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/Localization.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/Models.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/Settings.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/Modules/HuzSubtitleMac.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/APIClient.swift",
+        "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/BackendService.swift",
+        "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/ContentView.swift",
+        "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/HuzSubtitleMacApp.swift",
+        "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/Localization.swift",
+        "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/Models.swift",
+        "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/Settings.swift"
+      ],
+      "tempsPath" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build",
+      "wholeModuleOptimization" : false
+    }
+  },
+  "swiftFrontendCommands" : {
+
+  },
+  "swiftTargetScanArgs" : {
+    "HuzSubtitleMac" : [
+      "/Library/Developer/CommandLineTools/usr/bin/swiftc",
+      "-module-name",
+      "HuzSubtitleMac",
+      "-package-name",
+      "huzsubtitlemac",
+      "-c",
+      "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/APIClient.swift",
+      "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/BackendService.swift",
+      "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/ContentView.swift",
+      "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/HuzSubtitleMacApp.swift",
+      "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/Localization.swift",
+      "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/Models.swift",
+      "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/Settings.swift",
+      "-I",
+      "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx14.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-j10",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-Xfrontend",
+      "-entry-point-function-name",
+      "-Xfrontend",
+      "HuzSubtitleMac_main",
+      "-swift-version",
+      "6",
+      "-I",
+      "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+      "-L",
+      "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+      "-plugin-path",
+      "/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "huzsubtitlemac",
+      "-driver-use-frontend-path",
+      "/Library/Developer/CommandLineTools/usr/bin/swiftc"
+    ]
+  },
+  "targetDependencyMap" : {
+    "HuzSubtitleMac" : [
+
+    ]
+  },
+  "testDiscoveryCommands" : {
+
+  },
+  "testEntryPointCommands" : {
+
+  },
+  "traitConfiguration" : {
+    "default" : {
+
+    }
+  },
+  "writeCommands" : {
+    "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac-entitlement.plist" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<entitlement-plist>"
+        },
+        {
+          "kind" : "virtual",
+          "name" : "<com.apple.security.get-task-allow>"
+        }
+      ],
+      "outputFilePath" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac-entitlement.plist"
+    },
+    "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/APIClient.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/BackendService.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/ContentView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/HuzSubtitleMacApp.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/Localization.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/Models.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/Settings.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/sources"
+    },
+    "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.product/Objects.LinkFileList" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<link-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/APIClient.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/BackendService.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/ContentView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/HuzSubtitleMacApp.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/Localization.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/Models.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/Settings.swift.o"
+        }
+      ],
+      "outputFilePath" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.product/Objects.LinkFileList"
+    },
+    "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt" : {
+      "alwaysOutOfDate" : true,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<swift-get-version>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Library/Developer/CommandLineTools/usr/bin/swiftc"
+        }
+      ],
+      "outputFilePath" : "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt"
+    }
+  }
+}

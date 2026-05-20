@@ -1,0 +1,81 @@
+client:
+  name: basic
+  file-system: device-agnostic
+tools: {}
+targets:
+  "HuzSubtitleMac-arm64-apple-macosx-debug.exe": ["<HuzSubtitleMac-arm64-apple-macosx-debug.exe>"]
+  "HuzSubtitleMac-arm64-apple-macosx-debug.module": ["<HuzSubtitleMac-arm64-apple-macosx-debug.module>"]
+  "PackageStructure": ["<PackageStructure>"]
+  "main": ["<HuzSubtitleMac-arm64-apple-macosx-debug.exe>","<HuzSubtitleMac-arm64-apple-macosx-debug.module>"]
+  "test": ["<HuzSubtitleMac-arm64-apple-macosx-debug.exe>","<HuzSubtitleMac-arm64-apple-macosx-debug.module>"]
+default: "main"
+nodes:
+  "/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/":
+    is-directory-structure: true
+    content-exclusion-patterns: [".git",".build"]
+  "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac":
+    is-mutated: true
+commands:
+  "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac-entitlement.plist":
+    tool: write-auxiliary-file
+    inputs: ["<entitlement-plist>","<com.apple.security.get-task-allow>"]
+    outputs: ["/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac-entitlement.plist"]
+    description: "Write auxiliary file /Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac-entitlement.plist"
+
+  "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/sources":
+    tool: write-auxiliary-file
+    inputs: ["<sources-file-list>","/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/APIClient.swift","/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/BackendService.swift","/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/ContentView.swift","/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/HuzSubtitleMacApp.swift","/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/Localization.swift","/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/Models.swift","/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/Settings.swift"]
+    outputs: ["/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/sources"]
+    description: "Write auxiliary file /Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/sources"
+
+  "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.product/Objects.LinkFileList":
+    tool: write-auxiliary-file
+    inputs: ["<link-file-list>","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/APIClient.swift.o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/BackendService.swift.o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/ContentView.swift.o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/HuzSubtitleMacApp.swift.o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/Localization.swift.o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/Models.swift.o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/Settings.swift.o"]
+    outputs: ["/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.product/Objects.LinkFileList"]
+    description: "Write auxiliary file /Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.product/Objects.LinkFileList"
+
+  "/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt":
+    tool: write-auxiliary-file
+    inputs: ["<swift-get-version>","/Library/Developer/CommandLineTools/usr/bin/swiftc"]
+    outputs: ["/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt"]
+    always-out-of-date: "true"
+    description: "Write auxiliary file /Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt"
+
+  "<HuzSubtitleMac-arm64-apple-macosx-debug.exe>":
+    tool: phony
+    inputs: ["<HuzSubtitleMac-arm64-apple-macosx-debug.exe-CodeSigning>"]
+    outputs: ["<HuzSubtitleMac-arm64-apple-macosx-debug.exe>"]
+
+  "<HuzSubtitleMac-arm64-apple-macosx-debug.module>":
+    tool: phony
+    inputs: ["/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/APIClient.swift.o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/BackendService.swift.o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/ContentView.swift.o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/HuzSubtitleMacApp.swift.o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/Localization.swift.o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/Models.swift.o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/Settings.swift.o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/Modules/HuzSubtitleMac.swiftmodule"]
+    outputs: ["<HuzSubtitleMac-arm64-apple-macosx-debug.module>"]
+
+  "C.HuzSubtitleMac-arm64-apple-macosx-debug.exe":
+    tool: shell
+    inputs: ["/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/APIClient.swift.o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/BackendService.swift.o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/ContentView.swift.o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/HuzSubtitleMacApp.swift.o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/Localization.swift.o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/Models.swift.o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/Settings.swift.o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.product/Objects.LinkFileList"]
+    outputs: ["/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac"]
+    description: "Linking ./.build/arm64-apple-macosx/debug/HuzSubtitleMac"
+    args: ["/Library/Developer/CommandLineTools/usr/bin/swiftc","-L","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug","-o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac","-module-name","HuzSubtitleMac","-Xlinker","-no_warn_duplicate_libraries","-emit-executable","-Xlinker","-alias","-Xlinker","_HuzSubtitleMac_main","-Xlinker","_main","-Xlinker","-rpath","-Xlinker","@loader_path","@/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.product/Objects.LinkFileList","-Xlinker","-rpath","-Xlinker","/Library/Developer/CommandLineTools/usr/lib/swift-6.2/macosx","-target","arm64-apple-macosx14.0","-Xlinker","-add_ast_path","-Xlinker","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/Modules/HuzSubtitleMac.swiftmodule","-I","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-L","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-plugin-path","/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing","-sdk","/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk","-g"]
+
+  "C.HuzSubtitleMac-arm64-apple-macosx-debug.exe-entitlements":
+    tool: shell
+    inputs: ["/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac-entitlement.plist"]
+    outputs: ["<HuzSubtitleMac-arm64-apple-macosx-debug.exe-CodeSigning>"]
+    description: "Applying debug entitlements to ./.build/arm64-apple-macosx/debug/HuzSubtitleMac"
+    args: ["codesign","--force","--sign","-","--entitlements","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac-entitlement.plist","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac"]
+
+  "C.HuzSubtitleMac-arm64-apple-macosx-debug.module":
+    tool: shell
+    inputs: ["/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/APIClient.swift","/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/BackendService.swift","/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/ContentView.swift","/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/HuzSubtitleMacApp.swift","/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/Localization.swift","/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/Models.swift","/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/Settings.swift","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/sources"]
+    outputs: ["/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/APIClient.swift.o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/BackendService.swift.o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/ContentView.swift.o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/HuzSubtitleMacApp.swift.o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/Localization.swift.o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/Models.swift.o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/Settings.swift.o","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/Modules/HuzSubtitleMac.swiftmodule"]
+    description: "Compiling Swift Module 'HuzSubtitleMac' (7 sources)"
+    args: ["/Library/Developer/CommandLineTools/usr/bin/swiftc","-module-name","HuzSubtitleMac","-emit-dependencies","-emit-module","-emit-module-path","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/Modules/HuzSubtitleMac.swiftmodule","-output-file-map","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/output-file-map.json","-incremental","-c","@/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/HuzSubtitleMac.build/sources","-I","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/Modules","-target","arm64-apple-macosx14.0","-incremental","-enable-batch-mode","-serialize-diagnostics","-index-store-path","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/index/store","-Onone","-enable-testing","-j10","-DSWIFT_PACKAGE","-DDEBUG","-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE","-module-cache-path","/Users/august/Project/Huz/apps/HuzSubtitleMac/.build/arm64-apple-macosx/debug/ModuleCache","-parseable-output","-Xfrontend","-entry-point-function-name","-Xfrontend","HuzSubtitleMac_main","-swift-version","6","-I","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-L","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-plugin-path","/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing","-sdk","/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk","-g","-Xcc","-isysroot","-Xcc","/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk","-Xcc","-fPIC","-Xcc","-g","-package-name","huzsubtitlemac"]
+
+  "PackageStructure":
+    tool: package-structure-tool
+    inputs: ["/Users/august/Project/Huz/apps/HuzSubtitleMac/Sources/HuzSubtitleMac/","/Users/august/Project/Huz/apps/HuzSubtitleMac/Package.swift","/Users/august/Project/Huz/apps/HuzSubtitleMac/Package.resolved"]
+    outputs: ["<PackageStructure>"]
+    description: "Planning build"
+    allow-missing-inputs: true
+
