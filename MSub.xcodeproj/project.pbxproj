@@ -110,7 +110,7 @@
 					};
 				};
 			};
-			buildConfigurationList = 000000000000000000000501 /* Build configuration list for PBXProject "MSub" */;
+			buildConfigurationList = 000000000000000000000501 /* Build configuration list for PBXProject "mSub" */;
 			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
@@ -128,6 +128,17 @@
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		000000000000000000000403 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				974192942FBD973900E74858 /* Localizable.xcstrings in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
 		000000000000000000000402 /* Package Backend */ = {
@@ -154,17 +165,6 @@
 			shellScript = "\"${SRCROOT}/Scripts/package-backend.sh\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
-
-/* Begin PBXResourcesBuildPhase section */
-		000000000000000000000403 /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				974192942FBD973900E74858 /* Localizable.xcstrings in Resources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		000000000000000000000401 /* Sources */ = {
@@ -302,6 +302,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -327,6 +328,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -351,7 +353,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		000000000000000000000501 /* Build configuration list for PBXProject "MSub" */ = {
+		000000000000000000000501 /* Build configuration list for PBXProject "mSub" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				000000000000000000000601 /* Debug */,

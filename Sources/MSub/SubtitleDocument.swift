@@ -765,9 +765,14 @@ private struct WaveformTimelineEditor: View {
         let startX = xPosition(cue.start, width: width)
         let endX = xPosition(cue.end, width: width)
         let cueWidth = max(2, endX - startX)
+        let hitWidth = max(24, cueWidth)
+        let hitOffset = max(0, startX - (hitWidth - cueWidth) / 2)
         let selected = cue.id == selectedCueID
 
         return ZStack(alignment: .leading) {
+            Color.white.opacity(0.001)
+                .frame(width: hitWidth, height: cueHeight)
+
             RoundedRectangle(cornerRadius: 5)
                 .fill(selected ? Color.accentColor.opacity(0.28) : Color.teal.opacity(0.22))
                 .overlay(
@@ -783,12 +788,16 @@ private struct WaveformTimelineEditor: View {
                 .padding(.leading, 5)
                 .lineLimit(1)
         }
-        .frame(width: cueWidth, height: cueHeight)
-        .offset(x: startX, y: cueTopOffset)
+        .frame(width: hitWidth, height: cueHeight, alignment: .leading)
+        .offset(x: hitOffset, y: cueTopOffset)
         .contentShape(Rectangle())
-        .onTapGesture {
+        .highPriorityGesture(TapGesture().onEnded {
             selectedCueID = cue.id
-        }
+        })
+        .simultaneousGesture(TapGesture().onEnded {
+            selectedCueID = cue.id
+        })
+        .zIndex(selected ? 3 : 2)
         .help(cueTooltip(cue))
     }
 

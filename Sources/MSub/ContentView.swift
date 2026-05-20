@@ -1112,18 +1112,45 @@ struct ContentView: View {
 private struct ParameterHelpIcon: View {
     let help: String
     @State private var isHovering = false
+    @State private var isPresented = false
+    @State private var dismissTask: Task<Void, Never>?
 
     var body: some View {
-        Image(systemName: "questionmark.circle")
-            .font(.caption2)
-            .foregroundStyle(isHovering ? .primary : .tertiary)
-            .frame(width: 20, height: 20)
-            .contentShape(Circle())
-            .onHover { hovering in
-                isHovering = hovering
+        Button {
+            dismissTask?.cancel()
+            isPresented.toggle()
+        } label: {
+            Image(systemName: "questionmark.circle")
+                .font(.caption2)
+                .foregroundStyle(isPresented || isHovering ? .primary : .tertiary)
+                .frame(width: 22, height: 22)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .focusable(false)
+        .onHover { hovering in
+            isHovering = hovering
+            dismissTask?.cancel()
+            if hovering {
+                isPresented = true
+            } else {
+                dismissTask = Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(180))
+                    if !isHovering {
+                        isPresented = false
+                    }
+                }
             }
-            .help(help)
-            .accessibilityLabel(Text(help))
+        }
+        .popover(isPresented: $isPresented, arrowEdge: .top) {
+            Text(help)
+                .font(.caption)
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(10)
+                .frame(width: 280, alignment: .leading)
+        }
+        .accessibilityLabel(Text(help))
     }
 }
 
