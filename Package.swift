@@ -14,6 +14,9 @@ let package = Package(
         .executableTarget(
             name: "MSub",
             path: "Sources/MSub",
+            exclude: [
+                "Media.xcassets"
+            ],
             resources: [
                 .process("Localizable.xcstrings")
             ]

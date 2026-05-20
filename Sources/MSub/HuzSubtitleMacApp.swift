@@ -4,9 +4,12 @@ import UniformTypeIdentifiers
 
 @main
 struct MSubApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
     @StateObject private var api = APIClient()
     @StateObject private var backend = BackendService()
     @StateObject private var settings = TranscriptionSettings()
+    @StateObject private var recentFiles = RecentFilesStore()
 
     @AppStorage("huz.uiLanguage") private var languageRaw = AppLanguage.zh.rawValue
 
@@ -20,12 +23,35 @@ struct MSubApp: App {
                 .environmentObject(api)
                 .environmentObject(backend)
                 .environmentObject(settings)
+                .environmentObject(recentFiles)
                 .environment(\.locale, language.locale)
                 .background(MenuLocalizationBridge(language: language))
                 .frame(minWidth: 900, minHeight: 640)
         }
         .commands {
-            CommandGroup(replacing: .newItem) {}
+            CommandGroup(replacing: .newItem) {
+                Button(Copy.text("menu.openFile", language: language)) {
+                    NotificationCenter.default.post(name: .msubOpenFilesRequested, object: nil)
+                }
+                .keyboardShortcut("o", modifiers: [.command])
+
+                Menu(Copy.text("menu.openRecent", language: language)) {
+                    if recentFiles.urls.isEmpty {
+                        Text(Copy.text("menu.noRecentFiles", language: language))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(recentFiles.urls, id: \.self) { url in
+                            Button(url.lastPathComponent) {
+                                NotificationCenter.default.post(name: .msubOpenRecentFileRequested, object: url)
+                            }
+                        }
+                        Divider()
+                        Button(Copy.text("menu.clearRecentFiles", language: language)) {
+                            recentFiles.clear()
+                        }
+                    }
+                }
+            }
         }
 
         Settings {
@@ -46,19 +72,44 @@ private struct MenuLocalizationBridge: View {
         Color.clear
             .frame(width: 0, height: 0)
             .onAppear {
-                MenuLocalizer.apply(language: language)
+                MenuLocalizer.apply(language: language, retries: 4)
             }
             .onChange(of: language) { _, newValue in
-                MenuLocalizer.apply(language: newValue)
+                MenuLocalizer.apply(language: newValue, retries: 4)
             }
+    }
+}
+
+private final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        applyMenuLocalization()
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        applyMenuLocalization()
+    }
+
+    private func applyMenuLocalization() {
+        let raw = UserDefaults.standard.string(forKey: "huz.uiLanguage") ?? AppLanguage.zh.rawValue
+        let language = AppLanguage(rawValue: raw) ?? .zh
+        Task { @MainActor in
+            MenuLocalizer.apply(language: language, retries: 8)
+        }
     }
 }
 
 @MainActor
 private enum MenuLocalizer {
-    static func apply(language: AppLanguage) {
-        DispatchQueue.main.async {
+    static func apply(language: AppLanguage, retries: Int = 0) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(20)) {
             updateMainMenu(language: language)
+        }
+        guard retries > 0 else { return }
+        for attempt in 1...retries {
+            let delay = DispatchTimeInterval.milliseconds(80 * attempt)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                updateMainMenu(language: language)
+            }
         }
     }
 

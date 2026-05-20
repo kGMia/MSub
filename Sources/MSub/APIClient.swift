@@ -12,17 +12,26 @@ final class APIClient: ObservableObject {
     }
 
     func preview(fileURL: URL, settings: TranscriptionSettings) async throws -> SegmentPreview {
-        let request = try multipartRequest(path: "/api/preview", fileURL: fileURL, settings: settings, includeOutput: false)
+        let (request, bodyURL) = try multipartRequest(path: "/api/preview", fileURL: fileURL, settings: settings, includeOutput: false)
+        defer { try? FileManager.default.removeItem(at: bodyURL) }
         let (data, response) = try await URLSession.shared.data(for: request)
         try validate(response: response, data: data)
         return try JSONDecoder().decode(SegmentPreview.self, from: data)
     }
 
     func createJob(fileURL: URL, settings: TranscriptionSettings) async throws -> JobCreated {
-        let request = try multipartRequest(path: "/api/jobs", fileURL: fileURL, settings: settings, includeOutput: true)
+        let (request, bodyURL) = try multipartRequest(path: "/api/jobs", fileURL: fileURL, settings: settings, includeOutput: true)
+        defer { try? FileManager.default.removeItem(at: bodyURL) }
         let (data, response) = try await URLSession.shared.data(for: request)
         try validate(response: response, data: data)
         return try JSONDecoder().decode(JobCreated.self, from: data)
+    }
+
+    func cancelJob(id: String) async throws {
+        var request = URLRequest(url: baseURL.appending(path: "/api/jobs/\(id)/cancel"))
+        request.httpMethod = "POST"
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validate(response: response, data: data)
     }
 
     func jobStatus(id: String) async throws -> JobStatus {
@@ -49,29 +58,41 @@ final class APIClient: ObservableObject {
         fileURL: URL,
         settings: TranscriptionSettings,
         includeOutput: Bool
-    ) throws -> URLRequest {
+    ) throws -> (URLRequest, URL) {
         let boundary = "Boundary-\(UUID().uuidString)"
         var request = URLRequest(url: baseURL.appending(path: path))
         request.httpMethod = "POST"
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
-        var body = Data()
+        let bodyURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MSubUpload-\(UUID().uuidString).body")
+        FileManager.default.createFile(atPath: bodyURL.path, contents: nil)
+        let output = try FileHandle(forWritingTo: bodyURL)
+        defer { try? output.close() }
+
         let fields = settings.formFields(includeOutput: includeOutput)
         for (name, value) in fields {
-            body.appendString("--\(boundary)\r\n")
-            body.appendString("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n")
-            body.appendString("\(value)\r\n")
+            try output.writeString("--\(boundary)\r\n")
+            try output.writeString("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n")
+            try output.writeString("\(value)\r\n")
         }
 
-        let data = try Data(contentsOf: fileURL)
         let filename = fileURL.lastPathComponent
-        body.appendString("--\(boundary)\r\n")
-        body.appendString("Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n")
-        body.appendString("Content-Type: application/octet-stream\r\n\r\n")
-        body.append(data)
-        body.appendString("\r\n--\(boundary)--\r\n")
-        request.httpBody = body
-        return request
+        try output.writeString("--\(boundary)\r\n")
+        try output.writeString("Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n")
+        try output.writeString("Content-Type: application/octet-stream\r\n\r\n")
+
+        let input = try FileHandle(forReadingFrom: fileURL)
+        defer { try? input.close() }
+        while let chunk = try input.read(upToCount: 1_048_576), !chunk.isEmpty {
+            try output.write(contentsOf: chunk)
+        }
+
+        try output.writeString("\r\n--\(boundary)--\r\n")
+        let size = try FileManager.default.attributesOfItem(atPath: bodyURL.path)[.size] as? NSNumber
+        request.setValue("\(size?.int64Value ?? 0)", forHTTPHeaderField: "Content-Length")
+        request.httpBodyStream = InputStream(url: bodyURL)
+        return (request, bodyURL)
     }
 
     private func validate(response: URLResponse, data: Data) throws {
@@ -99,5 +120,11 @@ final class APIClient: ObservableObject {
 extension Data {
     mutating func appendString(_ string: String) {
         append(Data(string.utf8))
+    }
+}
+
+private extension FileHandle {
+    func writeString(_ string: String) throws {
+        try write(contentsOf: Data(string.utf8))
     }
 }

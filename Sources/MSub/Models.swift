@@ -9,6 +9,7 @@ struct SegmentPreview: Decodable {
     let duration: Double
     let count: Int
     let segments: [SubtitleSegment]
+    let mediaInfo: MediaInfo?
 }
 
 struct SubtitleSegment: Decodable, Identifiable {
@@ -57,4 +58,19 @@ enum SegmentMode: String, CaseIterable, Identifiable {
 struct DownloadedOutput {
     let data: Data
     let filename: String
+}
+
+struct MediaInfo: Decodable, Equatable {
+    var duration: Double? = nil
+    var formatName: String? = nil
+    var bitRate: Int64? = nil
+    var videoCodec: String? = nil
+    var width: Int? = nil
+    var height: Int? = nil
+    var frameRate: Double? = nil
+    var videoBitRate: Int64? = nil
+    var audioCodec: String? = nil
+    var sampleRate: Int? = nil
+    var channels: Int? = nil
+    var audioBitRate: Int64? = nil
 }

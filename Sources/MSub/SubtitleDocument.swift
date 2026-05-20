@@ -213,6 +213,98 @@ private struct SubtitleJSONSegment: Codable {
     var confidence: Double?
 }
 
+struct SubtitleTermFrequency: Identifiable, Equatable {
+    let term: String
+    let count: Int
+
+    var id: String { term }
+}
+
+enum SubtitleTextStats {
+    static func topTerms(in text: String, limit: Int = 8) -> [SubtitleTermFrequency] {
+        var counts: [String: Int] = [:]
+        for token in tokenize(text) where !stopWords.contains(token) {
+            counts[token, default: 0] += 1
+        }
+        return counts
+            .map { SubtitleTermFrequency(term: $0.key, count: $0.value) }
+            .sorted {
+                if $0.count == $1.count {
+                    return $0.term < $1.term
+                }
+                return $0.count > $1.count
+            }
+            .prefix(limit)
+            .map { $0 }
+    }
+
+    private static let stopWords: Set<String> = [
+        "the", "and", "for", "that", "this", "with", "you", "your", "are", "was", "were",
+        "have", "has", "had", "not", "but", "from", "can", "will", "just", "about",
+        "一个", "这个", "那个", "就是", "然后", "因为", "所以", "但是", "如果", "还是",
+        "没有", "不是", "什么", "现在", "一下", "可以", "我们", "你们", "他们", "的话"
+    ]
+
+    private static func tokenize(_ text: String) -> [String] {
+        var tokens: [String] = []
+        var asciiBuffer = ""
+        var hanBuffer = ""
+
+        func flushASCII() {
+            let token = asciiBuffer.lowercased()
+            if token.count > 1 {
+                tokens.append(token)
+            }
+            asciiBuffer = ""
+        }
+
+        func flushHan() {
+            let characters = Array(hanBuffer)
+            if characters.count == 2 {
+                tokens.append(String(characters))
+            } else if characters.count > 2 {
+                for index in 0..<(characters.count - 1) {
+                    tokens.append(String(characters[index...(index + 1)]))
+                }
+            }
+            hanBuffer = ""
+        }
+
+        for scalar in text.unicodeScalars {
+            if isHan(scalar) {
+                flushASCII()
+                hanBuffer.append(String(scalar))
+            } else if isASCIIWord(scalar) {
+                flushHan()
+                asciiBuffer.append(String(scalar))
+            } else {
+                flushASCII()
+                flushHan()
+            }
+        }
+        flushASCII()
+        flushHan()
+
+        return tokens
+    }
+
+    private static func isASCIIWord(_ scalar: Unicode.Scalar) -> Bool {
+        (65...90).contains(Int(scalar.value))
+            || (97...122).contains(Int(scalar.value))
+            || (48...57).contains(Int(scalar.value))
+    }
+
+    private static func isHan(_ scalar: Unicode.Scalar) -> Bool {
+        let value = scalar.value
+        return (0x4E00...0x9FFF).contains(value)
+            || (0x3400...0x4DBF).contains(value)
+            || (0x20000...0x2A6DF).contains(value)
+            || (0x2A700...0x2B73F).contains(value)
+            || (0x2B740...0x2B81F).contains(value)
+            || (0x2B820...0x2CEAF).contains(value)
+    }
+}
+
 extension FileSlot {
     var editableSubtitleText: String {
         if !cues.isEmpty {
@@ -249,6 +341,7 @@ final class PlaybackController: ObservableObject {
     nonisolated(unsafe) private var timeObserverToken: Any?
     private var rateObservation: NSKeyValueObservation?
     private var currentURL: URL?
+    private var playbackEndTime: Double?
 
     init() {
         player.automaticallyWaitsToMinimizeStalling = true
@@ -267,6 +360,7 @@ final class PlaybackController: ObservableObject {
         currentTime = 0
         duration = 0
         hasVideo = false
+        playbackEndTime = nil
 
         let asset = AVURLAsset(url: url)
         let item = AVPlayerItem(asset: asset)
@@ -286,17 +380,29 @@ final class PlaybackController: ObservableObject {
         let target = max(0, seconds.isFinite ? seconds : 0)
         let clamped = duration > 0 ? min(target, duration) : target
         currentTime = clamped
-        if pause { player.pause() }
+        if pause {
+            playbackEndTime = nil
+            player.pause()
+        }
         let time = CMTime(seconds: clamped, preferredTimescale: 600)
         player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
     }
 
     func togglePlayPause() {
         if player.timeControlStatus == .playing {
+            playbackEndTime = nil
             player.pause()
         } else {
+            playbackEndTime = nil
             player.play()
         }
+    }
+
+    func playRange(start: Double, end: Double) {
+        guard end > start else { return }
+        playbackEndTime = end
+        seek(to: start, pause: false)
+        player.play()
     }
 
     private func attachObservers() {
@@ -310,6 +416,9 @@ final class PlaybackController: ObservableObject {
                 guard let self else { return }
                 if seconds.isFinite {
                     self.currentTime = max(0, seconds)
+                }
+                if let endTime = self.playbackEndTime, seconds >= endTime {
+                    self.seek(to: endTime, pause: true)
                 }
             }
         }
@@ -330,6 +439,10 @@ struct SubtitleEditorPanel: View {
     @State private var waveform: [CGFloat] = []
     @State private var isLoadingWaveform = false
     @State private var timelineZoom = 1.0
+    @State private var findText = ""
+    @State private var replacementText = ""
+    @State private var matchCase = false
+    @State private var findStatus = ""
 
     private var duration: Double {
         let cueEnd = slot.cues.map(\.end).max() ?? 0.001
@@ -399,6 +512,15 @@ struct SubtitleEditorPanel: View {
                         Spacer(minLength: 8)
 
                         Button {
+                            playSelectedCue()
+                        } label: {
+                            Image(systemName: "play.rectangle")
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(selectedCueIndex == nil)
+                        .help(Copy.text("editor.playCurrent.help", language: language))
+
+                        Button {
                             playback.togglePlayPause()
                         } label: {
                             Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
@@ -426,6 +548,8 @@ struct SubtitleEditorPanel: View {
                 .onChange(of: maxTimelineZoom) { _, newValue in
                     timelineZoom = min(timelineZoom, newValue)
                 }
+
+                findReplaceBar
 
                 HStack(alignment: .top, spacing: 12) {
                     subtitleBlocks
@@ -487,6 +611,78 @@ struct SubtitleEditorPanel: View {
                 }
             }
         }
+    }
+
+    private var findReplaceBar: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField(Copy.text("editor.find", language: language), text: $findText)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(minWidth: 120)
+                Button {
+                    findNext()
+                } label: {
+                    Label(Copy.text("editor.findNext", language: language), systemImage: "arrow.down")
+                }
+                .disabled(findText.isEmpty)
+                .help(Copy.text("editor.findNext.help", language: language))
+
+                Toggle(Copy.text("editor.matchCase", language: language), isOn: $matchCase)
+                    .toggleStyle(.checkbox)
+                    .font(.caption)
+                    .fixedSize()
+            }
+
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .foregroundStyle(.secondary)
+                TextField(Copy.text("editor.replace", language: language), text: $replacementText)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(minWidth: 120)
+                Button {
+                    replaceCurrent()
+                } label: {
+                    Label(Copy.text("editor.replaceCurrent", language: language), systemImage: "arrow.right.to.line")
+                }
+                .disabled(findText.isEmpty)
+                .help(Copy.text("editor.replaceCurrent.help", language: language))
+
+                Button {
+                    replaceAll()
+                } label: {
+                    Label(Copy.text("editor.replaceAll", language: language), systemImage: "text.badge.checkmark")
+                }
+                .disabled(findText.isEmpty)
+                .help(Copy.text("editor.replaceAll.help", language: language))
+
+                Spacer(minLength: 8)
+                Text(findStatusText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .controlSize(.small)
+        .padding(10)
+        .background(.quinary, in: RoundedRectangle(cornerRadius: 10))
+        .onChange(of: findText) { _, _ in
+            findStatus = ""
+        }
+        .onChange(of: matchCase) { _, _ in
+            findStatus = ""
+        }
+    }
+
+    private var findStatusText: String {
+        if !findStatus.isEmpty {
+            return findStatus
+        }
+        guard !findText.isEmpty else {
+            return Copy.text("editor.findHint", language: language)
+        }
+        return String(format: Copy.text("editor.findCount", language: language), occurrenceCount())
     }
 
     @ViewBuilder
@@ -615,6 +811,104 @@ struct SubtitleEditorPanel: View {
         slot.cues = SubtitleDocument.normalize(slot.cues)
         slot.selectedCueID = cue.id
     }
+
+    private func findNext() {
+        guard !findText.isEmpty, !slot.cues.isEmpty else { return }
+        let startIndex = selectedCueIndex.map { $0 + 1 } ?? 0
+        for offset in 0..<slot.cues.count {
+            let index = (startIndex + offset) % slot.cues.count
+            if containsMatch(slot.cues[index].text) {
+                slot.selectedCueID = slot.cues[index].id
+                findStatus = String(format: Copy.text("editor.findSelected", language: language), slot.cues[index].index)
+                return
+            }
+        }
+        findStatus = Copy.text("editor.findNoMatch", language: language)
+        NSSound.beep()
+    }
+
+    private func replaceCurrent() {
+        guard !findText.isEmpty else { return }
+        guard let selectedCueIndex else {
+            findNext()
+            return
+        }
+        if replaceFirst(in: &slot.cues[selectedCueIndex].text) {
+            findStatus = String(format: Copy.text("editor.replaceOneCount", language: language), 1)
+            return
+        }
+        findNext()
+    }
+
+    private func replaceAll() {
+        guard !findText.isEmpty else { return }
+        var total = 0
+        for index in slot.cues.indices {
+            total += replaceAllMatches(in: &slot.cues[index].text)
+        }
+        findStatus = String(format: Copy.text("editor.replaceAllCount", language: language), total)
+        if total == 0 {
+            NSSound.beep()
+        }
+    }
+
+    private func occurrenceCount() -> Int {
+        guard !findText.isEmpty else { return 0 }
+        return slot.cues.reduce(0) { count, cue in
+            count + ranges(in: cue.text).count
+        }
+    }
+
+    private func containsMatch(_ text: String) -> Bool {
+        text.range(of: findText, options: searchOptions) != nil
+    }
+
+    private func replaceFirst(in text: inout String) -> Bool {
+        guard let range = text.range(of: findText, options: searchOptions) else { return false }
+        text.replaceSubrange(range, with: replacementText)
+        return true
+    }
+
+    private func replaceAllMatches(in text: inout String) -> Int {
+        var count = 0
+        var searchStartOffset = 0
+        while searchStartOffset <= text.count {
+            let start = text.index(text.startIndex, offsetBy: searchStartOffset)
+            guard let range = text.range(
+                of: findText,
+                options: searchOptions,
+                range: start..<text.endIndex
+            ) else {
+                break
+            }
+            let offset = text.distance(from: text.startIndex, to: range.lowerBound)
+            text.replaceSubrange(range, with: replacementText)
+            count += 1
+            searchStartOffset = min(text.count, offset + replacementText.count)
+        }
+        return count
+    }
+
+    private func ranges(in text: String) -> [Range<String.Index>] {
+        guard !findText.isEmpty else { return [] }
+        var ranges: [Range<String.Index>] = []
+        var searchRange = text.startIndex..<text.endIndex
+        while let range = text.range(of: findText, options: searchOptions, range: searchRange) {
+            ranges.append(range)
+            searchRange = range.upperBound..<text.endIndex
+        }
+        return ranges
+    }
+
+    private var searchOptions: String.CompareOptions {
+        matchCase ? [] : [.caseInsensitive, .diacriticInsensitive]
+    }
+
+    private func playSelectedCue() {
+        guard let selectedCueIndex else { return }
+        let cue = slot.cues[selectedCueIndex]
+        playback.playRange(start: cue.start, end: cue.end)
+    }
 }
 
 private struct ZoomableTimeline: View {
@@ -723,10 +1017,6 @@ private struct WaveformTimelineEditor: View {
             ZStack(alignment: .topLeading) {
                 background
                     .contentShape(Rectangle())
-                    .onTapGesture(coordinateSpace: .local) { location in
-                        let seconds = clamp(Double(location.x / max(width, 1)) * duration, 0, duration)
-                        onSeek(seconds)
-                    }
 
                 WaveformShape(samples: waveform)
                     .foregroundStyle(Color.accentColor.opacity(0.38))
@@ -745,6 +1035,13 @@ private struct WaveformTimelineEditor: View {
                     playbackCursor(width: width, height: height)
                 }
             }
+            .contentShape(Rectangle())
+            .simultaneousGesture(
+                SpatialTapGesture(coordinateSpace: .local)
+                    .onEnded { value in
+                        handleTimelineTap(at: value.location, width: width)
+                    }
+            )
             .overlay(alignment: .bottomLeading) {
                 Text(Copy.text("editor.timelineHelp", language: language))
                     .font(.caption2)
@@ -891,6 +1188,21 @@ private struct WaveformTimelineEditor: View {
         let times = "\(SubtitleDocument.displayTime(cue.start)) → \(SubtitleDocument.displayTime(cue.end))"
         let preview = cue.text.replacingOccurrences(of: "\n", with: " ")
         return "#\(cue.index)  \(times)\n\(preview)"
+    }
+
+    private func handleTimelineTap(at location: CGPoint, width: CGFloat) {
+        let seconds = clamp(Double(location.x / max(width, 1)) * duration, 0, duration)
+        if let cue = cue(at: seconds) {
+            selectedCueID = cue.id
+        } else {
+            onSeek(seconds)
+        }
+    }
+
+    private func cue(at seconds: Double) -> SubtitleCue? {
+        cues.last { cue in
+            seconds >= cue.start && seconds <= cue.end
+        }
     }
 
     private func xPosition(_ seconds: Double, width: CGFloat) -> CGFloat {

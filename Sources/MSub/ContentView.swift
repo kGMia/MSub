@@ -8,6 +8,7 @@ struct ContentView: View {
     @EnvironmentObject private var api: APIClient
     @EnvironmentObject private var backend: BackendService
     @EnvironmentObject private var settings: TranscriptionSettings
+    @EnvironmentObject private var recentFiles: RecentFilesStore
 
     @AppStorage("huz.uiLanguage") private var languageRaw = AppLanguage.zh.rawValue
 
@@ -123,6 +124,13 @@ struct ContentView: View {
         } message: {
             Text(errorMessage ?? "")
         }
+        .onReceive(NotificationCenter.default.publisher(for: .msubOpenFilesRequested)) { _ in
+            chooseFiles()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .msubOpenRecentFileRequested)) { notification in
+            guard let url = notification.object as? URL else { return }
+            addFiles([url])
+        }
     }
 
     // MARK: - Detail column
@@ -130,7 +138,24 @@ struct ContentView: View {
     private var detailColumn: some View {
         VStack(spacing: 0) {
             ScrollView {
-                VStack(spacing: 16) {
+                VStack(spacing: 12) {
+                    compactWorkArea
+                    detailTabContent
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+        }
+        .frame(minWidth: 520)
+        .background(.background)
+    }
+
+    @ViewBuilder
+    private var compactWorkArea: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(spacing: 10) {
                     fileDropBox
                     if files.count > 0 {
                         fileChipsRow
@@ -138,16 +163,136 @@ struct ContentView: View {
                     if let slot = activeSlot, isPreviewable(slot.url) {
                         MediaPreviewCard(url: slot.url, title: t("preview.title"), playback: playback)
                     }
-                    statusCard
-                    detailTabContent
                 }
-                .padding(16)
-                .frame(maxWidth: .infinity)
+                .frame(width: 320, alignment: .topLeading)
+
+                VStack(spacing: 10) {
+                    statusCard
+                    if let slot = activeSlot {
+                        mediaInfoCard(slot)
+                    }
+                }
+                .frame(minWidth: 270, maxWidth: .infinity, alignment: .top)
             }
-            .scrollBounceBehavior(.basedOnSize)
+
+            VStack(spacing: 12) {
+                fileDropBox
+                if files.count > 0 {
+                    fileChipsRow
+                }
+                if let slot = activeSlot, isPreviewable(slot.url) {
+                    MediaPreviewCard(url: slot.url, title: t("preview.title"), playback: playback)
+                }
+                statusCard
+            }
         }
-        .frame(minWidth: 520)
-        .background(.background)
+    }
+
+    private func mediaInfoCard(_ slot: FileSlot) -> some View {
+        let terms = SubtitleTextStats.topTerms(
+            in: slot.cues.map(\.text).joined(separator: " "),
+            limit: 8
+        )
+
+        return VStack(alignment: .leading, spacing: 8) {
+            Label(t("media.info"), systemImage: "info.circle")
+                .font(.subheadline.weight(.semibold))
+
+            Divider()
+
+            compactInfoRow(t("media.name"), value: slot.url.lastPathComponent)
+            compactInfoRow(t("media.duration"), value: mediaDurationText(slot))
+            compactInfoRow(t("media.size"), value: fileSizeText(slot.url))
+            compactInfoRow(t("media.resolution"), value: resolutionText(slot.mediaInfo))
+            compactInfoRow(t("media.frameRate"), value: frameRateText(slot.mediaInfo?.frameRate))
+            compactInfoRow(t("media.videoCodec"), value: slot.mediaInfo?.videoCodec ?? t("media.noVideo"))
+            compactInfoRow(t("media.audio"), value: audioText(slot.mediaInfo))
+            compactInfoRow(t("media.bitRate"), value: bitRateText(slot.mediaInfo?.bitRate))
+
+            if !terms.isEmpty {
+                Divider()
+                    .padding(.vertical, 2)
+                Text(t("media.frequentTerms"))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                FlowLayout(spacing: 6, rowSpacing: 6) {
+                    ForEach(terms) { term in
+                        Text("\(term.term) \(term.count)")
+                            .font(.caption2.monospacedDigit())
+                            .lineLimit(1)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 4)
+                            .background(.quinary, in: Capsule())
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func compactInfoRow(_ title: String, value: String) -> some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            Text(value)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+    }
+
+    private func fileSizeText(_ url: URL) -> String {
+        guard let size = try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber else {
+            return "-"
+        }
+        return ByteCountFormatter.string(fromByteCount: size.int64Value, countStyle: .file)
+    }
+
+    private func mediaDurationText(_ slot: FileSlot) -> String {
+        let duration = slot.mediaInfo?.duration ?? slot.duration
+        guard duration.isFinite, duration > 0 else { return "-" }
+        return SubtitleDocument.displayTime(duration)
+    }
+
+    private func resolutionText(_ info: MediaInfo?) -> String {
+        guard let width = info?.width, let height = info?.height, width > 0, height > 0 else {
+            return "-"
+        }
+        return "\(width) x \(height)"
+    }
+
+    private func frameRateText(_ value: Double?) -> String {
+        guard let value, value.isFinite, value > 0 else { return "-" }
+        return String(format: "%.2f fps", value)
+    }
+
+    private func audioText(_ info: MediaInfo?) -> String {
+        guard let info else { return "-" }
+        var parts: [String] = []
+        if let audioCodec = info.audioCodec, !audioCodec.isEmpty {
+            parts.append(audioCodec)
+        }
+        if let sampleRate = info.sampleRate, sampleRate > 0 {
+            parts.append(String(format: "%.1f kHz", Double(sampleRate) / 1000.0))
+        }
+        if let channels = info.channels, channels > 0 {
+            parts.append(String(format: t("media.channels"), channels))
+        }
+        return parts.isEmpty ? "-" : parts.joined(separator: " · ")
+    }
+
+    private func bitRateText(_ value: Int64?) -> String {
+        guard let value, value > 0 else { return "-" }
+        if value >= 1_000_000 {
+            return String(format: "%.1f Mbps", Double(value) / 1_000_000.0)
+        }
+        return String(format: "%.0f kbps", Double(value) / 1000.0)
     }
 
     @ViewBuilder
@@ -760,13 +905,40 @@ struct ContentView: View {
     }
 
     private func addFiles(_ urls: [URL]) {
+        var selectedIndex: Int?
         for url in urls {
             let normalized = url.standardizedFileURL
-            if files.contains(where: { $0.url.standardizedFileURL == normalized }) { continue }
-            files.append(FileSlot(url: url))
+            recentFiles.add(normalized)
+            if let existingIndex = files.firstIndex(where: { $0.url.standardizedFileURL == normalized }) {
+                selectedIndex = existingIndex
+                if files[existingIndex].mediaInfo == nil {
+                    loadMediaInfo(for: normalized, slotID: files[existingIndex].id)
+                }
+                continue
+            }
+            let slot = FileSlot(url: normalized)
+            files.append(slot)
+            selectedIndex = files.count - 1
+            loadMediaInfo(for: normalized, slotID: slot.id)
         }
-        if files.indices.contains(activeIndex) == false {
+        if let selectedIndex {
+            activeIndex = selectedIndex
+        } else if files.indices.contains(activeIndex) == false {
             activeIndex = files.isEmpty ? 0 : files.count - 1
+        }
+    }
+
+    private func loadMediaInfo(for url: URL, slotID: UUID) {
+        Task {
+            let info = await LocalMediaInfoLoader.info(for: url)
+            guard let info else { return }
+            await MainActor.run {
+                guard let index = files.firstIndex(where: { $0.id == slotID }) else { return }
+                files[index].mediaInfo = info
+                if files[index].duration <= 0, let duration = info.duration {
+                    files[index].duration = duration
+                }
+            }
         }
     }
 
@@ -838,6 +1010,11 @@ struct ContentView: View {
     }
 
     private func cancelProcessing() {
+        for slot in files {
+            if let jobID = slot.jobID {
+                Task { try? await api.cancelJob(id: jobID) }
+            }
+        }
         processingTask?.cancel()
         processingTask = nil
         for index in files.indices {
@@ -867,6 +1044,7 @@ struct ContentView: View {
             let payload = try await api.preview(fileURL: url, settings: settings)
             update(at: index) {
                 $0.duration = payload.duration
+                $0.mediaInfo = payload.mediaInfo ?? $0.mediaInfo
                 $0.segments = payload.segments
                 $0.statusKey = "status.previewReady"
                 $0.statusDetail = "\(payload.count) \(t("segments.count"))"
@@ -960,6 +1138,15 @@ struct ContentView: View {
                     $0.statusKey = "status.done"
                     $0.statusDetail = "\(job.cueCount ?? 0) cues"
                     $0.processingState = .done
+                }
+                return
+            }
+            if job.status == "cancelled" {
+                update(at: fileIndex) {
+                    $0.processingState = .cancelled
+                    $0.statusKey = "status.cancelled"
+                    $0.statusDetail = ""
+                    $0.progress = 0
                 }
                 return
             }
@@ -1162,6 +1349,7 @@ struct FileSlot: Identifiable {
     var segments: [SubtitleSegment] = []
     var cues: [SubtitleCue] = []
     var selectedCueID: SubtitleCue.ID?
+    var mediaInfo: MediaInfo?
     var duration: Double = 0
     var previewText: String = ""
     var jobID: String?
@@ -1211,6 +1399,131 @@ private enum ConnectionState {
         case .disconnected:
             Copy.text("backend.disconnected", language: language)
         }
+    }
+}
+
+private struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+    var rowSpacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .greatestFiniteMagnitude
+        var cursorX: CGFloat = 0
+        var cursorY: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        var usedWidth: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if cursorX > 0, cursorX + spacing + size.width > maxWidth {
+                cursorY += rowHeight + rowSpacing
+                cursorX = 0
+                rowHeight = 0
+            }
+            if cursorX > 0 {
+                cursorX += spacing
+            }
+            cursorX += size.width
+            rowHeight = max(rowHeight, size.height)
+            usedWidth = max(usedWidth, cursorX)
+        }
+
+        return CGSize(width: proposal.width ?? usedWidth, height: cursorY + rowHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let maxWidth = bounds.width
+        var cursorX: CGFloat = 0
+        var cursorY: CGFloat = 0
+        var rowHeight: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if cursorX > 0, cursorX + spacing + size.width > maxWidth {
+                cursorY += rowHeight + rowSpacing
+                cursorX = 0
+                rowHeight = 0
+            }
+            if cursorX > 0 {
+                cursorX += spacing
+            }
+            subview.place(
+                at: CGPoint(x: bounds.minX + cursorX, y: bounds.minY + cursorY),
+                proposal: ProposedViewSize(size)
+            )
+            cursorX += size.width
+            rowHeight = max(rowHeight, size.height)
+        }
+    }
+}
+
+private enum LocalMediaInfoLoader {
+    static func info(for url: URL) async -> MediaInfo? {
+        await Task.detached(priority: .utility) {
+            await loadInfo(for: url)
+        }
+        .value
+    }
+
+    private static func loadInfo(for url: URL) async -> MediaInfo? {
+        let asset = AVURLAsset(url: url)
+        let durationTime = (try? await asset.load(.duration)) ?? .zero
+        let duration = durationTime.seconds.isFinite && durationTime.seconds > 0 ? durationTime.seconds : nil
+
+        var info = MediaInfo(duration: duration)
+        if let duration, let size = fileSize(url), duration > 0 {
+            info.bitRate = Int64((Double(size) * 8.0 / duration).rounded())
+        }
+
+        if let videoTrack = (try? await asset.loadTracks(withMediaType: .video))?.first {
+            let naturalSize = (try? await videoTrack.load(.naturalSize)) ?? .zero
+            let transform = (try? await videoTrack.load(.preferredTransform)) ?? .identity
+            let transformedSize = naturalSize.applying(transform)
+            let width = Int(abs(transformedSize.width).rounded())
+            let height = Int(abs(transformedSize.height).rounded())
+            if width > 0, height > 0 {
+                info.width = width
+                info.height = height
+            }
+            let frameRate = (try? await videoTrack.load(.nominalFrameRate)) ?? 0
+            if frameRate > 0 {
+                info.frameRate = Double(frameRate)
+            }
+            if let description = ((try? await videoTrack.load(.formatDescriptions)) ?? []).first {
+                info.videoCodec = codecName(description)
+            }
+        }
+
+        if let audioTrack = (try? await asset.loadTracks(withMediaType: .audio))?.first,
+           let description = ((try? await audioTrack.load(.formatDescriptions)) ?? []).first {
+            info.audioCodec = codecName(description)
+            if let streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(description)?.pointee {
+                if streamDescription.mSampleRate > 0 {
+                    info.sampleRate = Int(streamDescription.mSampleRate.rounded())
+                }
+                if streamDescription.mChannelsPerFrame > 0 {
+                    info.channels = Int(streamDescription.mChannelsPerFrame)
+                }
+            }
+        }
+
+        return info
+    }
+
+    private static func fileSize(_ url: URL) -> Int64? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value
+    }
+
+    private static func codecName(_ description: CMFormatDescription) -> String {
+        let subtype = CMFormatDescriptionGetMediaSubType(description)
+        let bytes = [
+            UInt8((subtype >> 24) & 0xff),
+            UInt8((subtype >> 16) & 0xff),
+            UInt8((subtype >> 8) & 0xff),
+            UInt8(subtype & 0xff)
+        ]
+        return String(bytes: bytes, encoding: .macOSRoman)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "\(subtype)"
     }
 }
 
@@ -1282,6 +1595,47 @@ struct TimelineView: View {
     }
 }
 
+extension Notification.Name {
+    static let msubOpenFilesRequested = Notification.Name("MSubOpenFilesRequested")
+    static let msubOpenRecentFileRequested = Notification.Name("MSubOpenRecentFileRequested")
+}
+
+@MainActor
+final class RecentFilesStore: ObservableObject {
+    @Published private(set) var urls: [URL] = []
+
+    private let key = "msub.recentFiles"
+    private let limit = 12
+
+    init() {
+        load()
+    }
+
+    func add(_ url: URL) {
+        let normalized = url.standardizedFileURL
+        urls.removeAll { $0.standardizedFileURL == normalized }
+        urls.insert(normalized, at: 0)
+        if urls.count > limit {
+            urls = Array(urls.prefix(limit))
+        }
+        save()
+    }
+
+    func clear() {
+        urls = []
+        save()
+    }
+
+    private func load() {
+        let paths = UserDefaults.standard.stringArray(forKey: key) ?? []
+        urls = paths.map { URL(fileURLWithPath: $0).standardizedFileURL }
+    }
+
+    private func save() {
+        UserDefaults.standard.set(urls.map(\.path), forKey: key)
+    }
+}
+
 // MARK: - Media preview
 
 private struct MediaPreviewCard: View {
@@ -1290,7 +1644,7 @@ private struct MediaPreviewCard: View {
     @ObservedObject var playback: PlaybackController
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 Image(systemName: playback.hasVideo ? "play.rectangle" : "waveform")
                     .foregroundStyle(.teal)
@@ -1305,10 +1659,10 @@ private struct MediaPreviewCard: View {
             }
 
             VideoPlayer(player: playback.player)
-                .frame(height: playback.hasVideo ? 260 : 80)
+                .frame(height: playback.hasVideo ? 220 : 72)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
         }
-        .padding(14)
+        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
         .task(id: url) {
