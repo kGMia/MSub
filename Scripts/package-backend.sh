@@ -24,11 +24,13 @@ cp "$REPO_ROOT/uv.lock" "$DEST/uv.lock"
 
 mkdir -p "$DEST/output"
 
-if [ "${HUZ_INCLUDE_MODEL:-0}" = "1" ]; then
+INCLUDE_MODEL="${MSUB_INCLUDE_MODEL:-${HUZ_INCLUDE_MODEL:-0}}"
+
+if [ "$INCLUDE_MODEL" = "1" ]; then
     mkdir -p "$DEST/models"
     rsync -a --delete \
         "$REPO_ROOT/models/FireRedASR2-AED-mlx" \
         "$DEST/models/"
 else
-    echo "Skipping model copy. Set HUZ_INCLUDE_MODEL=1 to embed local weights in the app bundle."
+    echo "Skipping model copy. Set MSUB_INCLUDE_MODEL=1 to embed local weights in the app bundle."
 fi

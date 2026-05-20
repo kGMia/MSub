@@ -21,6 +21,7 @@ struct MSubApp: App {
                 .environmentObject(backend)
                 .environmentObject(settings)
                 .environment(\.locale, language.locale)
+                .background(MenuLocalizationBridge(language: language))
                 .frame(minWidth: 900, minHeight: 640)
         }
         .commands {
@@ -31,9 +32,104 @@ struct MSubApp: App {
             PreferencesView()
                 .environmentObject(settings)
                 .environment(\.locale, language.locale)
+                .background(MenuLocalizationBridge(language: language))
                 .frame(width: 420, height: 280)
         }
         .windowResizability(.contentSize)
+    }
+}
+
+private struct MenuLocalizationBridge: View {
+    let language: AppLanguage
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .onAppear {
+                MenuLocalizer.apply(language: language)
+            }
+            .onChange(of: language) { _, newValue in
+                MenuLocalizer.apply(language: newValue)
+            }
+    }
+}
+
+@MainActor
+private enum MenuLocalizer {
+    static func apply(language: AppLanguage) {
+        DispatchQueue.main.async {
+            updateMainMenu(language: language)
+        }
+    }
+
+    private static func updateMainMenu(language: AppLanguage) {
+        guard let mainMenu = NSApp.mainMenu else { return }
+        let appName = Copy.text("app.title", language: language)
+
+        setTopMenu(mainMenu, index: 1, title: text("menu.file", language))
+        setTopMenu(mainMenu, index: 2, title: text("menu.edit", language))
+        setTopMenu(mainMenu, index: 3, title: text("menu.view", language))
+        setTopMenu(mainMenu, index: 4, title: text("menu.window", language))
+        setTopMenu(mainMenu, index: 5, title: text("menu.help", language))
+
+        setAction("orderFrontStandardAboutPanel:", title: String(format: text("menu.aboutApp", language), appName), in: mainMenu)
+        setAction("showSettingsWindow:", title: text("menu.settings", language), in: mainMenu)
+        setSubmenu(NSApp.servicesMenu, title: text("menu.services", language), in: mainMenu)
+        setAction("hide:", title: String(format: text("menu.hideApp", language), appName), in: mainMenu)
+        setAction("hideOtherApplications:", title: text("menu.hideOthers", language), in: mainMenu)
+        setAction("unhideAllApplications:", title: text("menu.showAll", language), in: mainMenu)
+        setAction("terminate:", title: String(format: text("menu.quitApp", language), appName), in: mainMenu)
+
+        setAction("performClose:", title: text("menu.closeWindow", language), in: mainMenu)
+        setAction("undo:", title: text("menu.undo", language), in: mainMenu)
+        setAction("redo:", title: text("menu.redo", language), in: mainMenu)
+        setAction("cut:", title: text("menu.cut", language), in: mainMenu)
+        setAction("copy:", title: text("menu.copy", language), in: mainMenu)
+        setAction("paste:", title: text("menu.paste", language), in: mainMenu)
+        setAction("delete:", title: text("menu.delete", language), in: mainMenu)
+        setAction("selectAll:", title: text("menu.selectAll", language), in: mainMenu)
+        setAction("toggleSidebar:", title: text("menu.toggleSidebar", language), in: mainMenu)
+        setAction("toggleFullScreen:", title: text("menu.fullScreen", language), in: mainMenu)
+        setAction("performMiniaturize:", title: text("menu.minimize", language), in: mainMenu)
+        setAction("performZoom:", title: text("menu.zoom", language), in: mainMenu)
+        setAction("arrangeInFront:", title: text("menu.bringAllToFront", language), in: mainMenu)
+        setAction("showHelp:", title: String(format: text("menu.helpApp", language), appName), in: mainMenu)
+    }
+
+    private static func text(_ key: String, _ language: AppLanguage) -> String {
+        Copy.text(key, language: language)
+    }
+
+    private static func setTopMenu(_ menu: NSMenu, index: Int, title: String) {
+        guard menu.items.indices.contains(index) else { return }
+        let item = menu.items[index]
+        item.title = title
+        item.submenu?.title = title
+    }
+
+    private static func setAction(_ selectorName: String, title: String, in menu: NSMenu) {
+        let selector = NSSelectorFromString(selectorName)
+        for item in menu.items {
+            if item.action == selector {
+                item.title = title
+            }
+            if let submenu = item.submenu {
+                setAction(selectorName, title: title, in: submenu)
+            }
+        }
+    }
+
+    private static func setSubmenu(_ submenu: NSMenu?, title: String, in menu: NSMenu) {
+        guard let submenu else { return }
+        submenu.title = title
+        for item in menu.items {
+            if item.submenu === submenu {
+                item.title = title
+            }
+            if let nested = item.submenu {
+                setSubmenu(submenu, title: title, in: nested)
+            }
+        }
     }
 }
 

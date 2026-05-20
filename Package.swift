@@ -11,6 +11,12 @@ let package = Package(
         .executable(name: "MSub", targets: ["MSub"])
     ],
     targets: [
-        .executableTarget(name: "MSub", path: "Sources/HuzSubtitleMac")
+        .executableTarget(
+            name: "MSub",
+            path: "Sources/MSub",
+            resources: [
+                .process("Localizable.xcstrings")
+            ]
+        )
     ]
 )

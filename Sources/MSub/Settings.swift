@@ -16,6 +16,10 @@ final class TranscriptionSettings: ObservableObject {
     @Published var beamSize = 3
     @Published var minConfidence = 0.0
     @Published var lineChars = 18
+    @Published var softmaxSmoothing = 1.25
+    @Published var lengthPenalty = 0.6
+    @Published var eosPenalty = 1.0
+    @Published var decodeMaxLen = 0
 
     func apply(config: AppConfig) {
         model = config.defaultModel
@@ -33,6 +37,10 @@ final class TranscriptionSettings: ObservableObject {
         beamSize = 3
         minConfidence = 0.0
         lineChars = 18
+        softmaxSmoothing = 1.25
+        lengthPenalty = 0.6
+        eosPenalty = 1.0
+        decodeMaxLen = 0
     }
 
     func applyPreset(_ preset: RecognitionPreset) {
@@ -114,7 +122,11 @@ final class TranscriptionSettings: ObservableObject {
                 ("fmt", format.rawValue),
                 ("beam_size", "\(beamSize)"),
                 ("min_confidence", "\(minConfidence)"),
-                ("max_chars_per_line", "\(lineChars)")
+                ("max_chars_per_line", "\(lineChars)"),
+                ("softmax_smoothing", "\(softmaxSmoothing)"),
+                ("length_penalty", "\(lengthPenalty)"),
+                ("eos_penalty", "\(eosPenalty)"),
+                ("decode_max_len", "\(decodeMaxLen)")
             ])
         }
 

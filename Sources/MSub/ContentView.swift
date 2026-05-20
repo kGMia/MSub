@@ -11,6 +11,8 @@ struct ContentView: View {
 
     @AppStorage("huz.uiLanguage") private var languageRaw = AppLanguage.zh.rawValue
 
+    @StateObject private var playback = PlaybackController()
+
     @State private var files: [FileSlot] = []
     @State private var activeIndex: Int = 0
     @State private var isProcessing = false
@@ -52,7 +54,7 @@ struct ContentView: View {
     }
 
     private var canSaveAll: Bool {
-        files.filter { $0.jobID != nil && !$0.previewText.isEmpty }.count > 1 && !isSaving
+        files.contains { $0.hasEditableSubtitle } && !isSaving
     }
 
     private var aggregateProgress: Double {
@@ -108,7 +110,8 @@ struct ContentView: View {
                 }
                 .disabled(!canRun)
             }
-            ToolbarItem(placement: .primaryAction) {
+            ToolbarSpacer(.fixed, placement: .primaryAction)
+            ToolbarItem(placement: .confirmationAction) {
                 transcribeButton
             }
         }
@@ -133,7 +136,7 @@ struct ContentView: View {
                         fileChipsRow
                     }
                     if let slot = activeSlot, isPreviewable(slot.url) {
-                        MediaPreviewCard(url: slot.url, title: t("preview.title"))
+                        MediaPreviewCard(url: slot.url, title: t("preview.title"), playback: playback)
                     }
                     statusCard
                     detailTabContent
@@ -188,7 +191,6 @@ struct ContentView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
-        .glassEffect(.regular, in: Capsule())
     }
 
     private var statusCard: some View {
@@ -350,6 +352,18 @@ struct ContentView: View {
                 stepperField(t("settings.beam"), value: $settings.beamSize, in: 1...8, help: t("help.beam"))
                 numericField(t("settings.confidence"), value: $settings.minConfidence, suffix: "", help: t("help.confidence"))
                 stepperField(t("settings.lineChars"), value: $settings.lineChars, in: 0...80, help: t("help.lineChars"))
+
+                DisclosureGroup(t("settings.decoding")) {
+                    numericField(t("settings.softmaxSmoothing"), value: $settings.softmaxSmoothing, suffix: "", help: t("help.softmaxSmoothing"))
+                    numericField(t("settings.lengthPenalty"), value: $settings.lengthPenalty, suffix: "", help: t("help.lengthPenalty"))
+                    numericField(t("settings.eosPenalty"), value: $settings.eosPenalty, suffix: "", help: t("help.eosPenalty"))
+                    stepperField(t("settings.decodeMaxLen"), value: $settings.decodeMaxLen, in: 0...512, help: t("help.decodeMaxLen"))
+
+                    Text(t("help.unsupportedDecoding"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
         .formStyle(.grouped)
@@ -568,8 +582,7 @@ struct ContentView: View {
     // MARK: - Output panel
 
     private var outputPanel: some View {
-        let previewText = activeSlot?.previewText ?? ""
-        return VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text(t("output.title"))
                     .font(.headline)
@@ -579,7 +592,7 @@ struct ContentView: View {
                 } label: {
                     Label(t("action.copy"), systemImage: "doc.on.doc")
                 }
-                .disabled(previewText.isEmpty)
+                .disabled(activeSlot?.hasEditableSubtitle != true)
 
                 Button {
                     Task { await saveOutput() }
@@ -587,29 +600,27 @@ struct ContentView: View {
                     Label(t("action.save"), systemImage: "square.and.arrow.down")
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(activeSlot?.jobID == nil || previewText.isEmpty || isSaving)
+                .disabled(activeSlot?.hasEditableSubtitle != true || isSaving)
 
-                if files.count > 1 {
-                    Button {
-                        Task { await saveAllOutputs() }
-                    } label: {
-                        Label(t("action.saveAll"), systemImage: "square.and.arrow.down.on.square")
-                    }
-                    .disabled(!canSaveAll)
+                Button {
+                    Task { await saveAllOutputs() }
+                } label: {
+                    Label(t("action.saveAll"), systemImage: "square.and.arrow.down.on.square")
                 }
+                .disabled(!canSaveAll)
+                .help(t("help.saveAll"))
             }
 
-            ScrollView {
-                Text(previewText.isEmpty ? t("output.placeholder") : previewText)
-                    .font(.system(.body, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .foregroundStyle(previewText.isEmpty ? .secondary : .primary)
-                    .textSelection(.enabled)
-                    .padding(12)
+            if files.indices.contains(activeIndex) {
+                SubtitleEditorPanel(slot: $files[activeIndex], language: language, playback: playback)
+            } else {
+                ContentUnavailableView(
+                    t("output.placeholder"),
+                    systemImage: "captions.bubble",
+                    description: Text(t("input.choose"))
+                )
+                .frame(maxWidth: .infinity, minHeight: 300)
             }
-            .frame(minHeight: 260, maxHeight: 520)
-            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(.quaternary))
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -635,11 +646,7 @@ struct ContentView: View {
 
     private func numericField(_ title: String, value: Binding<Double>, suffix: String, help: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .fixedSize(horizontal: false, vertical: true)
+            parameterLabel(title, help: help)
             HStack(spacing: 6) {
                 TextField(title, value: value, format: .number.precision(.fractionLength(2)))
                     .textFieldStyle(.roundedBorder)
@@ -654,16 +661,12 @@ struct ContentView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .help(help)
     }
 
     private func stepperField(_ title: String, value: Binding<Int>, in range: ClosedRange<Int>, help: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(title)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                parameterLabel(title, help: help)
                 Spacer()
                 Text("\(value.wrappedValue)")
                     .font(.caption.monospacedDigit().bold())
@@ -673,21 +676,28 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .help(help)
     }
 
     private func stackedField<Content: View>(_ title: String, help: String?, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 4) {
+            parameterLabel(title, help: help)
+            content()
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func parameterLabel(_ title: String, help: String?) -> some View {
+        HStack(spacing: 4) {
             Text(title)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .fixedSize(horizontal: false, vertical: true)
-            content()
-                .frame(maxWidth: .infinity, alignment: .leading)
+            if let help, !help.isEmpty {
+                ParameterHelpIcon(help: help)
+            }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .help(help ?? "")
     }
 
     private var transcribeButton: some View {
@@ -783,6 +793,7 @@ struct ContentView: View {
         }
 
         backend.start()
+        api.baseURL = backend.baseURL
         try? await Task.sleep(for: .seconds(1))
         await loadConfig()
     }
@@ -879,6 +890,8 @@ struct ContentView: View {
         update(at: index) {
             $0.processingState = .transcribing
             $0.previewText = ""
+            $0.cues = []
+            $0.selectedCueID = nil
             $0.jobID = nil
             $0.lastOutputPath = nil
             $0.outputFormat = settings.format
@@ -935,6 +948,13 @@ struct ContentView: View {
             }
 
             if job.status == "done" {
+                if files.indices.contains(fileIndex) {
+                    let format = files[fileIndex].outputFormat
+                    if let output = try? await api.fetchOutput(jobID: jobID),
+                       let text = String(data: output.data, encoding: .utf8) {
+                        installSubtitleText(text, at: fileIndex, format: format)
+                    }
+                }
                 update(at: fileIndex) {
                     $0.progress = 1
                     $0.statusKey = "status.done"
@@ -953,7 +973,7 @@ struct ContentView: View {
     // MARK: - Save / copy
 
     private func saveOutput() async {
-        guard let slot = activeSlot, let jobID = slot.jobID else { return }
+        guard let slot = activeSlot, slot.hasEditableSubtitle else { return }
         isSaving = true
         defer { isSaving = false }
         do {
@@ -961,12 +981,11 @@ struct ContentView: View {
                 $0.statusKey = "status.saving"
                 $0.statusDetail = ""
             }
-            let output = try await api.fetchOutput(jobID: jobID)
             let panel = NSSavePanel()
-            panel.nameFieldStringValue = suggestedOutputFilename(for: slot, fallback: output.filename)
+            panel.nameFieldStringValue = suggestedOutputFilename(for: slot, fallback: "subtitle.\(slot.outputFormat.rawValue)")
             panel.allowedContentTypes = [contentType(for: slot.outputFormat)]
             if panel.runModal() == .OK, let url = panel.url {
-                try output.data.write(to: url)
+                try subtitleData(for: slot).write(to: url)
                 update(at: activeIndex) {
                     $0.statusKey = "status.saved"
                     $0.statusDetail = url.lastPathComponent
@@ -979,35 +998,24 @@ struct ContentView: View {
 
     private func saveAllOutputs() async {
         let targets = files.enumerated().filter { _, slot in
-            slot.jobID != nil && !slot.previewText.isEmpty
+            slot.hasEditableSubtitle
         }
         guard !targets.isEmpty else { return }
-
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.prompt = t("action.saveAll")
-        guard panel.runModal() == .OK, let directory = panel.url else { return }
 
         isSaving = true
         defer { isSaving = false }
 
         var failures: [String] = []
         for (index, slot) in targets {
-            guard let jobID = slot.jobID else { continue }
             do {
                 update(at: index) {
                     $0.statusKey = "status.saving"
                     $0.statusDetail = ""
                 }
-                let output = try await api.fetchOutput(jobID: jobID)
-                let filename = uniqueFilename(
-                    suggestedOutputFilename(for: slot, fallback: output.filename),
-                    in: directory
-                )
-                let destination = directory.appending(path: filename)
-                try output.data.write(to: destination)
+                let destination = slot.url
+                    .deletingPathExtension()
+                    .appendingPathExtension(slot.outputFormat.rawValue)
+                try subtitleData(for: slot).write(to: destination)
                 update(at: index) {
                     $0.statusKey = "status.saved"
                     $0.statusDetail = destination.lastPathComponent
@@ -1028,15 +1036,15 @@ struct ContentView: View {
         } else if files.indices.contains(activeIndex) {
             update(at: activeIndex) {
                 $0.statusKey = "status.savedAll"
-                $0.statusDetail = directory.lastPathComponent
+                $0.statusDetail = t("status.sameDirectory")
             }
         }
     }
 
     private func copyOutput() {
-        guard let slot = activeSlot, !slot.previewText.isEmpty else { return }
+        guard let slot = activeSlot, slot.hasEditableSubtitle else { return }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(slot.previewText, forType: .string)
+        NSPasteboard.general.setString(slot.editableSubtitleText, forType: .string)
         update(at: activeIndex) {
             $0.statusKey = "status.copied"
             $0.statusDetail = ""
@@ -1065,17 +1073,25 @@ struct ContentView: View {
         return "\(sourceBase).\(ext)"
     }
 
-    private func uniqueFilename(_ filename: String, in directory: URL) -> String {
-        let url = URL(fileURLWithPath: filename)
-        let base = url.deletingPathExtension().lastPathComponent
-        let ext = url.pathExtension
-        var candidate = filename
-        var counter = 2
-        while FileManager.default.fileExists(atPath: directory.appending(path: candidate).path) {
-            candidate = ext.isEmpty ? "\(base)-\(counter)" : "\(base)-\(counter).\(ext)"
-            counter += 1
+    private func subtitleData(for slot: FileSlot) -> Data {
+        Data(slot.editableSubtitleText.utf8)
+    }
+
+    private func installSubtitleText(_ text: String, at index: Int, format: OutputFormat) {
+        let cues = SubtitleDocument.parse(text, format: format)
+        update(at: index) {
+            $0.previewText = cues.isEmpty ? text : SubtitleDocument.serialize(cues, format: format)
+            $0.cues = cues
+            $0.selectedCueID = cues.first?.id
+            if !$0.cues.isEmpty {
+                $0.duration = max($0.duration, $0.cues.map(\.end).max() ?? 0)
+            }
+            if $0.segments.isEmpty {
+                $0.segments = $0.cues.map {
+                    SubtitleSegment(index: $0.index, start: $0.start, end: $0.end, duration: $0.duration)
+                }
+            }
         }
-        return candidate
     }
 
     private func timeRange(_ segment: SubtitleSegment) -> String {
@@ -1093,12 +1109,32 @@ struct ContentView: View {
     }
 }
 
+private struct ParameterHelpIcon: View {
+    let help: String
+    @State private var isHovering = false
+
+    var body: some View {
+        Image(systemName: "questionmark.circle")
+            .font(.caption2)
+            .foregroundStyle(isHovering ? .primary : .tertiary)
+            .frame(width: 20, height: 20)
+            .contentShape(Circle())
+            .onHover { hovering in
+                isHovering = hovering
+            }
+            .help(help)
+            .accessibilityLabel(Text(help))
+    }
+}
+
 // MARK: - Supporting types
 
 struct FileSlot: Identifiable {
     let id = UUID()
     var url: URL
     var segments: [SubtitleSegment] = []
+    var cues: [SubtitleCue] = []
+    var selectedCueID: SubtitleCue.ID?
     var duration: Double = 0
     var previewText: String = ""
     var jobID: String?
@@ -1224,14 +1260,12 @@ struct TimelineView: View {
 private struct MediaPreviewCard: View {
     let url: URL
     let title: String
-
-    @State private var player: AVPlayer?
-    @State private var isVideo = true
+    @ObservedObject var playback: PlaybackController
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Image(systemName: isVideo ? "play.rectangle" : "waveform")
+                Image(systemName: playback.hasVideo ? "play.rectangle" : "waveform")
                     .foregroundStyle(.teal)
                 Text(title)
                     .font(.headline)
@@ -1243,32 +1277,18 @@ private struct MediaPreviewCard: View {
                     .truncationMode(.middle)
             }
 
-            if let player {
-                VideoPlayer(player: player)
-                    .frame(height: isVideo ? 260 : 80)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-            } else {
-                ProgressView()
-                    .frame(maxWidth: .infinity, minHeight: 80)
-            }
+            VideoPlayer(player: playback.player)
+                .frame(height: playback.hasVideo ? 260 : 80)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
         .task(id: url) {
-            await loadPlayer(for: url)
+            await playback.load(url)
         }
         .onDisappear {
-            player?.pause()
+            playback.player.pause()
         }
-    }
-
-    private func loadPlayer(for url: URL) async {
-        let asset = AVURLAsset(url: url)
-        let tracks = (try? await asset.loadTracks(withMediaType: .video)) ?? []
-        isVideo = !tracks.isEmpty
-        let item = AVPlayerItem(asset: asset)
-        player?.pause()
-        player = AVPlayer(playerItem: item)
     }
 }

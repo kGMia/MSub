@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 @MainActor
@@ -5,6 +6,7 @@ final class BackendService: ObservableObject {
     @Published var isRunning = false
     @Published var message = "Backend stopped"
     @Published var lastLog = ""
+    @Published var baseURL = URL(string: "http://127.0.0.1:7860")!
 
     private var process: Process?
     private var pipe: Pipe?
@@ -12,19 +14,26 @@ final class BackendService: ObservableObject {
     func start() {
         guard process == nil else { return }
         guard let workspace = findWorkspaceRoot() else {
-            message = "Could not find Huz workspace"
+            message = "Could not find MSub backend"
             return
         }
+
+        let port = availablePort(startingAt: 7860)
+        baseURL = URL(string: "http://127.0.0.1:\(port)")!
 
         let process = Process()
         process.currentDirectoryURL = workspace
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["uv", "run", "huz-web"]
+        process.arguments = ["uv", "run", "msub-web"]
         var environment = ProcessInfo.processInfo.environment
         configureUVEnvironment(&environment, workspace: workspace)
         if let modelPath = bundledOrWorkspaceModel(in: workspace) {
+            environment["MSUB_MODEL"] = modelPath.path
             environment["HUZ_MODEL"] = modelPath.path
         }
+        environment["MSUB_HOST"] = "127.0.0.1"
+        environment["MSUB_PORT"] = "\(port)"
+        environment["PYTHONUNBUFFERED"] = "1"
         environment["PATH"] = [
             environment["PATH"],
             "/opt/homebrew/bin",
@@ -63,7 +72,7 @@ final class BackendService: ObservableObject {
             self.process = process
             self.pipe = pipe
             isRunning = true
-            message = "Backend running at 127.0.0.1:7860"
+            message = "Backend running at 127.0.0.1:\(port)"
         } catch {
             message = error.localizedDescription
         }
@@ -79,7 +88,8 @@ final class BackendService: ObservableObject {
     }
 
     private func findWorkspaceRoot() -> URL? {
-        if let envPath = ProcessInfo.processInfo.environment["HUZ_WORKSPACE"] {
+        if let envPath = ProcessInfo.processInfo.environment["MSUB_WORKSPACE"]
+            ?? ProcessInfo.processInfo.environment["HUZ_WORKSPACE"] {
             let url = URL(fileURLWithPath: envPath)
             if isBackendRoot(url) {
                 return url
@@ -154,5 +164,33 @@ final class BackendService: ObservableObject {
             return nil
         }
         return modelPath
+    }
+
+    private func availablePort(startingAt preferred: Int) -> Int {
+        for port in preferred..<(preferred + 20) where canBind(port: port) {
+            return port
+        }
+        return preferred
+    }
+
+    private func canBind(port: Int) -> Bool {
+        let socketFD = socket(AF_INET, SOCK_STREAM, 0)
+        guard socketFD >= 0 else { return false }
+        defer { close(socketFD) }
+
+        var yes: Int32 = 1
+        setsockopt(socketFD, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
+
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = UInt16(port).bigEndian
+        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+
+        return withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
+                bind(socketFD, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
+            }
+        }
     }
 }
