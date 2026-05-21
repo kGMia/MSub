@@ -11,8 +11,8 @@
           "fill" : "automatic",
           "glass" : true,
           "hidden" : false,
-          "image-name" : "工作區域 1.png",
-          "name" : "工作區域 1"
+          "image-name" : "app-icon.png",
+          "name" : "App Icon"
         }
       ],
       "shadow" : {

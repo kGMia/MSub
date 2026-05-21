@@ -29,6 +29,7 @@
 		000000000000000000000207 /* Settings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Settings.swift; sourceTree = "<group>"; };
 		000000000000000000000208 /* package-backend.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "package-backend.sh"; sourceTree = "<group>"; };
 		000000000000000000000209 /* SubtitleDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubtitleDocument.swift; sourceTree = "<group>"; };
+		00000000000000000000020A /* MSub.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = MSub.entitlements; sourceTree = "<group>"; };
 		000000000000000000000301 /* MSub.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MSub.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		973399052FBE32A400FDA459 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 		974192942FBD973900E74857 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; name = Localizable.xcstrings; path = Sources/MSub/Localizable.xcstrings; sourceTree = "<group>"; };
@@ -39,6 +40,7 @@
 			isa = PBXGroup;
 			children = (
 				973399052FBE32A400FDA459 /* AppIcon.icon */,
+				00000000000000000000020A /* MSub.entitlements */,
 				000000000000000000000010 /* MSub */,
 				000000000000000000000011 /* Scripts */,
 				000000000000000000000012 /* Products */,
@@ -111,7 +113,7 @@
 					};
 				};
 			};
-			buildConfigurationList = 000000000000000000000501 /* Build configuration list for PBXProject "mSub" */;
+			buildConfigurationList = 000000000000000000000501 /* Build configuration list for PBXProject "MSub" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -147,10 +149,17 @@
 				"$(SRCROOT)/../../src",
 				"$(SRCROOT)/../../pyproject.toml",
 				"$(SRCROOT)/../../uv.lock",
+				"$(SRCROOT)/../../README.md",
+				"$(SRCROOT)/../../.python-version",
+				"$(SRCROOT)/../../.venv/pyvenv.cfg",
 			);
 			name = "Package Backend";
 			outputPaths = (
 				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/backend/pyproject.toml",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/backend/README.md",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/backend/.python-version",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/backend/.venv/pyvenv.cfg",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/backend/python/bin/python3.12",
 			);
 			shellPath = /bin/sh;
 			shellScript = (
@@ -177,7 +186,7 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
-		000000000000000000000601 /* Debug configuration for PBXProject "mSub" */ = {
+		000000000000000000000601 /* Debug configuration for PBXProject "MSub" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
@@ -241,7 +250,7 @@
 			};
 			name = Debug;
 		};
-		000000000000000000000602 /* Release configuration for PBXProject "mSub" */ = {
+		000000000000000000000602 /* Release configuration for PBXProject "MSub" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
@@ -279,6 +288,7 @@
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = NO;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_NO_COMMON_BLOCKS = YES;
@@ -303,9 +313,10 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
+				CODE_SIGN_ENTITLEMENTS = MSub.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 8;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -331,9 +342,10 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
+				CODE_SIGN_ENTITLEMENTS = MSub.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 8;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -357,11 +369,11 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		000000000000000000000501 /* Build configuration list for PBXProject "mSub" */ = {
+		000000000000000000000501 /* Build configuration list for PBXProject "MSub" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				000000000000000000000601 /* Debug configuration for PBXProject "mSub" */,
-				000000000000000000000602 /* Release configuration for PBXProject "mSub" */,
+				000000000000000000000601 /* Debug configuration for PBXProject "MSub" */,
+				000000000000000000000602 /* Release configuration for PBXProject "MSub" */,
 			);
 			defaultConfigurationName = Debug;
 		};

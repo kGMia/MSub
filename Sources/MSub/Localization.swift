@@ -2,6 +2,8 @@ import Foundation
 
 enum AppLanguage: String, CaseIterable, Identifiable {
     case zh
+    case zhHant = "zh-Hant"
+    case ja
     case en
 
     var id: String { rawValue }
@@ -9,6 +11,8 @@ enum AppLanguage: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .zh: "中文"
+        case .zhHant: "繁體中文"
+        case .ja: "日本語"
         case .en: "English"
         }
     }
@@ -16,12 +20,27 @@ enum AppLanguage: String, CaseIterable, Identifiable {
     var localeIdentifier: String {
         switch self {
         case .zh: "zh-Hans"
+        case .zhHant: "zh-Hant"
+        case .ja: "ja"
         case .en: "en"
         }
     }
 
     var locale: Locale {
         Locale(identifier: localeIdentifier)
+    }
+
+    var fallbackLanguages: [AppLanguage] {
+        switch self {
+        case .zh:
+            [.zh, .en]
+        case .zhHant:
+            [.zhHant, .zh, .en]
+        case .ja:
+            [.ja, .en]
+        case .en:
+            [.en]
+        }
     }
 }
 
@@ -32,7 +51,24 @@ enum Copy {
         if let native = nativeLocalizedString(forKey: key, language: language) {
             return native
         }
-        return strings[key]?[language] ?? strings[key]?[.en] ?? key
+        if let override = languageOverrides[key]?[language] {
+            return override
+        }
+        if let direct = strings[key]?[language] {
+            return direct
+        }
+        if language == .zhHant, let simplified = strings[key]?[.zh] {
+            return simplified.applyingTransform(StringTransform(rawValue: "Hans-Hant"), reverse: false) ?? simplified
+        }
+        for fallback in language.fallbackLanguages where fallback != language {
+            if let override = languageOverrides[key]?[fallback] {
+                return override
+            }
+            if let value = strings[key]?[fallback] {
+                return value
+            }
+        }
+        return key
     }
 
     private static func nativeLocalizedString(forKey key: String, language: AppLanguage) -> String? {
@@ -47,6 +83,223 @@ enum Copy {
         let value = bundle.localizedString(forKey: key, value: missingSentinel, table: nil)
         return value == missingSentinel ? nil : value
     }
+
+    private static let languageOverrides: [String: [AppLanguage: String]] = [
+        "backend.start": [.zhHant: "啟動後端", .ja: "バックエンドを起動"],
+        "backend.stop": [.zhHant: "停止後端", .ja: "バックエンドを停止"],
+        "backend.check": [.zhHant: "檢查連線", .ja: "接続を確認"],
+        "backend.connected": [.zhHant: "後端已連線", .ja: "バックエンド接続済み"],
+        "backend.disconnected": [.zhHant: "後端未連線", .ja: "バックエンド未接続"],
+        "input.choose": [.zhHant: "選擇媒體", .ja: "メディアを選択"],
+        "input.drop": [.zhHant: "拖入影片或音訊檔案", .ja: "動画または音声ファイルをドロップ"],
+        "input.none": [.zhHant: "尚未選擇檔案", .ja: "ファイル未選択"],
+        "settings.output": [.zhHant: "輸出", .ja: "出力"],
+        "settings.model": [.zhHant: "模型", .ja: "モデル"],
+        "settings.format": [.zhHant: "格式", .ja: "形式"],
+        "settings.mode": [.zhHant: "分段模式", .ja: "分割モード"],
+        "settings.language": [.zhHant: "介面語言", .ja: "表示言語"],
+        "settings.segmentation": [.zhHant: "語音分段", .ja: "音声分割"],
+        "settings.recognition": [.zhHant: "辨識", .ja: "認識"],
+        "settings.advanced": [.zhHant: "進階參數", .ja: "詳細設定"],
+        "settings.preset": [.zhHant: "場景預設", .ja: "シーンプリセット"],
+        "action.preview": [.zhHant: "預覽分段", .ja: "分割をプレビュー"],
+        "action.transcribe": [.zhHant: "開始辨識", .ja: "認識を開始"],
+        "action.save": [.zhHant: "儲存結果", .ja: "結果を保存"],
+        "action.saveAll": [.zhHant: "全部儲存", .ja: "すべて保存"],
+        "action.importSubtitle": [.zhHant: "匯入字幕", .ja: "字幕を読み込む"],
+        "action.copy": [.zhHant: "複製文字", .ja: "テキストをコピー"],
+        "action.stop": [.zhHant: "停止", .ja: "停止"],
+        "file.add": [.zhHant: "加入媒體檔案", .ja: "メディアファイルを追加"],
+        "file.clearAll": [.zhHant: "清空已選檔案", .ja: "選択したファイルをすべてクリア"],
+        "segments.title": [.zhHant: "分段", .ja: "分割"],
+        "segments.noPreview": [.zhHant: "暫無預覽", .ja: "プレビューなし"],
+        "segments.count": [.zhHant: "個分段", .ja: "件の分割"],
+        "output.title": [.zhHant: "字幕結果", .ja: "字幕結果"],
+        "output.placeholder": [.zhHant: "辨識完成後，字幕預覽會顯示在這裡。", .ja: "認識完了後、字幕プレビューがここに表示されます。"],
+        "editor.empty": [.zhHant: "暫無可編輯字幕", .ja: "編集できる字幕がありません"],
+        "editor.empty.help": [.zhHant: "生成 SRT/VTT/JSON 字幕後，會在這裡按字幕塊顯示並支援編輯。", .ja: "SRT/VTT/JSON 字幕を生成すると、ここでキュー単位に編集できます。"],
+        "editor.timeline": [.zhHant: "波形時間軸", .ja: "波形タイムライン"],
+        "editor.play": [.zhHant: "播放", .ja: "再生"],
+        "editor.pause": [.zhHant: "暫停", .ja: "一時停止"],
+        "editor.playCurrent": [.zhHant: "僅播放目前段落", .ja: "現在のキューだけ再生"],
+        "editor.selected": [.zhHant: "目前字幕塊", .ja: "現在の字幕キュー"],
+        "editor.selectHelp": [.zhHant: "在左側選擇一個字幕塊後，可編輯文字和時間。", .ja: "左側で字幕キューを選択すると、テキストと時間を編集できます。"],
+        "editor.start": [.zhHant: "開始", .ja: "開始"],
+        "editor.end": [.zhHant: "結束", .ja: "終了"],
+        "editor.duration": [.zhHant: "持續時間", .ja: "長さ"],
+        "editor.zoom": [.zhHant: "縮放", .ja: "ズーム"],
+        "editor.zoomIn": [.zhHant: "放大時間軸", .ja: "ズームイン"],
+        "editor.zoomOut": [.zhHant: "縮小時間軸", .ja: "ズームアウト"],
+        "editor.expandTimeline": [.zhHant: "展開波形時間軸", .ja: "波形タイムラインを展開"],
+        "editor.collapseTimeline": [.zhHant: "折疊波形時間軸", .ja: "波形タイムラインを折りたたむ"],
+        "editor.cursorDrag.help": [.zhHant: "拖曳紅色指針頂端可移動播放位置", .ja: "赤い再生ヘッドの上部をドラッグして再生位置を移動"],
+        "editor.previous": [.zhHant: "上一個", .ja: "前へ"],
+        "editor.next": [.zhHant: "下一個", .ja: "次へ"],
+        "editor.addAfter": [.zhHant: "在後方新增空字幕塊", .ja: "後ろに空の字幕を追加"],
+        "editor.addBefore": [.zhHant: "在前方新增空字幕塊", .ja: "前に空の字幕を追加"],
+        "editor.duplicateCue": [.zhHant: "複製字幕塊", .ja: "字幕キューを複製"],
+        "editor.closeGap": [.zhHant: "消除空白", .ja: "隙間を詰める"],
+        "editor.deleteCue": [.zhHant: "刪除字幕塊", .ja: "字幕キューを削除"],
+        "editor.resetCue": [.zhHant: "重置目前字幕塊", .ja: "現在のキューをリセット"],
+        "editor.resetCue.help": [.zhHant: "將目前字幕塊的文字、開始時間和結束時間恢復到匯入或生成時的內容。", .ja: "選択中のキューのテキスト、開始時刻、終了時刻を読み込み時または生成時の内容に戻します。"],
+        "editor.style": [.zhHant: "字幕樣式", .ja: "字幕スタイル"],
+        "editor.style.bold.help": [.zhHant: "為目前字幕塊套用或移除粗體標記。", .ja: "現在のキューに太字タグを適用または解除します。"],
+        "editor.style.italic.help": [.zhHant: "為目前字幕塊套用或移除斜體標記。", .ja: "現在のキューに斜体タグを適用または解除します。"],
+        "editor.style.underline.help": [.zhHant: "為目前字幕塊套用或移除底線標記。", .ja: "現在のキューに下線タグを適用または解除します。"],
+        "editor.style.color.help": [.zhHant: "選擇要套用到目前字幕塊的字幕顏色。", .ja: "現在のキューに適用する字幕色を選びます。"],
+        "editor.style.applyColor.help": [.zhHant: "將選取的顏色套用到目前字幕塊。", .ja: "選択した色を現在のキューに適用します。"],
+        "editor.style.clear.help": [.zhHant: "移除目前字幕塊中的粗體、斜體、底線和顏色標記。", .ja: "現在のキューから太字、斜体、下線、色タグを削除します。"],
+        "editor.findReplace": [.zhHant: "尋找/取代", .ja: "検索/置換"],
+        "editor.find": [.zhHant: "尋找文字", .ja: "検索テキスト"],
+        "editor.findHint": [.zhHant: "輸入文字以尋找字幕", .ja: "字幕を検索する文字を入力"],
+        "editor.timelineOverviewHelp": [.zhHant: "目前縮放較低，時間軸顯示為密度概覽；放大後可顯示並拖曳具體字幕塊。", .ja: "低倍率では密度概要を表示します。拡大すると個別の字幕ブロックを表示してドラッグできます。"],
+        "editor.findNext": [.zhHant: "下一個", .ja: "次を検索"],
+        "editor.findCount": [.zhHant: "%d 處符合", .ja: "%d 件一致"],
+        "editor.findSelected": [.zhHant: "已跳至第 %d 條", .ja: "%d 番を選択"],
+        "editor.findNoMatch": [.zhHant: "沒有符合項目", .ja: "一致なし"],
+        "editor.replace": [.zhHant: "取代為", .ja: "置換後"],
+        "editor.replaceCurrent": [.zhHant: "取代目前", .ja: "置換"],
+        "editor.replaceAll": [.zhHant: "全部取代", .ja: "すべて置換"],
+        "editor.replaceOneCount": [.zhHant: "已取代 %d 處", .ja: "%d 件置換しました"],
+        "editor.replaceAllCount": [.zhHant: "已取代 %d 處", .ja: "%d 件置換しました"],
+        "editor.matchCase": [.zhHant: "區分大小寫", .ja: "大文字/小文字を区別"],
+        "status.ready": [.zhHant: "就緒", .ja: "準備完了"],
+        "status.detecting": [.zhHant: "正在偵測語音分段", .ja: "音声分割を検出中"],
+        "status.previewReady": [.zhHant: "分段預覽完成", .ja: "分割プレビュー完了"],
+        "status.starting": [.zhHant: "正在建立辨識任務", .ja: "認識ジョブを作成中"],
+        "status.loading": [.zhHant: "正在載入模型", .ja: "モデルを読み込み中"],
+        "status.transcribing": [.zhHant: "正在辨識", .ja: "認識中"],
+        "status.done": [.zhHant: "完成", .ja: "完了"],
+        "status.failed": [.zhHant: "辨識失敗", .ja: "認識失敗"],
+        "status.saved": [.zhHant: "結果已儲存", .ja: "結果を保存しました"],
+        "status.savedAll": [.zhHant: "全部結果已儲存", .ja: "すべて保存しました"],
+        "status.saving": [.zhHant: "正在儲存結果", .ja: "保存中"],
+        "status.subtitleImported": [.zhHant: "字幕已匯入", .ja: "字幕を読み込みました"],
+        "status.subtitleAutoImported": [.zhHant: "已自動匯入同名字幕", .ja: "同名字幕を自動読み込みしました"],
+        "status.subtitleImportSkipped": [.zhHant: "已略過字幕匯入", .ja: "字幕の読み込みをスキップしました"],
+        "status.copied": [.zhHant: "已複製字幕文字", .ja: "字幕テキストをコピーしました"],
+        "status.cancelled": [.zhHant: "已取消", .ja: "キャンセル済み"],
+        "error.title": [.zhHant: "錯誤", .ja: "エラー"],
+        "error.noActiveFile": [.zhHant: "請先選擇一個媒體檔案。", .ja: "先にメディアファイルを選択してください。"],
+        "error.importWhileProcessing": [.zhHant: "請先等待目前辨識或預覽任務結束，再匯入字幕。", .ja: "現在のプレビューまたは認識が完了してから字幕を読み込んでください。"],
+        "error.unsupportedSubtitle": [.zhHant: "僅支援 SRT、VTT、JSON 或 TXT 字幕檔案。", .ja: "SRT、VTT、JSON、TXT 字幕ファイルのみ対応しています。"],
+        "error.subtitleNoTimedCues": [.zhHant: "未找到可解析的帶時間軸字幕塊。", .ja: "解析できる時間付き字幕キューが見つかりません。"],
+        "error.subtitleTimeExceedsDuration": [.zhHant: "字幕結束時間 %@ 超出了媒體長度 %@。", .ja: "字幕の終了時刻 %@ がメディア長 %@ を超えています。"],
+        "error.mediaDurationUnavailable": [.zhHant: "無法讀取媒體長度，不能驗證字幕時間。", .ja: "メディアの長さを読み取れないため、字幕時間を検証できません。"],
+        "error.subtitleImportFailed": [.zhHant: "字幕匯入失敗：%@", .ja: "字幕の読み込みに失敗しました: %@"],
+        "button.ok": [.zhHant: "好", .ja: "OK"],
+        "tab.segments": [.zhHant: "分段", .ja: "分割"],
+        "tab.output": [.zhHant: "字幕", .ja: "字幕"],
+        "preview.title": [.zhHant: "預覽", .ja: "プレビュー"],
+        "media.info": [.zhHant: "影片資訊", .ja: "メディア情報"],
+        "media.name": [.zhHant: "檔案", .ja: "ファイル"],
+        "media.duration": [.zhHant: "長度", .ja: "長さ"],
+        "media.size": [.zhHant: "大小", .ja: "サイズ"],
+        "media.resolution": [.zhHant: "解析度", .ja: "解像度"],
+        "media.frameRate": [.zhHant: "影格率", .ja: "フレームレート"],
+        "media.videoCodec": [.zhHant: "影片編碼", .ja: "動画コーデック"],
+        "media.audio": [.zhHant: "音訊", .ja: "音声"],
+        "media.bitRate": [.zhHant: "位元率", .ja: "ビットレート"],
+        "media.frequentTerms": [.zhHant: "字幕高頻詞", .ja: "字幕の頻出語"],
+        "prefs.title": [.zhHant: "偏好設定", .ja: "設定"],
+        "prefs.general": [.zhHant: "一般", .ja: "一般"],
+        "prefs.model": [.zhHant: "模型", .ja: "モデル"],
+        "prefs.appearance": [.zhHant: "外觀", .ja: "外観"],
+        "prefs.defaultFormat": [.zhHant: "預設輸出格式", .ja: "既定の出力形式"],
+        "prefs.defaultMode": [.zhHant: "預設分段模式", .ja: "既定の分割モード"],
+        "prefs.modelPath": [.zhHant: "預設模型路徑", .ja: "既定のモデルパス"],
+        "prefs.modelPath.choose": [.zhHant: "瀏覽…", .ja: "参照…"],
+        "prefs.uiLanguage": [.zhHant: "介面語言", .ja: "表示言語"],
+        "menu.file": [.zhHant: "檔案", .ja: "ファイル"],
+        "menu.openFile": [.zhHant: "開啟檔案…", .ja: "ファイルを開く…"],
+        "menu.openRecent": [.zhHant: "開啟最近使用", .ja: "最近使った項目を開く"],
+        "menu.importSubtitle": [.zhHant: "匯入字幕…", .ja: "字幕を読み込む…"],
+        "menu.noRecentFiles": [.zhHant: "沒有最近使用項目", .ja: "最近使った項目なし"],
+        "menu.clearRecentFiles": [.zhHant: "清除最近使用項目", .ja: "最近使った項目を消去"],
+        "menu.clearMenu": [.zhHant: "清除選單", .ja: "メニューを消去"],
+        "menu.edit": [.zhHant: "編輯", .ja: "編集"],
+        "menu.view": [.zhHant: "顯示方式", .ja: "表示"],
+        "menu.window": [.zhHant: "視窗", .ja: "ウィンドウ"],
+        "menu.help": [.zhHant: "說明", .ja: "ヘルプ"],
+        "menu.aboutApp": [.zhHant: "關於 %@", .ja: "%@ について"],
+        "menu.settings": [.zhHant: "設定…", .ja: "設定…"],
+        "menu.services": [.zhHant: "服務", .ja: "サービス"],
+        "menu.hideApp": [.zhHant: "隱藏 %@", .ja: "%@ を隠す"],
+        "menu.hideOthers": [.zhHant: "隱藏其他", .ja: "ほかを隠す"],
+        "menu.showAll": [.zhHant: "全部顯示", .ja: "すべて表示"],
+        "menu.quitApp": [.zhHant: "結束 %@", .ja: "%@ を終了"],
+        "menu.closeWindow": [.zhHant: "關閉視窗", .ja: "ウィンドウを閉じる"],
+        "menu.close": [.zhHant: "關閉", .ja: "閉じる"],
+        "menu.closeTab": [.zhHant: "關閉標籤頁", .ja: "タブを閉じる"],
+        "menu.undo": [.zhHant: "還原", .ja: "取り消す"],
+        "menu.redo": [.zhHant: "重做", .ja: "やり直す"],
+        "menu.cut": [.zhHant: "剪下", .ja: "カット"],
+        "menu.copy": [.zhHant: "複製", .ja: "コピー"],
+        "menu.paste": [.zhHant: "貼上", .ja: "ペースト"],
+        "menu.pasteAndMatch": [.zhHant: "貼上並符合樣式", .ja: "ペーストしてスタイルを合わせる"],
+        "menu.delete": [.zhHant: "刪除", .ja: "削除"],
+        "menu.selectAll": [.zhHant: "全選", .ja: "すべてを選択"],
+        "menu.find": [.zhHant: "尋找…", .ja: "検索…"],
+        "menu.findMenu": [.zhHant: "尋找", .ja: "検索"],
+        "menu.findAndReplace": [.zhHant: "尋找並取代…", .ja: "検索と置換…"],
+        "menu.findNext": [.zhHant: "尋找下一個", .ja: "次を検索"],
+        "menu.findPrevious": [.zhHant: "尋找上一個", .ja: "前を検索"],
+        "menu.useSelectionForFind": [.zhHant: "使用所選內容尋找", .ja: "選択部分を検索に使用"],
+        "menu.jumpToSelection": [.zhHant: "跳到所選內容", .ja: "選択部分へジャンプ"],
+        "menu.spellingGrammar": [.zhHant: "拼字和文法", .ja: "スペルと文法"],
+        "menu.showSpellingGrammar": [.zhHant: "顯示拼字和文法", .ja: "スペルと文法を表示"],
+        "menu.checkDocumentNow": [.zhHant: "立即檢查文件", .ja: "今すぐ書類をチェック"],
+        "menu.checkSpellingWhileTyping": [.zhHant: "輸入時檢查拼字", .ja: "入力中にスペルチェック"],
+        "menu.checkGrammarWithSpelling": [.zhHant: "隨拼字檢查文法", .ja: "スペルと一緒に文法をチェック"],
+        "menu.correctSpellingAutomatically": [.zhHant: "自動修正拼字", .ja: "スペルを自動修正"],
+        "menu.substitutions": [.zhHant: "替代", .ja: "自動置換"],
+        "menu.showSubstitutions": [.zhHant: "顯示替代", .ja: "自動置換を表示"],
+        "menu.smartCopyPaste": [.zhHant: "智慧複製/貼上", .ja: "スマートコピー/ペースト"],
+        "menu.smartQuotes": [.zhHant: "智慧引號", .ja: "スマート引用符"],
+        "menu.smartDashes": [.zhHant: "智慧破折號", .ja: "スマートダッシュ"],
+        "menu.smartLinks": [.zhHant: "智慧連結", .ja: "スマートリンク"],
+        "menu.dataDetectors": [.zhHant: "資料偵測器", .ja: "データ検出"],
+        "menu.textReplacement": [.zhHant: "文字替換", .ja: "テキスト置換"],
+        "menu.transformations": [.zhHant: "轉換", .ja: "変換"],
+        "menu.makeUpperCase": [.zhHant: "改為大寫", .ja: "大文字にする"],
+        "menu.makeLowerCase": [.zhHant: "改為小寫", .ja: "小文字にする"],
+        "menu.capitalize": [.zhHant: "字首大寫", .ja: "先頭を大文字にする"],
+        "menu.speech": [.zhHant: "朗讀", .ja: "スピーチ"],
+        "menu.startSpeaking": [.zhHant: "開始朗讀", .ja: "読み上げを開始"],
+        "menu.stopSpeaking": [.zhHant: "停止朗讀", .ja: "読み上げを停止"],
+        "menu.startDictation": [.zhHant: "開始聽寫…", .ja: "音声入力を開始…"],
+        "menu.emojiSymbols": [.zhHant: "表情與符號", .ja: "絵文字と記号"],
+        "menu.toggleSidebar": [.zhHant: "顯示/隱藏側邊欄", .ja: "サイドバーを表示/非表示"],
+        "menu.showSidebar": [.zhHant: "顯示側邊欄", .ja: "サイドバーを表示"],
+        "menu.hideSidebar": [.zhHant: "隱藏側邊欄", .ja: "サイドバーを非表示"],
+        "menu.showToolbar": [.zhHant: "顯示工具列", .ja: "ツールバーを表示"],
+        "menu.hideToolbar": [.zhHant: "隱藏工具列", .ja: "ツールバーを非表示"],
+        "menu.customizeToolbar": [.zhHant: "自訂工具列…", .ja: "ツールバーをカスタマイズ…"],
+        "menu.fullScreen": [.zhHant: "進入全螢幕", .ja: "フルスクリーンにする"],
+        "menu.exitFullScreen": [.zhHant: "結束全螢幕", .ja: "フルスクリーンを解除"],
+        "menu.minimize": [.zhHant: "最小化", .ja: "しまう"],
+        "menu.zoom": [.zhHant: "縮放", .ja: "拡大/縮小"],
+        "menu.showPreviousTab": [.zhHant: "顯示上一個標籤頁", .ja: "前のタブを表示"],
+        "menu.showNextTab": [.zhHant: "顯示下一個標籤頁", .ja: "次のタブを表示"],
+        "menu.showAllTabs": [.zhHant: "顯示所有標籤頁", .ja: "すべてのタブを表示"],
+        "menu.moveTabToNewWindow": [.zhHant: "將標籤頁移到新視窗", .ja: "タブを新規ウィンドウへ移動"],
+        "menu.mergeAllWindows": [.zhHant: "合併所有視窗", .ja: "すべてのウィンドウを結合"],
+        "menu.bringAllToFront": [.zhHant: "全部移到最前方", .ja: "すべてを手前に移動"],
+        "menu.helpApp": [.zhHant: "%@ 說明", .ja: "%@ ヘルプ"],
+        "menu.subtitle": [.zhHant: "字幕", .ja: "字幕"],
+        "menu.transcribe": [.zhHant: "開始辨識", .ja: "認識を開始"],
+        "menu.preview": [.zhHant: "預覽分段", .ja: "分割をプレビュー"],
+        "menu.stopProcessing": [.zhHant: "停止處理", .ja: "処理を停止"],
+        "menu.saveAll": [.zhHant: "全部儲存", .ja: "すべて保存"],
+        "menu.deleteCue": [.zhHant: "刪除字幕塊", .ja: "字幕キューを削除"],
+        "menu.duplicateCue": [.zhHant: "複製字幕塊", .ja: "字幕キューを複製"],
+        "menu.insertCueBefore": [.zhHant: "在前方新增字幕塊", .ja: "前に字幕を追加"],
+        "menu.insertCueAfter": [.zhHant: "在後方新增字幕塊", .ja: "後ろに字幕を追加"],
+        "menu.resetCue": [.zhHant: "重置目前字幕塊", .ja: "現在のキューをリセット"],
+        "menu.toggleTimeline": [.zhHant: "顯示/隱藏時間軸", .ja: "タイムラインを表示/非表示"],
+        "menu.zoomTimelineIn": [.zhHant: "放大時間軸", .ja: "タイムラインを拡大"],
+        "menu.zoomTimelineOut": [.zhHant: "縮小時間軸", .ja: "タイムラインを縮小"]
+    ]
 
     private static let strings: [String: [AppLanguage: String]] = [
         "app.title": [.zh: "MSub", .en: "MSub"],
@@ -104,8 +357,11 @@ enum Copy {
         "action.transcribe": [.zh: "开始识别", .en: "Transcribe"],
         "action.save": [.zh: "保存结果", .en: "Save Result"],
         "action.saveAll": [.zh: "保存全部", .en: "Save All"],
+        "action.importSubtitle": [.zh: "导入字幕", .en: "Import Subtitle"],
         "action.copy": [.zh: "复制文本", .en: "Copy Text"],
         "action.stop": [.zh: "停止", .en: "Stop"],
+        "file.add": [.zh: "添加媒体文件", .en: "Add media files"],
+        "file.clearAll": [.zh: "清空已选文件", .en: "Clear selected files"],
         "file.remove": [.zh: "移除文件", .en: "Remove file"],
         "file.summary": [.zh: "已完成 %d/%d，失败 %d", .en: "%d/%d done, %d failed"],
         "segments.title": [.zh: "分段", .en: "Segments"],
@@ -121,6 +377,7 @@ enum Copy {
         "editor.empty.help": [.zh: "生成 SRT/VTT/JSON 字幕后，会在这里按字幕块显示并支持编辑。", .en: "Generate SRT/VTT/JSON subtitles to edit them here as cue blocks."],
         "editor.timeline": [.zh: "波形时间轴", .en: "Waveform timeline"],
         "editor.timelineHelp": [.zh: "拖动字幕块两侧手柄可调整开始/结束时间；点击波形空白处可调整播放位置。", .en: "Drag cue handles to adjust start/end time; click empty waveform area to move the playback cursor."],
+        "editor.timelineOverviewHelp": [.zh: "当前缩放较低，时间轴显示为密度概览；放大后可显示并拖动具体字幕块。", .en: "Low zoom shows a density overview; zoom in to show and drag individual cue blocks."],
         "editor.handleStart.help": [.zh: "拖动调整该字幕块的开始时间", .en: "Drag to adjust the cue's start time"],
         "editor.handleEnd.help": [.zh: "拖动调整该字幕块的结束时间", .en: "Drag to adjust the cue's end time"],
         "editor.play": [.zh: "播放", .en: "Play"],
@@ -136,10 +393,27 @@ enum Copy {
         "editor.zoom": [.zh: "缩放", .en: "Zoom"],
         "editor.zoomIn": [.zh: "放大时间轴", .en: "Zoom in"],
         "editor.zoomOut": [.zh: "缩小时间轴", .en: "Zoom out"],
+        "editor.expandTimeline": [.zh: "展开波形时间轴", .en: "Expand waveform timeline"],
+        "editor.collapseTimeline": [.zh: "折叠波形时间轴", .en: "Collapse waveform timeline"],
+        "editor.cursorDrag.help": [.zh: "拖动红色指针顶端可移动播放位置，不会改变字幕块选择。", .en: "Drag the top of the red playhead to move playback without changing cue selection."],
         "editor.previous": [.zh: "上一个", .en: "Previous"],
         "editor.next": [.zh: "下一个", .en: "Next"],
         "editor.addAfter": [.zh: "在后方新建空字幕块", .en: "Add Empty Cue After"],
+        "editor.addBefore": [.zh: "在前方新建空字幕块", .en: "Add Empty Cue Before"],
+        "editor.duplicateCue": [.zh: "复制字幕块", .en: "Duplicate Cue"],
+        "editor.closeGap": [.zh: "消除空白", .en: "Close Gap"],
+        "editor.deleteCue": [.zh: "删除字幕块", .en: "Delete Cue"],
         "editor.addAfter.help": [.zh: "在当前字幕块后插入一个空字幕块，并选中新建块。", .en: "Insert an empty cue after the selected cue and select it."],
+        "editor.resetCue": [.zh: "重置当前字幕块", .en: "Reset Current Cue"],
+        "editor.resetCue.help": [.zh: "将当前字幕块的文字、开始时间和结束时间恢复到导入或生成时的内容。", .en: "Restore the selected cue's text, start time, and end time to the imported or generated version."],
+        "editor.style": [.zh: "字幕样式", .en: "Subtitle Style"],
+        "editor.style.bold.help": [.zh: "为当前字幕块套用或移除加粗标记。", .en: "Apply or remove bold markup on the selected cue."],
+        "editor.style.italic.help": [.zh: "为当前字幕块套用或移除斜体标记。", .en: "Apply or remove italic markup on the selected cue."],
+        "editor.style.underline.help": [.zh: "为当前字幕块套用或移除下划线标记。", .en: "Apply or remove underline markup on the selected cue."],
+        "editor.style.color.help": [.zh: "选择要套用到当前字幕块的字幕颜色。", .en: "Choose the color to apply to the selected cue."],
+        "editor.style.applyColor.help": [.zh: "将选中的颜色套用到当前字幕块。", .en: "Apply the selected color to the current cue."],
+        "editor.style.clear.help": [.zh: "移除当前字幕块中的加粗、斜体、下划线和颜色标记。", .en: "Remove bold, italic, underline, and color markup from the selected cue."],
+        "editor.findReplace": [.zh: "查找/替换", .en: "Find/Replace"],
         "editor.find": [.zh: "查找文字", .en: "Find text"],
         "editor.findHint": [.zh: "输入文字以查找字幕", .en: "Enter text to search cues"],
         "editor.findNext": [.zh: "下一个", .en: "Next"],
@@ -169,9 +443,19 @@ enum Copy {
         "status.savedAll": [.zh: "全部结果已保存", .en: "All results saved"],
         "status.saving": [.zh: "正在保存结果", .en: "Saving result"],
         "status.sameDirectory": [.zh: "已保存到原视频目录", .en: "Saved beside source media"],
+        "status.subtitleImported": [.zh: "字幕已导入", .en: "Subtitle imported"],
+        "status.subtitleAutoImported": [.zh: "已自动导入同名字幕", .en: "Sidecar subtitle imported"],
+        "status.subtitleImportSkipped": [.zh: "已跳过字幕导入", .en: "Subtitle import skipped"],
         "status.copied": [.zh: "已复制字幕文本", .en: "Copied subtitle text"],
         "status.cancelled": [.zh: "已取消", .en: "Cancelled"],
         "error.title": [.zh: "错误", .en: "Error"],
+        "error.noActiveFile": [.zh: "请先选择一个媒体文件。", .en: "Choose a media file first."],
+        "error.importWhileProcessing": [.zh: "请先等待当前识别或预览任务结束，再导入字幕。", .en: "Wait for the current preview or transcription task to finish before importing subtitles."],
+        "error.unsupportedSubtitle": [.zh: "仅支持 SRT、VTT、JSON 或 TXT 字幕文件。", .en: "Only SRT, VTT, JSON, or TXT subtitle files are supported."],
+        "error.subtitleNoTimedCues": [.zh: "未找到可解析的带时间轴字幕块。", .en: "No parseable timed subtitle cues were found."],
+        "error.subtitleTimeExceedsDuration": [.zh: "字幕结束时间 %@ 超出了媒体时长 %@。", .en: "Subtitle end time %@ exceeds media duration %@."],
+        "error.mediaDurationUnavailable": [.zh: "无法读取媒体时长，不能验证字幕时间。", .en: "Could not read the media duration, so subtitle timing cannot be verified."],
+        "error.subtitleImportFailed": [.zh: "字幕导入失败：%@", .en: "Subtitle import failed: %@"],
         "error.saveAllFailed": [.zh: "部分文件保存失败：%@", .en: "Some files failed to save: %@"],
         "button.ok": [.zh: "好", .en: "OK"],
         "help.model": [.zh: "Hugging Face 模型 ID 或本地模型目录。当前建议使用本地 FireRedASR2-AED-mlx 权重路径，避免联网下载。", .en: "Hugging Face model id or local model directory. Use the local FireRedASR2-AED-mlx path to avoid network downloads."],
@@ -194,6 +478,7 @@ enum Copy {
         "help.eosPenalty": [.zh: "结束符得分惩罚。默认 1.0；提高可能让模型更早结束，降低可能减少过早截断。", .en: "EOS score penalty. Default is 1.0; higher can end earlier, lower can reduce premature stops."],
         "help.decodeMaxLen": [.zh: "限制单段最多解码 token 数。0 表示由音频长度自动决定；长音频不建议过高。", .en: "Maximum decoded tokens per segment. 0 lets the model decide from audio length; avoid very high values for long audio."],
         "help.unsupportedDecoding": [.zh: "当前 MLX 版 FireRedASR2-AED 不读取 temperature、repetition penalty 或热词/高频词偏置；这些属于 LLM 分支或需要额外解码器支持。", .en: "The current MLX FireRedASR2-AED path does not read temperature, repetition penalty, or hotword bias; those belong to the LLM path or require decoder support."],
+        "help.importSubtitle": [.zh: "导入已有 SRT/VTT/JSON/TXT 字幕；选择媒体时，同目录同名字幕会自动导入。", .en: "Import an existing SRT/VTT/JSON/TXT subtitle. Matching sidecar subtitles are imported automatically when media is opened."],
         "help.saveAll": [.zh: "将所有已生成或已修改的字幕保存到各自视频文件所在目录，文件名与视频同名。", .en: "Save every generated or edited subtitle beside its source media using the media filename."],
 
         "tab.segments": [.zh: "分段", .en: "Segments"],
@@ -226,8 +511,10 @@ enum Copy {
         "menu.file": [.zh: "文件", .en: "File"],
         "menu.openFile": [.zh: "打开文件…", .en: "Open File…"],
         "menu.openRecent": [.zh: "打开最近文件", .en: "Open Recent"],
+        "menu.importSubtitle": [.zh: "导入字幕…", .en: "Import Subtitle…"],
         "menu.noRecentFiles": [.zh: "没有最近文件", .en: "No Recent Files"],
         "menu.clearRecentFiles": [.zh: "清除最近文件", .en: "Clear Recent Files"],
+        "menu.clearMenu": [.zh: "清除菜单", .en: "Clear Menu"],
         "menu.edit": [.zh: "编辑", .en: "Edit"],
         "menu.view": [.zh: "显示", .en: "View"],
         "menu.window": [.zh: "窗口", .en: "Window"],
@@ -240,18 +527,75 @@ enum Copy {
         "menu.showAll": [.zh: "全部显示", .en: "Show All"],
         "menu.quitApp": [.zh: "退出 %@", .en: "Quit %@"],
         "menu.closeWindow": [.zh: "关闭窗口", .en: "Close Window"],
+        "menu.close": [.zh: "关闭", .en: "Close"],
+        "menu.closeTab": [.zh: "关闭标签页", .en: "Close Tab"],
         "menu.undo": [.zh: "撤销", .en: "Undo"],
         "menu.redo": [.zh: "重做", .en: "Redo"],
         "menu.cut": [.zh: "剪切", .en: "Cut"],
         "menu.copy": [.zh: "复制", .en: "Copy"],
         "menu.paste": [.zh: "粘贴", .en: "Paste"],
+        "menu.pasteAndMatch": [.zh: "粘贴并匹配样式", .en: "Paste and Match Style"],
         "menu.delete": [.zh: "删除", .en: "Delete"],
         "menu.selectAll": [.zh: "全选", .en: "Select All"],
+        "menu.find": [.zh: "查找…", .en: "Find…"],
+        "menu.findMenu": [.zh: "查找", .en: "Find"],
+        "menu.findAndReplace": [.zh: "查找并替换…", .en: "Find and Replace…"],
+        "menu.findNext": [.zh: "查找下一个", .en: "Find Next"],
+        "menu.findPrevious": [.zh: "查找上一个", .en: "Find Previous"],
+        "menu.useSelectionForFind": [.zh: "使用所选内容查找", .en: "Use Selection for Find"],
+        "menu.jumpToSelection": [.zh: "跳到所选内容", .en: "Jump to Selection"],
+        "menu.spellingGrammar": [.zh: "拼写和语法", .en: "Spelling and Grammar"],
+        "menu.showSpellingGrammar": [.zh: "显示拼写和语法", .en: "Show Spelling and Grammar"],
+        "menu.checkDocumentNow": [.zh: "立即检查文稿", .en: "Check Document Now"],
+        "menu.checkSpellingWhileTyping": [.zh: "键入时检查拼写", .en: "Check Spelling While Typing"],
+        "menu.checkGrammarWithSpelling": [.zh: "随拼写检查语法", .en: "Check Grammar With Spelling"],
+        "menu.correctSpellingAutomatically": [.zh: "自动纠正拼写", .en: "Correct Spelling Automatically"],
+        "menu.substitutions": [.zh: "替换", .en: "Substitutions"],
+        "menu.showSubstitutions": [.zh: "显示替换", .en: "Show Substitutions"],
+        "menu.smartCopyPaste": [.zh: "智能复制/粘贴", .en: "Smart Copy/Paste"],
+        "menu.smartQuotes": [.zh: "智能引号", .en: "Smart Quotes"],
+        "menu.smartDashes": [.zh: "智能破折号", .en: "Smart Dashes"],
+        "menu.smartLinks": [.zh: "智能链接", .en: "Smart Links"],
+        "menu.dataDetectors": [.zh: "数据检测器", .en: "Data Detectors"],
+        "menu.textReplacement": [.zh: "文本替换", .en: "Text Replacement"],
+        "menu.transformations": [.zh: "转换", .en: "Transformations"],
+        "menu.makeUpperCase": [.zh: "改为大写", .en: "Make Upper Case"],
+        "menu.makeLowerCase": [.zh: "改为小写", .en: "Make Lower Case"],
+        "menu.capitalize": [.zh: "首字母大写", .en: "Capitalize"],
+        "menu.speech": [.zh: "朗读", .en: "Speech"],
+        "menu.startSpeaking": [.zh: "开始朗读", .en: "Start Speaking"],
+        "menu.stopSpeaking": [.zh: "停止朗读", .en: "Stop Speaking"],
+        "menu.startDictation": [.zh: "开始听写…", .en: "Start Dictation…"],
+        "menu.emojiSymbols": [.zh: "表情与符号", .en: "Emoji & Symbols"],
         "menu.toggleSidebar": [.zh: "显示/隐藏侧边栏", .en: "Show/Hide Sidebar"],
+        "menu.showSidebar": [.zh: "显示侧边栏", .en: "Show Sidebar"],
+        "menu.hideSidebar": [.zh: "隐藏侧边栏", .en: "Hide Sidebar"],
+        "menu.showToolbar": [.zh: "显示工具栏", .en: "Show Toolbar"],
+        "menu.hideToolbar": [.zh: "隐藏工具栏", .en: "Hide Toolbar"],
+        "menu.customizeToolbar": [.zh: "自定工具栏…", .en: "Customize Toolbar…"],
         "menu.fullScreen": [.zh: "进入全屏幕", .en: "Enter Full Screen"],
+        "menu.exitFullScreen": [.zh: "退出全屏幕", .en: "Exit Full Screen"],
         "menu.minimize": [.zh: "最小化", .en: "Minimize"],
         "menu.zoom": [.zh: "缩放", .en: "Zoom"],
+        "menu.showPreviousTab": [.zh: "显示上一个标签页", .en: "Show Previous Tab"],
+        "menu.showNextTab": [.zh: "显示下一个标签页", .en: "Show Next Tab"],
+        "menu.showAllTabs": [.zh: "显示所有标签页", .en: "Show All Tabs"],
+        "menu.moveTabToNewWindow": [.zh: "将标签页移到新窗口", .en: "Move Tab to New Window"],
+        "menu.mergeAllWindows": [.zh: "合并所有窗口", .en: "Merge All Windows"],
         "menu.bringAllToFront": [.zh: "全部置于前面", .en: "Bring All to Front"],
-        "menu.helpApp": [.zh: "%@ 帮助", .en: "%@ Help"]
+        "menu.helpApp": [.zh: "%@ 帮助", .en: "%@ Help"],
+        "menu.subtitle": [.zh: "字幕", .en: "Subtitle"],
+        "menu.transcribe": [.zh: "开始识别", .en: "Transcribe"],
+        "menu.preview": [.zh: "预览分段", .en: "Preview Segments"],
+        "menu.stopProcessing": [.zh: "停止处理", .en: "Stop Processing"],
+        "menu.saveAll": [.zh: "全部保存", .en: "Save All"],
+        "menu.deleteCue": [.zh: "删除字幕块", .en: "Delete Cue"],
+        "menu.duplicateCue": [.zh: "复制字幕块", .en: "Duplicate Cue"],
+        "menu.insertCueBefore": [.zh: "在前方新建字幕块", .en: "Insert Cue Before"],
+        "menu.insertCueAfter": [.zh: "在后方新建字幕块", .en: "Insert Cue After"],
+        "menu.resetCue": [.zh: "重置当前字幕块", .en: "Reset Current Cue"],
+        "menu.toggleTimeline": [.zh: "显示/隐藏时间轴", .en: "Show/Hide Timeline"],
+        "menu.zoomTimelineIn": [.zh: "放大时间轴", .en: "Zoom In Timeline"],
+        "menu.zoomTimelineOut": [.zh: "缩小时间轴", .en: "Zoom Out Timeline"]
     ]
 }

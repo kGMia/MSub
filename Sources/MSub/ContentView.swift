@@ -76,6 +76,8 @@ struct ContentView: View {
         SegmentStats(segments: activeSlot?.segments ?? [], duration: activeSlot?.duration ?? 0)
     }
 
+    private static let subtitleExtensions = ["srt", "vtt", "json", "txt"]
+
     var body: some View {
         NavigationSplitView {
             settingsPanel
@@ -119,6 +121,9 @@ struct ContentView: View {
         .task {
             await loadConfig()
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+            backend.stop()
+        }
         .alert(t("error.title"), isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
             Button(t("button.ok"), role: .cancel) {}
         } message: {
@@ -131,6 +136,23 @@ struct ContentView: View {
             guard let url = notification.object as? URL else { return }
             addFiles([url])
         }
+        .onReceive(NotificationCenter.default.publisher(for: .msubImportSubtitleRequested)) { _ in
+            importSubtitleForActiveFile()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .msubTranscribeRequested)) { _ in
+            guard canRun else { return }
+            Task { await transcribeAll() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .msubPreviewRequested)) { _ in
+            guard canRun else { return }
+            Task { await previewAll() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .msubStopRequested)) { _ in
+            if isProcessing { cancelProcessing() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .msubSaveAllRequested)) { _ in
+            Task { await saveAllOutputs() }
+        }
     }
 
     // MARK: - Detail column
@@ -139,6 +161,9 @@ struct ContentView: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(spacing: 12) {
+                    if hasFiles {
+                        fileHeaderBar
+                    }
                     compactWorkArea
                     detailTabContent
                 }
@@ -147,52 +172,48 @@ struct ContentView: View {
             }
             .scrollBounceBehavior(.basedOnSize)
         }
-        .frame(minWidth: 520)
+        .frame(minWidth: 440)
         .background(.background)
     }
 
     @ViewBuilder
     private var compactWorkArea: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(alignment: .top, spacing: 12) {
-                VStack(spacing: 10) {
-                    fileDropBox
-                    if files.count > 0 {
-                        fileChipsRow
+        if hasFiles {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 10) {
+                    VStack(spacing: 10) {
+                        if let slot = activeSlot, isPreviewable(slot.url) {
+                            MediaPreviewCard(url: slot.url, title: t("preview.title"), playback: playback)
+                        }
                     }
+                    .frame(width: 350, alignment: .topLeading)
+                    .layoutPriority(1)
+
+                    VStack(spacing: 10) {
+                        if let slot = activeSlot {
+                            mediaInfoCard(slot)
+                        }
+                    }
+                    .frame(minWidth: 135, maxWidth: .infinity, alignment: .top)
+                    .layoutPriority(0)
+                }
+
+                VStack(spacing: 12) {
                     if let slot = activeSlot, isPreviewable(slot.url) {
                         MediaPreviewCard(url: slot.url, title: t("preview.title"), playback: playback)
                     }
-                }
-                .frame(width: 320, alignment: .topLeading)
-
-                VStack(spacing: 10) {
-                    statusCard
                     if let slot = activeSlot {
                         mediaInfoCard(slot)
                     }
                 }
-                .frame(minWidth: 270, maxWidth: .infinity, alignment: .top)
             }
-
-            VStack(spacing: 12) {
-                fileDropBox
-                if files.count > 0 {
-                    fileChipsRow
-                }
-                if let slot = activeSlot, isPreviewable(slot.url) {
-                    MediaPreviewCard(url: slot.url, title: t("preview.title"), playback: playback)
-                }
-                statusCard
-            }
+        } else {
+            fileDropBox
         }
     }
 
     private func mediaInfoCard(_ slot: FileSlot) -> some View {
-        let terms = SubtitleTextStats.topTerms(
-            in: slot.cues.map(\.text).joined(separator: " "),
-            limit: 8
-        )
+        let terms = slot.frequentTerms
 
         return VStack(alignment: .leading, spacing: 8) {
             Label(t("media.info"), systemImage: "info.circle")
@@ -215,19 +236,28 @@ struct ContentView: View {
                 Text(t("media.frequentTerms"))
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
-                FlowLayout(spacing: 6, rowSpacing: 6) {
-                    ForEach(terms) { term in
-                        Text("\(term.term) \(term.count)")
-                            .font(.caption2.monospacedDigit())
-                            .lineLimit(1)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 4)
-                            .background(.quinary, in: Capsule())
+                GeometryReader { proxy in
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(terms) { term in
+                                Text("\(term.term) \(term.count)")
+                                    .font(.caption2.monospacedDigit())
+                                    .lineLimit(1)
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 4)
+                                    .background(.quinary, in: Capsule())
+                            }
+                        }
+                        .padding(.vertical, 1)
+                        .frame(minWidth: proxy.size.width, alignment: .leading)
                     }
                 }
+                .frame(height: 24)
+                .clipped()
             }
         }
         .padding(12)
+        .frame(minHeight: MediaPreviewCard.cardHeight, alignment: .topLeading)
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
     }
@@ -238,12 +268,14 @@ struct ContentView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+                .layoutPriority(1)
             Spacer(minLength: 8)
             Text(value)
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.primary)
                 .lineLimit(1)
                 .truncationMode(.middle)
+                .frame(minWidth: 0, maxWidth: .infinity, alignment: .trailing)
         }
     }
 
@@ -519,6 +551,85 @@ struct ContentView: View {
 
     // MARK: - File drop hero
 
+    private var fileHeaderBar: some View {
+        HStack(spacing: 8) {
+            fileChipsRow
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button {
+                chooseFiles()
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 26, height: 26)
+            }
+            .buttonStyle(.borderless)
+            .help(t("file.add"))
+
+            Button {
+                clearFiles()
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 26, height: 26)
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .disabled(files.isEmpty || isProcessing || isSaving)
+            .help(t("file.clearAll"))
+
+            statusCapsule
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassEffect(.regular, in: Capsule())
+    }
+
+    private var statusCapsule: some View {
+        HStack(spacing: 6) {
+            Image(systemName: statusSystemImage)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(statusTint)
+
+            Text(statusLine)
+                .font(.caption.weight(.medium))
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            if isProcessing {
+                Button {
+                    cancelProcessing()
+                } label: {
+                    Image(systemName: "stop.circle")
+                        .font(.caption.weight(.semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.red)
+                .help(t("action.stop"))
+            }
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .frame(maxWidth: 148, alignment: .trailing)
+        .background(statusTint.opacity(0.12), in: Capsule())
+        .overlay(Capsule().stroke(statusTint.opacity(0.22), lineWidth: 0.8))
+        .help(statusHelpText)
+    }
+
+    private var statusHelpText: String {
+        var lines = [statusLine]
+        if let processingSummary {
+            lines.append(processingSummary)
+        }
+        if let slot = activeSlot, let lastOutputPath = slot.lastOutputPath {
+            lines.append(lastOutputPath)
+        } else if !backend.lastLog.isEmpty {
+            lines.append(backend.lastLog)
+        }
+        return lines.joined(separator: "\n")
+    }
+
     private var fileDropBox: some View {
         let hasFile = hasFiles
         let iconName = hasFile ? "checkmark.seal.fill" : "tray.and.arrow.down"
@@ -559,7 +670,7 @@ struct ContentView: View {
             } label: {
                 Label(t("input.choose"), systemImage: "folder")
             }
-            .controlSize(.large)
+            .controlSize(.regular)
             .buttonStyle(.borderedProminent)
         }
         .padding(14)
@@ -733,31 +844,47 @@ struct ContentView: View {
                     .font(.headline)
                 Spacer()
                 Button {
+                    importSubtitleForActiveFile()
+                } label: {
+                    Label(t("action.importSubtitle"), systemImage: "text.badge.plus")
+                }
+                .labelStyle(.iconOnly)
+                .disabled(activeSlot == nil || isSaving || isProcessing)
+                .help(t("help.importSubtitle"))
+
+                Button {
                     copyOutput()
                 } label: {
                     Label(t("action.copy"), systemImage: "doc.on.doc")
                 }
+                .labelStyle(.iconOnly)
                 .disabled(activeSlot?.hasEditableSubtitle != true)
+                .help(t("action.copy"))
 
                 Button {
                     Task { await saveOutput() }
                 } label: {
                     Label(t("action.save"), systemImage: "square.and.arrow.down")
                 }
+                .labelStyle(.iconOnly)
                 .buttonStyle(.borderedProminent)
                 .disabled(activeSlot?.hasEditableSubtitle != true || isSaving)
+                .help(t("action.save"))
 
                 Button {
                     Task { await saveAllOutputs() }
                 } label: {
                     Label(t("action.saveAll"), systemImage: "square.and.arrow.down.on.square")
                 }
+                .labelStyle(.iconOnly)
                 .disabled(!canSaveAll)
                 .help(t("help.saveAll"))
             }
 
-            if files.indices.contains(activeIndex) {
-                SubtitleEditorPanel(slot: $files[activeIndex], language: language, playback: playback)
+            if files.indices.contains(activeIndex), !files[activeIndex].cues.isEmpty {
+                let slotID = files[activeIndex].id
+                SubtitleEditorPanel(slot: fileSlotBinding(for: slotID), language: language, playback: playback)
+                    .id(slotID)
             } else {
                 ContentUnavailableView(
                     t("output.placeholder"),
@@ -770,6 +897,18 @@ struct ContentView: View {
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func fileSlotBinding(for id: FileSlot.ID) -> Binding<FileSlot> {
+        Binding(
+            get: {
+                files.first { $0.id == id } ?? FileSlot(url: URL(fileURLWithPath: "/dev/null"))
+            },
+            set: { newValue in
+                guard let index = files.firstIndex(where: { $0.id == id }) else { return }
+                files[index] = newValue
+            }
+        )
     }
 
     // MARK: - Helpers
@@ -914,17 +1053,186 @@ struct ContentView: View {
                 if files[existingIndex].mediaInfo == nil {
                     loadMediaInfo(for: normalized, slotID: files[existingIndex].id)
                 }
+                if files[existingIndex].hasEditableSubtitle == false {
+                    importSidecarSubtitle(for: normalized, slotID: files[existingIndex].id)
+                }
                 continue
             }
             let slot = FileSlot(url: normalized)
             files.append(slot)
             selectedIndex = files.count - 1
             loadMediaInfo(for: normalized, slotID: slot.id)
+            importSidecarSubtitle(for: normalized, slotID: slot.id)
         }
         if let selectedIndex {
             activeIndex = selectedIndex
+            if files.indices.contains(selectedIndex), files[selectedIndex].hasEditableSubtitle {
+                detailTab = .output
+            }
         } else if files.indices.contains(activeIndex) == false {
             activeIndex = files.isEmpty ? 0 : files.count - 1
+        }
+    }
+
+    private func importSubtitleForActiveFile() {
+        guard !isProcessing else {
+            errorMessage = t("error.importWhileProcessing")
+            return
+        }
+        guard files.indices.contains(activeIndex) else {
+            errorMessage = t("error.noActiveFile")
+            return
+        }
+
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = subtitleContentTypes()
+        panel.title = t("action.importSubtitle")
+        panel.prompt = t("action.importSubtitle")
+        if panel.runModal() == .OK, let url = panel.url {
+            let slotID = files[activeIndex].id
+            Task {
+                await importSubtitle(from: url, slotID: slotID, automatic: false)
+            }
+        }
+    }
+
+    private func importSidecarSubtitle(for mediaURL: URL, slotID: UUID) {
+        guard let subtitleURL = sidecarSubtitleURL(for: mediaURL) else { return }
+        Task {
+            await importSubtitle(from: subtitleURL, slotID: slotID, automatic: true)
+        }
+    }
+
+    private func sidecarSubtitleURL(for mediaURL: URL) -> URL? {
+        let base = mediaURL.deletingPathExtension()
+        for ext in Self.subtitleExtensions {
+            let candidate = base.appendingPathExtension(ext)
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+        }
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: mediaURL.deletingLastPathComponent().path) else {
+            return nil
+        }
+        let wantedBase = mediaURL.deletingPathExtension().lastPathComponent.lowercased()
+        for name in names {
+            let url = mediaURL.deletingLastPathComponent().appendingPathComponent(name)
+            let matchesBase = url.deletingPathExtension().lastPathComponent.lowercased() == wantedBase
+            let matchesExt = Self.subtitleExtensions.contains(url.pathExtension.lowercased())
+            if matchesBase && matchesExt {
+                return url
+            }
+        }
+        return nil
+    }
+
+    private func importSubtitle(from subtitleURL: URL, slotID: UUID, automatic: Bool) async {
+        guard files.contains(where: { $0.id == slotID }) else { return }
+        guard let format = outputFormat(forSubtitleURL: subtitleURL) else {
+            if !automatic {
+                errorMessage = t("error.unsupportedSubtitle")
+            }
+            return
+        }
+
+        do {
+            var encoding = String.Encoding.utf8
+            let text = try String(contentsOf: subtitleURL, usedEncoding: &encoding)
+            let cues = SubtitleDocument.parse(text, format: format)
+            if format != .txt && cues.isEmpty {
+                throw NSError(
+                    domain: "MSub.SubtitleImport",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: t("error.subtitleNoTimedCues")]
+                )
+            }
+            if !cues.isEmpty {
+                let mediaDuration = try await mediaDurationForSubtitleValidation(slotID: slotID)
+                let maxEnd = cues.map(\.end).max() ?? 0
+                if maxEnd > mediaDuration + 0.05 {
+                    throw NSError(
+                        domain: "MSub.SubtitleImport",
+                        code: 2,
+                        userInfo: [
+                            NSLocalizedDescriptionKey: String(
+                                format: t("error.subtitleTimeExceedsDuration"),
+                                SubtitleDocument.displayTime(maxEnd),
+                                SubtitleDocument.displayTime(mediaDuration)
+                            )
+                        ]
+                    )
+                }
+            }
+            guard let refreshedIndex = files.firstIndex(where: { $0.id == slotID }) else { return }
+            update(at: refreshedIndex) {
+                $0.outputFormat = format
+            }
+            installSubtitleText(text, at: refreshedIndex, format: format, parsedCues: cues)
+            update(at: refreshedIndex) {
+                $0.outputFormat = format
+                $0.statusKey = automatic ? "status.subtitleAutoImported" : "status.subtitleImported"
+                $0.statusDetail = subtitleURL.lastPathComponent
+                if $0.processingState == .idle || $0.processingState == .failed {
+                    $0.processingState = .done
+                }
+                $0.progress = max($0.progress, 1)
+            }
+            if refreshedIndex == activeIndex {
+                detailTab = .output
+            }
+        } catch {
+            if automatic, let index = files.firstIndex(where: { $0.id == slotID }) {
+                update(at: index) {
+                    $0.statusKey = "status.subtitleImportSkipped"
+                    $0.statusDetail = error.localizedDescription
+                }
+            } else {
+                errorMessage = String(format: t("error.subtitleImportFailed"), error.localizedDescription)
+            }
+        }
+    }
+
+    private func mediaDurationForSubtitleValidation(slotID: UUID) async throws -> Double {
+        guard let index = files.firstIndex(where: { $0.id == slotID }) else {
+            throw NSError(
+                domain: "MSub.SubtitleImport",
+                code: 3,
+                userInfo: [NSLocalizedDescriptionKey: t("error.noActiveFile")]
+            )
+        }
+        let slot = files[index]
+        if let duration = slot.mediaInfo?.duration, duration.isFinite, duration > 0 {
+            return duration
+        }
+
+        let asset = AVURLAsset(url: slot.url)
+        let loadedDuration = try? await asset.load(.duration)
+        let seconds = loadedDuration?.seconds ?? 0
+        guard seconds.isFinite, seconds > 0 else {
+            throw NSError(
+                domain: "MSub.SubtitleImport",
+                code: 4,
+                userInfo: [NSLocalizedDescriptionKey: t("error.mediaDurationUnavailable")]
+            )
+        }
+        if let refreshedIndex = files.firstIndex(where: { $0.id == slotID }) {
+            update(at: refreshedIndex) {
+                $0.duration = max($0.duration, seconds)
+            }
+        }
+        return seconds
+    }
+
+    private func outputFormat(forSubtitleURL url: URL) -> OutputFormat? {
+        OutputFormat(rawValue: url.pathExtension.lowercased())
+    }
+
+    private func subtitleContentTypes() -> [UTType] {
+        Self.subtitleExtensions.map { ext in
+            UTType(filenameExtension: ext) ?? .plainText
         }
     }
 
@@ -948,6 +1256,18 @@ struct ContentView: View {
         if activeIndex >= files.count {
             activeIndex = max(0, files.count - 1)
         }
+        if files.isEmpty {
+            detailTab = .segments
+            playback.player.pause()
+        }
+    }
+
+    private func clearFiles() {
+        guard !isProcessing else { return }
+        files.removeAll()
+        activeIndex = 0
+        detailTab = .segments
+        playback.player.pause()
     }
 
     private func update(at index: Int, _ block: (inout FileSlot) -> Void) {
@@ -964,14 +1284,18 @@ struct ContentView: View {
             return
         }
 
-        backend.start()
-        api.baseURL = backend.baseURL
-        try? await Task.sleep(for: .seconds(1))
+        guard await ensureBackendReady(timeout: 25.0) else { return }
         await loadConfig()
     }
 
     private func loadConfig() async {
         do {
+            let isReady = await backend.ensureRunning(timeout: 25.0)
+            api.baseURL = backend.baseURL
+            guard isReady else {
+                connectionState = .disconnected
+                return
+            }
             let config = try await api.fetchConfig()
             settings.apply(config: config)
             connectionState = .connected
@@ -980,10 +1304,21 @@ struct ContentView: View {
         }
     }
 
+    private func ensureBackendReady(timeout: TimeInterval = 25.0) async -> Bool {
+        let isReady = await backend.ensureRunning(timeout: timeout)
+        api.baseURL = backend.baseURL
+        connectionState = isReady ? .connected : .disconnected
+        return isReady
+    }
+
     // MARK: - Sequential processing
 
     private func previewAll() async {
         guard hasFiles else { return }
+        guard await ensureBackendReady() else {
+            errorMessage = backend.message
+            return
+        }
         isProcessing = true
         processingTask = Task { @MainActor in
             for index in files.indices {
@@ -997,6 +1332,10 @@ struct ContentView: View {
 
     private func transcribeAll() async {
         guard hasFiles else { return }
+        guard await ensureBackendReady() else {
+            errorMessage = backend.message
+            return
+        }
         detailTab = .output
         isProcessing = true
         processingTask = Task { @MainActor in
@@ -1069,6 +1408,7 @@ struct ContentView: View {
             $0.processingState = .transcribing
             $0.previewText = ""
             $0.cues = []
+            $0.originalCues = []
             $0.selectedCueID = nil
             $0.jobID = nil
             $0.lastOutputPath = nil
@@ -1264,11 +1604,16 @@ struct ContentView: View {
         Data(slot.editableSubtitleText.utf8)
     }
 
-    private func installSubtitleText(_ text: String, at index: Int, format: OutputFormat) {
-        let cues = SubtitleDocument.parse(text, format: format)
+    private func installSubtitleText(_ text: String, at index: Int, format: OutputFormat, parsedCues: [SubtitleCue]? = nil) {
+        let cues = parsedCues ?? SubtitleDocument.parse(text, format: format)
+        let termsSource = cues.isEmpty ? text : cues.map(\.text).joined(separator: " ")
+        let frequentTerms = SubtitleTextStats.topTerms(in: termsSource, limit: 8)
         update(at: index) {
+            $0.outputFormat = format
             $0.previewText = cues.isEmpty ? text : SubtitleDocument.serialize(cues, format: format)
             $0.cues = cues
+            $0.originalCues = cues
+            $0.frequentTerms = frequentTerms
             $0.selectedCueID = cues.first?.id
             if !$0.cues.isEmpty {
                 $0.duration = max($0.duration, $0.cues.map(\.end).max() ?? 0)
@@ -1348,6 +1693,8 @@ struct FileSlot: Identifiable {
     var url: URL
     var segments: [SubtitleSegment] = []
     var cues: [SubtitleCue] = []
+    var originalCues: [SubtitleCue] = []
+    var frequentTerms: [SubtitleTermFrequency] = []
     var selectedCueID: SubtitleCue.ID?
     var mediaInfo: MediaInfo?
     var duration: Double = 0
@@ -1598,6 +1945,19 @@ struct TimelineView: View {
 extension Notification.Name {
     static let msubOpenFilesRequested = Notification.Name("MSubOpenFilesRequested")
     static let msubOpenRecentFileRequested = Notification.Name("MSubOpenRecentFileRequested")
+    static let msubImportSubtitleRequested = Notification.Name("MSubImportSubtitleRequested")
+    static let msubTranscribeRequested = Notification.Name("MSubTranscribeRequested")
+    static let msubPreviewRequested = Notification.Name("MSubPreviewRequested")
+    static let msubStopRequested = Notification.Name("MSubStopRequested")
+    static let msubSaveAllRequested = Notification.Name("MSubSaveAllRequested")
+    static let msubDeleteSelectedCueRequested = Notification.Name("MSubDeleteSelectedCueRequested")
+    static let msubDuplicateSelectedCueRequested = Notification.Name("MSubDuplicateSelectedCueRequested")
+    static let msubInsertCueBeforeRequested = Notification.Name("MSubInsertCueBeforeRequested")
+    static let msubInsertCueAfterRequested = Notification.Name("MSubInsertCueAfterRequested")
+    static let msubResetSelectedCueRequested = Notification.Name("MSubResetSelectedCueRequested")
+    static let msubZoomTimelineInRequested = Notification.Name("MSubZoomTimelineInRequested")
+    static let msubZoomTimelineOutRequested = Notification.Name("MSubZoomTimelineOutRequested")
+    static let msubToggleTimelineRequested = Notification.Name("MSubToggleTimelineRequested")
 }
 
 @MainActor
@@ -1639,6 +1999,8 @@ final class RecentFilesStore: ObservableObject {
 // MARK: - Media preview
 
 private struct MediaPreviewCard: View {
+    static let cardHeight: CGFloat = 296
+
     let url: URL
     let title: String
     @ObservedObject var playback: PlaybackController
@@ -1651,18 +2013,14 @@ private struct MediaPreviewCard: View {
                 Text(title)
                     .font(.headline)
                 Spacer()
-                Text(url.lastPathComponent)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
             }
 
             VideoPlayer(player: playback.player)
-                .frame(height: playback.hasVideo ? 220 : 72)
+                .frame(height: playback.hasVideo ? 238 : 80)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
         }
         .padding(12)
+        .frame(minHeight: Self.cardHeight, alignment: .topLeading)
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
         .task(id: url) {

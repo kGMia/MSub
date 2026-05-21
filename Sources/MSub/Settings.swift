@@ -2,7 +2,7 @@ import Foundation
 
 @MainActor
 final class TranscriptionSettings: ObservableObject {
-    @Published var model = "./models/FireRedASR2-AED-mlx"
+    @Published var model = ""
     @Published var format: OutputFormat = .srt
     @Published var segmentMode: SegmentMode = .vad
     @Published var vadThreshold = -38.0

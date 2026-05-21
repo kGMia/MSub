@@ -26,7 +26,7 @@ struct MSubApp: App {
                 .environmentObject(recentFiles)
                 .environment(\.locale, language.locale)
                 .background(MenuLocalizationBridge(language: language))
-                .frame(minWidth: 900, minHeight: 640)
+                .frame(minWidth: 820, minHeight: 640)
         }
         .commands {
             CommandGroup(replacing: .newItem) {
@@ -51,6 +51,79 @@ struct MSubApp: App {
                         }
                     }
                 }
+
+                Button(Copy.text("menu.importSubtitle", language: language)) {
+                    NotificationCenter.default.post(name: .msubImportSubtitleRequested, object: nil)
+                }
+                .keyboardShortcut("i", modifiers: [.command, .shift])
+            }
+
+            CommandGroup(after: .saveItem) {
+                Button(Copy.text("menu.saveAll", language: language)) {
+                    NotificationCenter.default.post(name: .msubSaveAllRequested, object: nil)
+                }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+            }
+
+            CommandGroup(after: .pasteboard) {
+                Divider()
+                Button(Copy.text("menu.deleteCue", language: language)) {
+                    NotificationCenter.default.post(name: .msubDeleteSelectedCueRequested, object: nil)
+                }
+                .keyboardShortcut(.delete, modifiers: [.command])
+
+                Button(Copy.text("menu.duplicateCue", language: language)) {
+                    NotificationCenter.default.post(name: .msubDuplicateSelectedCueRequested, object: nil)
+                }
+                .keyboardShortcut("d", modifiers: [.command, .shift])
+
+                Button(Copy.text("menu.resetCue", language: language)) {
+                    NotificationCenter.default.post(name: .msubResetSelectedCueRequested, object: nil)
+                }
+
+                Button(Copy.text("menu.insertCueBefore", language: language)) {
+                    NotificationCenter.default.post(name: .msubInsertCueBeforeRequested, object: nil)
+                }
+                .keyboardShortcut("[", modifiers: [.command, .shift])
+
+                Button(Copy.text("menu.insertCueAfter", language: language)) {
+                    NotificationCenter.default.post(name: .msubInsertCueAfterRequested, object: nil)
+                }
+                .keyboardShortcut("]", modifiers: [.command, .shift])
+            }
+
+            CommandMenu(Copy.text("menu.subtitle", language: language)) {
+                Button(Copy.text("menu.transcribe", language: language)) {
+                    NotificationCenter.default.post(name: .msubTranscribeRequested, object: nil)
+                }
+                .keyboardShortcut(.return, modifiers: [.command])
+
+                Button(Copy.text("menu.preview", language: language)) {
+                    NotificationCenter.default.post(name: .msubPreviewRequested, object: nil)
+                }
+                .keyboardShortcut("p", modifiers: [.command, .shift])
+
+                Button(Copy.text("menu.stopProcessing", language: language)) {
+                    NotificationCenter.default.post(name: .msubStopRequested, object: nil)
+                }
+                .keyboardShortcut(".", modifiers: [.command])
+
+                Divider()
+
+                Button(Copy.text("menu.toggleTimeline", language: language)) {
+                    NotificationCenter.default.post(name: .msubToggleTimelineRequested, object: nil)
+                }
+                .keyboardShortcut("t", modifiers: [.command, .shift])
+
+                Button(Copy.text("menu.zoomTimelineIn", language: language)) {
+                    NotificationCenter.default.post(name: .msubZoomTimelineInRequested, object: nil)
+                }
+                .keyboardShortcut("=", modifiers: [.command, .option])
+
+                Button(Copy.text("menu.zoomTimelineOut", language: language)) {
+                    NotificationCenter.default.post(name: .msubZoomTimelineOutRequested, object: nil)
+                }
+                .keyboardShortcut("-", modifiers: [.command, .option])
             }
         }
 
@@ -81,15 +154,30 @@ private struct MenuLocalizationBridge: View {
 }
 
 private final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var menuObserver: NSObjectProtocol?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        applyMenuLocalization()
+        menuObserver = NotificationCenter.default.addObserver(
+            forName: NSMenu.didBeginTrackingNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            AppDelegate.applyMenuLocalizationFromDefaults()
+        }
+        Self.applyMenuLocalizationFromDefaults()
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
-        applyMenuLocalization()
+        Self.applyMenuLocalizationFromDefaults()
     }
 
-    private func applyMenuLocalization() {
+    func applicationWillTerminate(_ notification: Notification) {
+        if let menuObserver {
+            NotificationCenter.default.removeObserver(menuObserver)
+        }
+    }
+
+    private static func applyMenuLocalizationFromDefaults() {
         let raw = UserDefaults.standard.string(forKey: "huz.uiLanguage") ?? AppLanguage.zh.rawValue
         let language = AppLanguage(rawValue: raw) ?? .zh
         Task { @MainActor in
@@ -145,7 +233,104 @@ private enum MenuLocalizer {
         setAction("performZoom:", title: text("menu.zoom", language), in: mainMenu)
         setAction("arrangeInFront:", title: text("menu.bringAllToFront", language), in: mainMenu)
         setAction("showHelp:", title: String(format: text("menu.helpApp", language), appName), in: mainMenu)
+
+        localizeKnownTitles(in: mainMenu, language: language, appName: appName)
     }
+
+    private static let plainMenuKeys = [
+        "menu.file",
+        "menu.openFile",
+        "menu.openRecent",
+        "menu.importSubtitle",
+        "menu.noRecentFiles",
+        "menu.clearRecentFiles",
+        "menu.clearMenu",
+        "menu.edit",
+        "menu.view",
+        "menu.window",
+        "menu.help",
+        "menu.settings",
+        "menu.services",
+        "menu.subtitle",
+        "menu.transcribe",
+        "menu.preview",
+        "menu.stopProcessing",
+        "menu.saveAll",
+        "menu.deleteCue",
+        "menu.duplicateCue",
+        "menu.insertCueBefore",
+        "menu.insertCueAfter",
+        "menu.resetCue",
+        "menu.toggleTimeline",
+        "menu.zoomTimelineIn",
+        "menu.zoomTimelineOut",
+        "menu.hideOthers",
+        "menu.showAll",
+        "menu.closeWindow",
+        "menu.close",
+        "menu.closeTab",
+        "menu.undo",
+        "menu.redo",
+        "menu.cut",
+        "menu.copy",
+        "menu.paste",
+        "menu.pasteAndMatch",
+        "menu.delete",
+        "menu.selectAll",
+        "menu.find",
+        "menu.findMenu",
+        "menu.findAndReplace",
+        "menu.findNext",
+        "menu.findPrevious",
+        "menu.useSelectionForFind",
+        "menu.jumpToSelection",
+        "menu.spellingGrammar",
+        "menu.showSpellingGrammar",
+        "menu.checkDocumentNow",
+        "menu.checkSpellingWhileTyping",
+        "menu.checkGrammarWithSpelling",
+        "menu.correctSpellingAutomatically",
+        "menu.substitutions",
+        "menu.showSubstitutions",
+        "menu.smartCopyPaste",
+        "menu.smartQuotes",
+        "menu.smartDashes",
+        "menu.smartLinks",
+        "menu.dataDetectors",
+        "menu.textReplacement",
+        "menu.transformations",
+        "menu.makeUpperCase",
+        "menu.makeLowerCase",
+        "menu.capitalize",
+        "menu.speech",
+        "menu.startSpeaking",
+        "menu.stopSpeaking",
+        "menu.startDictation",
+        "menu.emojiSymbols",
+        "menu.toggleSidebar",
+        "menu.showSidebar",
+        "menu.hideSidebar",
+        "menu.showToolbar",
+        "menu.hideToolbar",
+        "menu.customizeToolbar",
+        "menu.fullScreen",
+        "menu.exitFullScreen",
+        "menu.minimize",
+        "menu.zoom",
+        "menu.showPreviousTab",
+        "menu.showNextTab",
+        "menu.showAllTabs",
+        "menu.moveTabToNewWindow",
+        "menu.mergeAllWindows",
+        "menu.bringAllToFront"
+    ]
+
+    private static let appNameMenuKeys = [
+        "menu.aboutApp",
+        "menu.hideApp",
+        "menu.quitApp",
+        "menu.helpApp"
+    ]
 
     private static func text(_ key: String, _ language: AppLanguage) -> String {
         Copy.text(key, language: language)
@@ -181,6 +366,45 @@ private enum MenuLocalizer {
                 setSubmenu(submenu, title: title, in: nested)
             }
         }
+    }
+
+    private static func localizeKnownTitles(in menu: NSMenu, language: AppLanguage, appName: String) {
+        if let localized = localizedMenuTitle(from: menu.title, to: language, appName: appName) {
+            menu.title = localized
+        }
+        for item in menu.items {
+            if let localized = localizedMenuTitle(from: item.title, to: language, appName: appName) {
+                item.title = localized
+                item.submenu?.title = localized
+            }
+            if let submenu = item.submenu {
+                localizeKnownTitles(in: submenu, language: language, appName: appName)
+            }
+        }
+    }
+
+    private static func localizedMenuTitle(from title: String, to language: AppLanguage, appName: String) -> String? {
+        let normalizedTitle = normalizeMenuTitle(title)
+        for key in plainMenuKeys {
+            for sourceLanguage in AppLanguage.allCases where normalizedTitle == normalizeMenuTitle(text(key, sourceLanguage)) {
+                return text(key, language)
+            }
+        }
+        for key in appNameMenuKeys {
+            for sourceLanguage in AppLanguage.allCases {
+                let sourceTitle = String(format: text(key, sourceLanguage), appName)
+                if normalizedTitle == normalizeMenuTitle(sourceTitle) {
+                    return String(format: text(key, language), appName)
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func normalizeMenuTitle(_ title: String) -> String {
+        title
+            .replacingOccurrences(of: "...", with: "…")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
