@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import AVKit
+import QuickLookThumbnailing
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -182,8 +183,8 @@ struct ContentView: View {
             ViewThatFits(in: .horizontal) {
                 HStack(alignment: .top, spacing: 10) {
                     VStack(spacing: 10) {
-                        if let slot = activeSlot, isPreviewable(slot.url) {
-                            MediaPreviewCard(url: slot.url, title: t("preview.title"), playback: playback)
+                        if let slot = activeSlot {
+                            previewView(for: slot.url)
                         }
                     }
                     .frame(width: 350, alignment: .topLeading)
@@ -199,8 +200,8 @@ struct ContentView: View {
                 }
 
                 VStack(spacing: 12) {
-                    if let slot = activeSlot, isPreviewable(slot.url) {
-                        MediaPreviewCard(url: slot.url, title: t("preview.title"), playback: playback)
+                    if let slot = activeSlot {
+                        previewView(for: slot.url)
                     }
                     if let slot = activeSlot {
                         mediaInfoCard(slot)
@@ -349,9 +350,20 @@ struct ContentView: View {
         }
     }
 
-    private func isPreviewable(_ url: URL) -> Bool {
-        let exts: Set<String> = ["mp4", "mov", "m4v", "m4a", "mp3", "wav", "aac", "aiff", "flac", "caf"]
-        return exts.contains(url.pathExtension.lowercased())
+    private func previewKind(_ url: URL) -> MediaPreviewKind {
+        MediaPreviewKind(url: url)
+    }
+
+    @ViewBuilder
+    private func previewView(for url: URL) -> some View {
+        switch previewKind(url) {
+        case .player:
+            MediaPreviewCard(url: url, title: t("preview.title"), playback: playback)
+        case .thumbnail:
+            UnsupportedMediaPreview(url: url, title: t("preview.title"), language: language)
+        case .none:
+            EmptyView()
+        }
     }
 
     // MARK: - Toolbar / status
@@ -1998,6 +2010,128 @@ final class RecentFilesStore: ObservableObject {
 
 // MARK: - Media preview
 
+private enum MediaPreviewKind {
+    case player
+    case thumbnail
+    case none
+
+    init(url: URL) {
+        let ext = url.pathExtension.lowercased()
+        if MediaPreviewKind.playerExtensions.contains(ext) {
+            self = .player
+        } else if MediaPreviewKind.thumbnailExtensions.contains(ext) {
+            self = .thumbnail
+        } else {
+            self = .none
+        }
+    }
+
+    private static let playerExtensions: Set<String> = [
+        "mp4", "mov", "m4v", "qt", "3gp", "3g2",
+        "m4a", "mp3", "wav", "aac", "aiff", "flac", "caf"
+    ]
+
+    private static let thumbnailExtensions: Set<String> = [
+        "mkv", "avi", "webm", "flv", "wmv",
+        "mpg", "mpeg", "ts", "mts", "m2ts",
+        "vob", "ogv", "ogg", "rm", "rmvb", "asf", "divx"
+    ]
+}
+
+private struct UnsupportedMediaPreview: View {
+    let url: URL
+    let title: String
+    let language: AppLanguage
+
+    @State private var thumbnail: NSImage?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: "film")
+                    .foregroundStyle(.teal)
+                Text(title)
+                    .font(.headline)
+                Spacer()
+            }
+
+            ZStack {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(.black.opacity(0.85))
+                if let thumbnail {
+                    Image(nsImage: thumbnail)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                }
+                VStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.title3)
+                        .foregroundStyle(.yellow)
+                    Text(Copy.text("preview.unsupported", language: language))
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(.white)
+                        .multilineTextAlignment(.center)
+                    Text(url.pathExtension.uppercased())
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.white.opacity(0.7))
+                    Text(Copy.text("preview.transcribeStillSupported", language: language))
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.7))
+                        .multilineTextAlignment(.center)
+                }
+                .padding(10)
+                .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
+                .padding(12)
+            }
+            .frame(height: 238)
+        }
+        .padding(12)
+        .frame(minHeight: MediaPreviewCard.cardHeight, alignment: .topLeading)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
+        .task(id: url) {
+            await loadThumbnail()
+        }
+    }
+
+    private func loadThumbnail() async {
+        thumbnail = nil
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        let request = QLThumbnailGenerator.Request(
+            fileAt: url,
+            size: CGSize(width: 600, height: 338),
+            scale: scale,
+            representationTypes: .thumbnail
+        )
+        do {
+            let rep = try await QLThumbnailGenerator.shared.generateBestRepresentation(for: request)
+            thumbnail = rep.nsImage
+        } catch {
+            thumbnail = nil
+        }
+    }
+}
+
+private struct AVPlayerViewRepresentable: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.player = player
+        view.controlsStyle = .inline
+        view.showsFullScreenToggleButton = true
+        view.videoGravity = .resizeAspect
+        return view
+    }
+
+    func updateNSView(_ nsView: AVPlayerView, context: Context) {
+        if nsView.player !== player {
+            nsView.player = player
+        }
+    }
+}
+
 private struct MediaPreviewCard: View {
     static let cardHeight: CGFloat = 296
 
@@ -2015,7 +2149,7 @@ private struct MediaPreviewCard: View {
                 Spacer()
             }
 
-            VideoPlayer(player: playback.player)
+            AVPlayerViewRepresentable(player: playback.player)
                 .frame(height: playback.hasVideo ? 238 : 80)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
         }

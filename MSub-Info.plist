@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh-Hans</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>zh-Hans</string>
+		<string>zh-Hant</string>
+		<string>ja</string>
+		<string>en</string>
+	</array>
+	<key>CFBundleAllowMixedLocalizations</key>
+	<true/>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>MSub 需要访问桌面上的影音文件以生成字幕。</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>MSub 需要访问文稿文件夹中的影音文件以生成字幕。</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>MSub 需要访问下载文件夹中的影音文件以生成字幕。</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>MSub 需要访问网络磁盘上的影音文件以生成字幕。</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>MSub 需要访问外接磁盘上的影音文件以生成字幕。</string>
+</dict>
+</plist>

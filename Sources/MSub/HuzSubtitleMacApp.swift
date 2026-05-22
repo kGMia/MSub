@@ -4,14 +4,16 @@ import UniformTypeIdentifiers
 
 @main
 struct MSubApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-
     @StateObject private var api = APIClient()
     @StateObject private var backend = BackendService()
     @StateObject private var settings = TranscriptionSettings()
     @StateObject private var recentFiles = RecentFilesStore()
 
     @AppStorage("huz.uiLanguage") private var languageRaw = AppLanguage.zh.rawValue
+
+    init() {
+        AppLanguageBootstrap.applyStoredLanguageIfNeeded()
+    }
 
     private var language: AppLanguage {
         AppLanguage(rawValue: languageRaw) ?? .zh
@@ -25,7 +27,6 @@ struct MSubApp: App {
                 .environmentObject(settings)
                 .environmentObject(recentFiles)
                 .environment(\.locale, language.locale)
-                .background(MenuLocalizationBridge(language: language))
                 .frame(minWidth: 820, minHeight: 640)
         }
         .commands {
@@ -131,280 +132,46 @@ struct MSubApp: App {
             PreferencesView()
                 .environmentObject(settings)
                 .environment(\.locale, language.locale)
-                .background(MenuLocalizationBridge(language: language))
                 .frame(width: 420, height: 280)
         }
         .windowResizability(.contentSize)
     }
 }
 
-private struct MenuLocalizationBridge: View {
-    let language: AppLanguage
+// MARK: - Language bootstrap
 
-    var body: some View {
-        Color.clear
-            .frame(width: 0, height: 0)
-            .onAppear {
-                MenuLocalizer.apply(language: language, retries: 4)
-            }
-            .onChange(of: language) { _, newValue in
-                MenuLocalizer.apply(language: newValue, retries: 4)
-            }
-    }
-}
+/// Syncs the user's stored UI language preference into `AppleLanguages` so that
+/// macOS itself localizes the system-provided menu items (App menu, Cut/Copy/Paste,
+/// Window, Help, etc.) on the next launch. Switching language at runtime requires
+/// a relaunch — this is the same pattern Apple's own apps use.
+enum AppLanguageBootstrap {
+    private static let appleLanguagesKey = "AppleLanguages"
 
-private final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var menuObserver: NSObjectProtocol?
-
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        menuObserver = NotificationCenter.default.addObserver(
-            forName: NSMenu.didBeginTrackingNotification,
-            object: nil,
-            queue: .main
-        ) { _ in
-            AppDelegate.applyMenuLocalizationFromDefaults()
-        }
-        Self.applyMenuLocalizationFromDefaults()
-    }
-
-    func applicationDidBecomeActive(_ notification: Notification) {
-        Self.applyMenuLocalizationFromDefaults()
-    }
-
-    func applicationWillTerminate(_ notification: Notification) {
-        if let menuObserver {
-            NotificationCenter.default.removeObserver(menuObserver)
-        }
-    }
-
-    private static func applyMenuLocalizationFromDefaults() {
+    static func applyStoredLanguageIfNeeded() {
         let raw = UserDefaults.standard.string(forKey: "huz.uiLanguage") ?? AppLanguage.zh.rawValue
-        let language = AppLanguage(rawValue: raw) ?? .zh
-        Task { @MainActor in
-            MenuLocalizer.apply(language: language, retries: 8)
-        }
-    }
-}
-
-@MainActor
-private enum MenuLocalizer {
-    static func apply(language: AppLanguage, retries: Int = 0) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(20)) {
-            updateMainMenu(language: language)
-        }
-        guard retries > 0 else { return }
-        for attempt in 1...retries {
-            let delay = DispatchTimeInterval.milliseconds(80 * attempt)
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                updateMainMenu(language: language)
-            }
+        let target = AppLanguage(rawValue: raw) ?? .zh
+        let current = (UserDefaults.standard.array(forKey: appleLanguagesKey) as? [String])?.first
+        if current != target.localeIdentifier {
+            UserDefaults.standard.set([target.localeIdentifier], forKey: appleLanguagesKey)
         }
     }
 
-    private static func updateMainMenu(language: AppLanguage) {
-        guard let mainMenu = NSApp.mainMenu else { return }
-        let appName = Copy.text("app.title", language: language)
-
-        setTopMenu(mainMenu, index: 1, title: text("menu.file", language))
-        setTopMenu(mainMenu, index: 2, title: text("menu.edit", language))
-        setTopMenu(mainMenu, index: 3, title: text("menu.view", language))
-        setTopMenu(mainMenu, index: 4, title: text("menu.window", language))
-        setTopMenu(mainMenu, index: 5, title: text("menu.help", language))
-
-        setAction("orderFrontStandardAboutPanel:", title: String(format: text("menu.aboutApp", language), appName), in: mainMenu)
-        setAction("showSettingsWindow:", title: text("menu.settings", language), in: mainMenu)
-        setSubmenu(NSApp.servicesMenu, title: text("menu.services", language), in: mainMenu)
-        setAction("hide:", title: String(format: text("menu.hideApp", language), appName), in: mainMenu)
-        setAction("hideOtherApplications:", title: text("menu.hideOthers", language), in: mainMenu)
-        setAction("unhideAllApplications:", title: text("menu.showAll", language), in: mainMenu)
-        setAction("terminate:", title: String(format: text("menu.quitApp", language), appName), in: mainMenu)
-
-        setAction("performClose:", title: text("menu.closeWindow", language), in: mainMenu)
-        setAction("undo:", title: text("menu.undo", language), in: mainMenu)
-        setAction("redo:", title: text("menu.redo", language), in: mainMenu)
-        setAction("cut:", title: text("menu.cut", language), in: mainMenu)
-        setAction("copy:", title: text("menu.copy", language), in: mainMenu)
-        setAction("paste:", title: text("menu.paste", language), in: mainMenu)
-        setAction("delete:", title: text("menu.delete", language), in: mainMenu)
-        setAction("selectAll:", title: text("menu.selectAll", language), in: mainMenu)
-        setAction("toggleSidebar:", title: text("menu.toggleSidebar", language), in: mainMenu)
-        setAction("toggleFullScreen:", title: text("menu.fullScreen", language), in: mainMenu)
-        setAction("performMiniaturize:", title: text("menu.minimize", language), in: mainMenu)
-        setAction("performZoom:", title: text("menu.zoom", language), in: mainMenu)
-        setAction("arrangeInFront:", title: text("menu.bringAllToFront", language), in: mainMenu)
-        setAction("showHelp:", title: String(format: text("menu.helpApp", language), appName), in: mainMenu)
-
-        localizeKnownTitles(in: mainMenu, language: language, appName: appName)
+    /// Updates both the stored preference and `AppleLanguages`. Returns `true`
+    /// if a relaunch is needed to apply the change to system-provided menus.
+    static func setLanguage(_ language: AppLanguage) -> Bool {
+        let previous = (UserDefaults.standard.array(forKey: appleLanguagesKey) as? [String])?.first
+        UserDefaults.standard.set(language.rawValue, forKey: "huz.uiLanguage")
+        UserDefaults.standard.set([language.localeIdentifier], forKey: appleLanguagesKey)
+        return previous != language.localeIdentifier
     }
 
-    private static let plainMenuKeys = [
-        "menu.file",
-        "menu.openFile",
-        "menu.openRecent",
-        "menu.importSubtitle",
-        "menu.noRecentFiles",
-        "menu.clearRecentFiles",
-        "menu.clearMenu",
-        "menu.edit",
-        "menu.view",
-        "menu.window",
-        "menu.help",
-        "menu.settings",
-        "menu.services",
-        "menu.subtitle",
-        "menu.transcribe",
-        "menu.preview",
-        "menu.stopProcessing",
-        "menu.saveAll",
-        "menu.deleteCue",
-        "menu.duplicateCue",
-        "menu.insertCueBefore",
-        "menu.insertCueAfter",
-        "menu.resetCue",
-        "menu.toggleTimeline",
-        "menu.zoomTimelineIn",
-        "menu.zoomTimelineOut",
-        "menu.hideOthers",
-        "menu.showAll",
-        "menu.closeWindow",
-        "menu.close",
-        "menu.closeTab",
-        "menu.undo",
-        "menu.redo",
-        "menu.cut",
-        "menu.copy",
-        "menu.paste",
-        "menu.pasteAndMatch",
-        "menu.delete",
-        "menu.selectAll",
-        "menu.find",
-        "menu.findMenu",
-        "menu.findAndReplace",
-        "menu.findNext",
-        "menu.findPrevious",
-        "menu.useSelectionForFind",
-        "menu.jumpToSelection",
-        "menu.spellingGrammar",
-        "menu.showSpellingGrammar",
-        "menu.checkDocumentNow",
-        "menu.checkSpellingWhileTyping",
-        "menu.checkGrammarWithSpelling",
-        "menu.correctSpellingAutomatically",
-        "menu.substitutions",
-        "menu.showSubstitutions",
-        "menu.smartCopyPaste",
-        "menu.smartQuotes",
-        "menu.smartDashes",
-        "menu.smartLinks",
-        "menu.dataDetectors",
-        "menu.textReplacement",
-        "menu.transformations",
-        "menu.makeUpperCase",
-        "menu.makeLowerCase",
-        "menu.capitalize",
-        "menu.speech",
-        "menu.startSpeaking",
-        "menu.stopSpeaking",
-        "menu.startDictation",
-        "menu.emojiSymbols",
-        "menu.toggleSidebar",
-        "menu.showSidebar",
-        "menu.hideSidebar",
-        "menu.showToolbar",
-        "menu.hideToolbar",
-        "menu.customizeToolbar",
-        "menu.fullScreen",
-        "menu.exitFullScreen",
-        "menu.minimize",
-        "menu.zoom",
-        "menu.showPreviousTab",
-        "menu.showNextTab",
-        "menu.showAllTabs",
-        "menu.moveTabToNewWindow",
-        "menu.mergeAllWindows",
-        "menu.bringAllToFront"
-    ]
-
-    private static let appNameMenuKeys = [
-        "menu.aboutApp",
-        "menu.hideApp",
-        "menu.quitApp",
-        "menu.helpApp"
-    ]
-
-    private static func text(_ key: String, _ language: AppLanguage) -> String {
-        Copy.text(key, language: language)
-    }
-
-    private static func setTopMenu(_ menu: NSMenu, index: Int, title: String) {
-        guard menu.items.indices.contains(index) else { return }
-        let item = menu.items[index]
-        item.title = title
-        item.submenu?.title = title
-    }
-
-    private static func setAction(_ selectorName: String, title: String, in menu: NSMenu) {
-        let selector = NSSelectorFromString(selectorName)
-        for item in menu.items {
-            if item.action == selector {
-                item.title = title
-            }
-            if let submenu = item.submenu {
-                setAction(selectorName, title: title, in: submenu)
-            }
-        }
-    }
-
-    private static func setSubmenu(_ submenu: NSMenu?, title: String, in menu: NSMenu) {
-        guard let submenu else { return }
-        submenu.title = title
-        for item in menu.items {
-            if item.submenu === submenu {
-                item.title = title
-            }
-            if let nested = item.submenu {
-                setSubmenu(submenu, title: title, in: nested)
-            }
-        }
-    }
-
-    private static func localizeKnownTitles(in menu: NSMenu, language: AppLanguage, appName: String) {
-        if let localized = localizedMenuTitle(from: menu.title, to: language, appName: appName) {
-            menu.title = localized
-        }
-        for item in menu.items {
-            if let localized = localizedMenuTitle(from: item.title, to: language, appName: appName) {
-                item.title = localized
-                item.submenu?.title = localized
-            }
-            if let submenu = item.submenu {
-                localizeKnownTitles(in: submenu, language: language, appName: appName)
-            }
-        }
-    }
-
-    private static func localizedMenuTitle(from title: String, to language: AppLanguage, appName: String) -> String? {
-        let normalizedTitle = normalizeMenuTitle(title)
-        for key in plainMenuKeys {
-            for sourceLanguage in AppLanguage.allCases where normalizedTitle == normalizeMenuTitle(text(key, sourceLanguage)) {
-                return text(key, language)
-            }
-        }
-        for key in appNameMenuKeys {
-            for sourceLanguage in AppLanguage.allCases {
-                let sourceTitle = String(format: text(key, sourceLanguage), appName)
-                if normalizedTitle == normalizeMenuTitle(sourceTitle) {
-                    return String(format: text(key, language), appName)
-                }
-            }
-        }
-        return nil
-    }
-
-    private static func normalizeMenuTitle(_ title: String) -> String {
-        title
-            .replacingOccurrences(of: "...", with: "…")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+    static func relaunchApp() {
+        let url = Bundle.main.bundleURL
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        task.arguments = ["-n", url.path]
+        try? task.run()
+        NSApp.terminate(nil)
     }
 }
 
@@ -413,6 +180,7 @@ private enum MenuLocalizer {
 struct PreferencesView: View {
     @EnvironmentObject private var settings: TranscriptionSettings
     @AppStorage("huz.uiLanguage") private var languageRaw = AppLanguage.zh.rawValue
+    @State private var pendingRelaunchLanguage: AppLanguage?
 
     private var language: AppLanguage {
         AppLanguage(rawValue: languageRaw) ?? .zh
@@ -430,6 +198,28 @@ struct PreferencesView: View {
                 .tabItem { Label(t("prefs.appearance"), systemImage: "paintbrush") }
         }
         .padding(12)
+        .alert(
+            t("prefs.relaunchTitle"),
+            isPresented: relaunchAlertBinding,
+            presenting: pendingRelaunchLanguage
+        ) { _ in
+            Button(t("prefs.relaunchNow")) {
+                pendingRelaunchLanguage = nil
+                AppLanguageBootstrap.relaunchApp()
+            }
+            Button(t("prefs.relaunchLater"), role: .cancel) {
+                pendingRelaunchLanguage = nil
+            }
+        } message: { _ in
+            Text(t("prefs.relaunchMessage"))
+        }
+    }
+
+    private var relaunchAlertBinding: Binding<Bool> {
+        Binding(
+            get: { pendingRelaunchLanguage != nil },
+            set: { if !$0 { pendingRelaunchLanguage = nil } }
+        )
     }
 
     private var generalTab: some View {
@@ -506,7 +296,11 @@ struct PreferencesView: View {
         Binding {
             language
         } set: { newValue in
-            languageRaw = newValue.rawValue
+            guard newValue != language else { return }
+            let needsRelaunch = AppLanguageBootstrap.setLanguage(newValue)
+            if needsRelaunch {
+                pendingRelaunchLanguage = newValue
+            }
         }
     }
 

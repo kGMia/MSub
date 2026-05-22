@@ -33,6 +33,7 @@
 		000000000000000000000301 /* MSub.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MSub.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		973399052FBE32A400FDA459 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 		974192942FBD973900E74857 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; name = Localizable.xcstrings; path = Sources/MSub/Localizable.xcstrings; sourceTree = "<group>"; };
+		979A48422FBF74DD00FEF70A /* MSub-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "MSub-Info.plist"; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -51,6 +52,7 @@
 		000000000000000000000010 /* MSub */ = {
 			isa = PBXGroup;
 			children = (
+				979A48422FBF74DD00FEF70A /* MSub-Info.plist */,
 				000000000000000000000201 /* APIClient.swift */,
 				000000000000000000000202 /* BackendService.swift */,
 				000000000000000000000203 /* ContentView.swift */,
@@ -316,11 +318,12 @@
 				CODE_SIGN_ENTITLEMENTS = MSub.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 9;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "MSub-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = MSub;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -345,11 +348,12 @@
 				CODE_SIGN_ENTITLEMENTS = MSub.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 9;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "MSub-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = MSub;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
 				LD_RUNPATH_SEARCH_PATHS = (
