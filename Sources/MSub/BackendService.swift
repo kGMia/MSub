@@ -44,7 +44,7 @@ final class BackendService: ObservableObject {
         environment["MSUB_PORT"] = "\(port)"
         environment["MSUB_BACKEND_ROOT"] = workspace.path
         environment["MSUB_PARENT_PID"] = "\(ProcessInfo.processInfo.processIdentifier)"
-        environment["MSUB_MODEL_IDLE_SECONDS"] = environment["MSUB_MODEL_IDLE_SECONDS"] ?? "300"
+        environment["MSUB_MODEL_IDLE_SECONDS"] = environment["MSUB_MODEL_IDLE_SECONDS"] ?? "120"
         environment["PYTHONUNBUFFERED"] = "1"
         environment["PYTHONIOENCODING"] = "utf-8"
         environment["UV_NO_PROGRESS"] = "1"

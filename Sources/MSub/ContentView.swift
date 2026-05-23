@@ -25,6 +25,8 @@ struct ContentView: View {
     @State private var selectedPreset: RecognitionPreset = .balanced
     @State private var detailTab: DetailTab = .segments
     @State private var processingTask: Task<Void, Never>?
+    @State private var selectedFrequentTerm: String?
+    @State private var chipScrollEdges = ChipScrollEdges(leading: false, trailing: false)
 
     private var language: AppLanguage {
         AppLanguage(rawValue: languageRaw) ?? .zh
@@ -154,6 +156,9 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .msubSaveAllRequested)) { _ in
             Task { await saveAllOutputs() }
         }
+        .onChange(of: activeIndex) { _, _ in
+            selectedFrequentTerm = nil
+        }
     }
 
     // MARK: - Detail column
@@ -241,12 +246,7 @@ struct ContentView: View {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 6) {
                             ForEach(terms) { term in
-                                Text("\(term.term) \(term.count)")
-                                    .font(.caption2.monospacedDigit())
-                                    .lineLimit(1)
-                                    .padding(.horizontal, 7)
-                                    .padding(.vertical, 4)
-                                    .background(.quinary, in: Capsule())
+                                frequentTermPill(term)
                             }
                         }
                         .padding(.vertical, 1)
@@ -261,6 +261,42 @@ struct ContentView: View {
         .frame(minHeight: MediaPreviewCard.cardHeight, alignment: .topLeading)
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func frequentTermPill(_ term: SubtitleTermFrequency) -> some View {
+        let isSelected = selectedFrequentTerm == term.term
+        let tint: Color = isSelected ? .yellow : .secondary
+        return Button {
+            if isSelected {
+                selectedFrequentTerm = nil
+            } else {
+                selectedFrequentTerm = term.term
+            }
+        } label: {
+            Text("\(term.term) \(term.count)")
+                .font(.caption2.monospacedDigit())
+                .lineLimit(1)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 4)
+                .background(
+                    isSelected ? AnyShapeStyle(Color.yellow.opacity(0.32)) : AnyShapeStyle(.quinary),
+                    in: Capsule()
+                )
+                .overlay(
+                    Capsule().stroke(tint.opacity(isSelected ? 0.55 : 0), lineWidth: 1)
+                )
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help(term.term)
+        .contextMenu {
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(term.term, forType: .string)
+            } label: {
+                Label(t("action.copy"), systemImage: "doc.on.doc")
+            }
+        }
     }
 
     private func compactInfoRow(_ title: String, value: String) -> some View {
@@ -591,11 +627,14 @@ struct ContentView: View {
             .help(t("file.clearAll"))
 
             statusCapsule
+                .layoutPriority(1)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassEffect(.regular, in: Capsule())
+        .animation(.spring(response: 0.55, dampingFraction: 0.82), value: compactStatusText)
+        .animation(.spring(response: 0.55, dampingFraction: 0.82), value: isProcessing)
     }
 
     private var statusCapsule: some View {
@@ -603,11 +642,13 @@ struct ContentView: View {
             Image(systemName: statusSystemImage)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(statusTint)
+                .contentTransition(.symbolEffect(.replace))
 
-            Text(statusLine)
+            Text(compactStatusText)
                 .font(.caption.weight(.medium))
                 .lineLimit(1)
                 .truncationMode(.middle)
+                .contentTransition(.opacity)
 
             if isProcessing {
                 Button {
@@ -619,14 +660,40 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(.red)
                 .help(t("action.stop"))
+                .transition(.scale.combined(with: .opacity))
             }
         }
         .padding(.horizontal, 9)
         .padding(.vertical, 5)
-        .frame(maxWidth: 148, alignment: .trailing)
         .background(statusTint.opacity(0.12), in: Capsule())
         .overlay(Capsule().stroke(statusTint.opacity(0.22), lineWidth: 0.8))
+        .clipShape(Capsule())
+        .geometryGroup()
+        .fixedSize(horizontal: true, vertical: true)
+        .animation(.spring(response: 0.55, dampingFraction: 0.82), value: compactStatusText)
+        .animation(.spring(response: 0.55, dampingFraction: 0.82), value: isProcessing)
+        .animation(.spring(response: 0.55, dampingFraction: 0.82), value: statusSystemImage)
+        .animation(.spring(response: 0.55, dampingFraction: 0.82), value: statusTint)
         .help(statusHelpText)
+    }
+
+    private var compactStatusText: String {
+        guard let slot = activeSlot else { return t("status.ready") }
+        let base = t(slot.statusKey)
+        let detail = slot.statusDetail
+        if detail.isEmpty { return base }
+        if isShortDetail(detail) {
+            return "\(base) · \(detail)"
+        }
+        return base
+    }
+
+    private func isShortDetail(_ detail: String) -> Bool {
+        guard detail.count <= 16 else { return false }
+        if detail.contains("/") && (detail.contains(".") || detail.contains(" ")) {
+            return false
+        }
+        return true
     }
 
     private var statusHelpText: String {
@@ -712,60 +779,62 @@ struct ContentView: View {
     private var fileChipsRow: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                ForEach(files.indices, id: \.self) { index in
+                ForEach(Array(files.enumerated()), id: \.element.id) { index, _ in
                     fileChip(index: index)
+                        .transition(
+                            .asymmetric(
+                                insertion: .scale(scale: 0.7).combined(with: .opacity),
+                                removal: .scale(scale: 0.6).combined(with: .opacity)
+                            )
+                        )
                 }
             }
-            .padding(.horizontal, 2)
+            .padding(.horizontal, 10)
             .padding(.vertical, 4)
+            .animation(.spring(response: 0.45, dampingFraction: 0.82), value: files.map(\.id))
         }
-        .frame(maxWidth: .infinity)
+        .onScrollGeometryChange(for: ChipScrollEdges.self) { geometry in
+            let visible = geometry.visibleRect
+            let contentWidth = geometry.contentSize.width
+            return ChipScrollEdges(
+                leading: visible.minX > 0.5,
+                trailing: visible.maxX < contentWidth - 0.5
+            )
+        } action: { _, newValue in
+            chipScrollEdges = newValue
+        }
+        .mask(chipFadeMask)
+        .animation(.easeInOut(duration: 0.2), value: chipScrollEdges)
+    }
+
+    private var chipFadeMask: some View {
+        let leading = chipScrollEdges.leading
+        let trailing = chipScrollEdges.trailing
+        return LinearGradient(
+            stops: [
+                .init(color: .clear, location: leading ? 0 : -0.001),
+                .init(color: .black, location: leading ? 0.06 : 0),
+                .init(color: .black, location: trailing ? 0.94 : 1),
+                .init(color: .clear, location: trailing ? 1 : 1.001)
+            ],
+            startPoint: .leading,
+            endPoint: .trailing
+        )
     }
 
     private func fileChip(index: Int) -> some View {
         let slot = files[index]
         let isActive = index == activeIndex
-        return HStack(spacing: 6) {
-            Image(systemName: chipIcon(slot.processingState))
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(chipColor(slot.processingState))
-            Text(slot.url.lastPathComponent)
-                .font(.caption)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .frame(maxWidth: 180, alignment: .leading)
-            if case .previewing = slot.processingState {
-                ProgressView()
-                    .controlSize(.mini)
-            } else if case .transcribing = slot.processingState {
-                ProgressView()
-                    .controlSize(.mini)
-            }
-            Button {
-                remove(at: index)
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(.secondary)
-                    .padding(2)
-            }
-            .buttonStyle(.plain)
-            .help(t("file.remove"))
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(
-            isActive ? AnyShapeStyle(Color.teal.opacity(0.16)) : AnyShapeStyle(.quinary),
-            in: Capsule()
+        return FileChipView(
+            slot: slot,
+            isActive: isActive,
+            iconName: chipIcon(slot.processingState),
+            iconColor: chipColor(slot.processingState),
+            removeHelp: t("file.remove"),
+            statusHelp: [t(slot.statusKey), slot.statusDetail].filter { !$0.isEmpty }.joined(separator: " · "),
+            onSelect: { activeIndex = index },
+            onRemove: { remove(at: index) }
         )
-        .overlay(
-            Capsule().stroke(isActive ? Color.teal : Color.clear, lineWidth: 1.2)
-        )
-        .contentShape(Capsule())
-        .onTapGesture {
-            activeIndex = index
-        }
-        .help([t(slot.statusKey), slot.statusDetail].filter { !$0.isEmpty }.joined(separator: " · "))
     }
 
     private func chipIcon(_ state: FileSlot.ProcessingState) -> String {
@@ -895,8 +964,13 @@ struct ContentView: View {
 
             if files.indices.contains(activeIndex), !files[activeIndex].cues.isEmpty {
                 let slotID = files[activeIndex].id
-                SubtitleEditorPanel(slot: fileSlotBinding(for: slotID), language: language, playback: playback)
-                    .id(slotID)
+                SubtitleEditorPanel(
+                    slot: fileSlotBinding(for: slotID),
+                    selectedFrequentTerm: $selectedFrequentTerm,
+                    language: language,
+                    playback: playback
+                )
+                .id(slotID)
             } else {
                 ContentUnavailableView(
                     t("output.placeholder"),
@@ -960,22 +1034,23 @@ struct ContentView: View {
     }
 
     private func stepperField(_ title: String, value: Binding<Int>, in range: ClosedRange<Int>, help: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                parameterLabel(title, help: help)
-                Spacer()
-                Text("\(value.wrappedValue)")
-                    .font(.caption.monospacedDigit().bold())
-            }
+        HStack(spacing: 6) {
+            parameterLabel(title, help: help)
+            Spacer(minLength: 4)
+            Text("\(value.wrappedValue)")
+                .font(.caption.monospacedDigit().bold())
+                .frame(minWidth: 26, alignment: .trailing)
+                .contentTransition(.numericText())
+                .animation(.smooth(duration: 0.18), value: value.wrappedValue)
             Stepper("", value: value, in: range)
                 .labelsHidden()
-                .frame(maxWidth: .infinity, alignment: .trailing)
+                .controlSize(.mini)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func stackedField<Content: View>(_ title: String, help: String?, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 2) {
             parameterLabel(title, help: help)
             content()
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -984,7 +1059,7 @@ struct ContentView: View {
     }
 
     private func parameterLabel(_ title: String, help: String?) -> some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 3) {
             Text(title)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -994,6 +1069,7 @@ struct ContentView: View {
                 ParameterHelpIcon(help: help)
             }
         }
+        .frame(height: 16)
     }
 
     private var transcribeButton: some View {
@@ -1161,8 +1237,8 @@ struct ContentView: View {
                     userInfo: [NSLocalizedDescriptionKey: t("error.subtitleNoTimedCues")]
                 )
             }
-            if !cues.isEmpty {
-                let mediaDuration = try await mediaDurationForSubtitleValidation(slotID: slotID)
+            if !cues.isEmpty,
+               let mediaDuration = await mediaDurationForSubtitleValidation(slotID: slotID) {
                 let maxEnd = cues.map(\.end).max() ?? 0
                 if maxEnd > mediaDuration + 0.05 {
                     throw NSError(
@@ -1207,28 +1283,27 @@ struct ContentView: View {
         }
     }
 
-    private func mediaDurationForSubtitleValidation(slotID: UUID) async throws -> Double {
+    /// Returns the media's duration for subtitle bounds validation, or `nil` when
+    /// the container is too opaque for AVFoundation to surface a duration (e.g.,
+    /// some MKVs). Callers should treat `nil` as "skip the bounds check" so the
+    /// subtitle can still be imported.
+    private func mediaDurationForSubtitleValidation(slotID: UUID) async -> Double? {
         guard let index = files.firstIndex(where: { $0.id == slotID }) else {
-            throw NSError(
-                domain: "MSub.SubtitleImport",
-                code: 3,
-                userInfo: [NSLocalizedDescriptionKey: t("error.noActiveFile")]
-            )
+            return nil
         }
         let slot = files[index]
         if let duration = slot.mediaInfo?.duration, duration.isFinite, duration > 0 {
             return duration
+        }
+        if slot.duration.isFinite, slot.duration > 0 {
+            return slot.duration
         }
 
         let asset = AVURLAsset(url: slot.url)
         let loadedDuration = try? await asset.load(.duration)
         let seconds = loadedDuration?.seconds ?? 0
         guard seconds.isFinite, seconds > 0 else {
-            throw NSError(
-                domain: "MSub.SubtitleImport",
-                code: 4,
-                userInfo: [NSLocalizedDescriptionKey: t("error.mediaDurationUnavailable")]
-            )
+            return nil
         }
         if let refreshedIndex = files.firstIndex(where: { $0.id == slotID }) {
             update(at: refreshedIndex) {
@@ -1653,6 +1728,76 @@ struct ContentView: View {
     }
 }
 
+private struct ChipScrollEdges: Equatable {
+    var leading: Bool
+    var trailing: Bool
+}
+
+private struct FileChipView: View {
+    let slot: FileSlot
+    let isActive: Bool
+    let iconName: String
+    let iconColor: Color
+    let removeHelp: String
+    let statusHelp: String
+    let onSelect: () -> Void
+    let onRemove: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: iconName)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(iconColor)
+            Text(slot.url.lastPathComponent)
+                .font(.caption)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: 180, alignment: .leading)
+            if case .previewing = slot.processingState {
+                ProgressView()
+                    .controlSize(.mini)
+            } else if case .transcribing = slot.processingState {
+                ProgressView()
+                    .controlSize(.mini)
+            }
+            if isHovering {
+                Button {
+                    onRemove()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .padding(2)
+                }
+                .buttonStyle(.plain)
+                .help(removeHelp)
+                .transition(.opacity.combined(with: .scale(scale: 0.6)))
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            isActive ? AnyShapeStyle(Color.teal.opacity(0.16)) : AnyShapeStyle(.quinary),
+            in: Capsule()
+        )
+        .overlay(
+            Capsule().stroke(isActive ? Color.teal : Color.clear, lineWidth: 1.2)
+        )
+        .contentShape(Capsule())
+        .onTapGesture {
+            onSelect()
+        }
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.18)) {
+                isHovering = hovering
+            }
+        }
+        .help(statusHelp)
+    }
+}
+
 private struct ParameterHelpIcon: View {
     let help: String
     @State private var isHovering = false
@@ -1667,7 +1812,7 @@ private struct ParameterHelpIcon: View {
             Image(systemName: "questionmark.circle")
                 .font(.caption2)
                 .foregroundStyle(isPresented || isHovering ? .primary : .tertiary)
-                .frame(width: 22, height: 22)
+                .frame(width: 16, height: 16)
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)

@@ -165,6 +165,7 @@ enum AppLanguageBootstrap {
         return previous != language.localeIdentifier
     }
 
+    @MainActor
     static func relaunchApp() {
         let url = Bundle.main.bundleURL
         let task = Process()

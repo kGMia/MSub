@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import CryptoKit
 import NaturalLanguage
 import SwiftUI
 
@@ -492,10 +493,17 @@ final class PlaybackController: ObservableObject {
         duration = 0
         hasVideo = false
         playbackEndTime = nil
-
-        let asset = AVURLAsset(url: url)
-        let item = AVPlayerItem(asset: asset)
         player.pause()
+        player.replaceCurrentItem(with: nil)
+
+        // For containers AVFoundation can't natively play (MKV, etc.) the player
+        // would stall or stop early. Resolve to a clean m4a extraction up front
+        // so playback always traverses the full audio.
+        let playbackURL = await AudioSource.resolve(url)
+        guard currentURL == url else { return }
+
+        let asset = AVURLAsset(url: playbackURL)
+        let item = AVPlayerItem(asset: asset)
         player.replaceCurrentItem(with: item)
 
         let loadedDuration = (try? await asset.load(.duration)) ?? .zero
@@ -575,8 +583,13 @@ final class PlaybackController: ObservableObject {
 
 struct SubtitleEditorPanel: View {
     @Binding var slot: FileSlot
+    @Binding var selectedFrequentTerm: String?
     let language: AppLanguage
     @ObservedObject var playback: PlaybackController
+
+    @EnvironmentObject private var api: APIClient
+    @EnvironmentObject private var backend: BackendService
+    @EnvironmentObject private var settings: TranscriptionSettings
 
     @State private var waveform = WaveformSamples([])
     @State private var isLoadingWaveform = false
@@ -593,8 +606,10 @@ struct SubtitleEditorPanel: View {
     @State private var previewSyncTask: Task<Void, Never>?
     @State private var termStatsTask: Task<Void, Never>?
     @State private var waveformReloadTask: Task<Void, Never>?
+    @State private var transcribingCueID: SubtitleCue.ID?
+    @State private var transcribeError: String?
 
-    private static let waveformResolutionSteps = [720, 1_440, 2_880, 5_760, 11_520, 23_040, 46_080, 92_160, 131_072]
+    private static let waveformResolutionSteps = [720, 1_440, 2_880, 5_760, 11_520, 23_040, 46_080, 92_160, 131_072, 262_144, 524_288, 1_048_576]
 
     private var duration: Double {
         let cueEnd = slot.cues.map(\.end).max() ?? 0.001
@@ -608,6 +623,12 @@ struct SubtitleEditorPanel: View {
 
     private var maxTimelineZoom: Double {
         max(8.0, ceil(duration / 4.0))
+    }
+
+    private var activeFindHighlightTerm: String? {
+        guard isFindReplaceExpanded else { return nil }
+        let trimmed = findText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private var waveformTargetSamples: Int {
@@ -639,7 +660,7 @@ struct SubtitleEditorPanel: View {
             } else {
                 timelinePanel
 
-                HStack(alignment: .top, spacing: 12) {
+                HStack(alignment: .top, spacing: 18) {
                     subtitleBlocks
                         .frame(minWidth: 240, maxWidth: .infinity)
 
@@ -649,6 +670,7 @@ struct SubtitleEditorPanel: View {
                     }
                     .frame(width: 235)
                 }
+                .padding(.trailing, 6)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
             }
         }
@@ -852,6 +874,8 @@ struct SubtitleEditorPanel: View {
                 ZoomableTimeline(
                     cues: $slot.cues,
                     selectedCueID: $slot.selectedCueID,
+                    highlightTerm: $selectedFrequentTerm,
+                    findTerm: activeFindHighlightTerm,
                     waveform: waveform,
                     duration: duration,
                     zoom: $timelineZoom,
@@ -871,6 +895,8 @@ struct SubtitleEditorPanel: View {
                 CompactTimelineStrip(
                     cues: slot.cues,
                     selectedCueID: $slot.selectedCueID,
+                    highlightTerm: $selectedFrequentTerm,
+                    findTerm: activeFindHighlightTerm,
                     waveform: waveform,
                     duration: duration,
                     currentTime: playback.currentTime,
@@ -927,75 +953,90 @@ struct SubtitleEditorPanel: View {
     }
 
     private var findReplaceBar: some View {
-        DisclosureGroup(isExpanded: $isFindReplaceExpanded) {
-            VStack(alignment: .leading, spacing: 8) {
-                TextField(Copy.text("editor.find", language: language), text: $findText)
-                    .textFieldStyle(.roundedBorder)
-
-                HStack(spacing: 8) {
-                    Button {
-                        findNext()
-                    } label: {
-                        Label(Copy.text("editor.findNext", language: language), systemImage: "arrow.down")
-                    }
-                    .labelStyle(.iconOnly)
-                    .disabled(findText.isEmpty)
-                    .help(Copy.text("editor.findNext.help", language: language))
-
-                    Toggle(Copy.text("editor.matchCase", language: language), isOn: $matchCase)
-                        .toggleStyle(.checkbox)
-                        .font(.caption)
-                        .fixedSize()
-
-                    Spacer(minLength: 0)
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    isFindReplaceExpanded.toggle()
                 }
-
-                TextField(Copy.text("editor.replace", language: language), text: $replacementText)
-                    .textFieldStyle(.roundedBorder)
-
+            } label: {
                 HStack(spacing: 8) {
-                    Button {
-                        replaceCurrent()
-                    } label: {
-                        Label(Copy.text("editor.replaceCurrent", language: language), systemImage: "arrow.right.to.line")
-                    }
-                    .labelStyle(.iconOnly)
-                    .disabled(findText.isEmpty)
-                    .help(Copy.text("editor.replaceCurrent.help", language: language))
-
-                    Button {
-                        replaceAll()
-                    } label: {
-                        Label(Copy.text("editor.replaceAll", language: language), systemImage: "text.badge.checkmark")
-                    }
-                    .labelStyle(.iconOnly)
-                    .disabled(findText.isEmpty)
-                    .help(Copy.text("editor.replaceAll.help", language: language))
-
+                    Label(Copy.text("editor.findReplace", language: language), systemImage: "magnifyingglass")
+                        .font(.caption.weight(.semibold))
                     Spacer(minLength: 8)
+                    if !findText.isEmpty || !findStatus.isEmpty {
+                        Text(findStatusText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    Image(systemName: isFindReplaceExpanded ? "chevron.up" : "chevron.down")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
                 }
-
-                Text(findStatusText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                .contentShape(Rectangle())
             }
-            .padding(.top, 8)
-        } label: {
-            HStack(spacing: 8) {
-                Label(Copy.text("editor.findReplace", language: language), systemImage: "magnifyingglass")
-                    .font(.caption.weight(.semibold))
-                Spacer(minLength: 8)
-                if !findText.isEmpty || !findStatus.isEmpty {
+            .buttonStyle(.plain)
+
+            if isFindReplaceExpanded {
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField(Copy.text("editor.find", language: language), text: $findText)
+                        .textFieldStyle(.roundedBorder)
+
+                    HStack(spacing: 8) {
+                        Button {
+                            findNext()
+                        } label: {
+                            Label(Copy.text("editor.findNext", language: language), systemImage: "arrow.down")
+                        }
+                        .labelStyle(.iconOnly)
+                        .disabled(findText.isEmpty)
+                        .help(Copy.text("editor.findNext.help", language: language))
+
+                        Toggle(Copy.text("editor.matchCase", language: language), isOn: $matchCase)
+                            .toggleStyle(.checkbox)
+                            .font(.caption)
+                            .fixedSize()
+
+                        Spacer(minLength: 0)
+                    }
+
+                    TextField(Copy.text("editor.replace", language: language), text: $replacementText)
+                        .textFieldStyle(.roundedBorder)
+
+                    HStack(spacing: 8) {
+                        Button {
+                            replaceCurrent()
+                        } label: {
+                            Label(Copy.text("editor.replaceCurrent", language: language), systemImage: "arrow.right.to.line")
+                        }
+                        .labelStyle(.iconOnly)
+                        .disabled(findText.isEmpty)
+                        .help(Copy.text("editor.replaceCurrent.help", language: language))
+
+                        Button {
+                            replaceAll()
+                        } label: {
+                            Label(Copy.text("editor.replaceAll", language: language), systemImage: "text.badge.checkmark")
+                        }
+                        .labelStyle(.iconOnly)
+                        .disabled(findText.isEmpty)
+                        .help(Copy.text("editor.replaceAll.help", language: language))
+
+                        Spacer(minLength: 8)
+                    }
+
                     Text(findStatusText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                        .lineLimit(2)
                 }
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
         .controlSize(.small)
-        .padding(10)
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quinary, in: RoundedRectangle(cornerRadius: 10))
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 10))
         .onChange(of: findText) { _, _ in
@@ -1060,14 +1101,8 @@ struct SubtitleEditorPanel: View {
                 .controlSize(.small)
 
                 let selectedCueID = slot.cues[selectedCueIndex].id
-                StyledSubtitleText(slot.cues[selectedCueIndex].text, font: .body, lineLimit: 4)
-                    .padding(8)
-                    .frame(maxWidth: .infinity, minHeight: 54, alignment: .topLeading)
-                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary))
-
                 SelectableTextEditor(text: cueTextBinding(for: selectedCueID), selection: $selectedTextRange) {}
-                    .frame(height: 118)
+                    .frame(height: 156)
                     .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary))
 
@@ -1090,6 +1125,8 @@ struct SubtitleEditorPanel: View {
                 }
 
                 subtitleStyleControls
+
+                reTranscribeCueButton(cueID: selectedCueID, cueIsEmpty: slot.cues[selectedCueIndex].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
                 Button {
                     resetSelectedCue()
@@ -1117,6 +1154,46 @@ struct SubtitleEditorPanel: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(.quinary, in: RoundedRectangle(cornerRadius: 10))
             .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 10))
+        }
+    }
+
+    @ViewBuilder
+    private func reTranscribeCueButton(cueID: SubtitleCue.ID, cueIsEmpty: Bool) -> some View {
+        let isBusy = transcribingCueID == cueID
+        VStack(alignment: .leading, spacing: 4) {
+            Button {
+                Task { await reTranscribeSelectedCue() }
+            } label: {
+                if isBusy {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text(Copy.text("editor.transcribingCue", language: language))
+                    }
+                    .frame(maxWidth: .infinity)
+                } else {
+                    Label(
+                        Copy.text(
+                            cueIsEmpty ? "editor.recognizeCue" : "editor.reRecognizeCue",
+                            language: language
+                        ),
+                        systemImage: "waveform.and.mic"
+                    )
+                    .frame(maxWidth: .infinity)
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(transcribingCueID != nil)
+            .help(Copy.text("editor.recognizeCue.help", language: language))
+
+            if let transcribeError, !isBusy {
+                Text(String(format: Copy.text("editor.recognizeCue.failed", language: language), transcribeError))
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -1254,17 +1331,23 @@ struct SubtitleEditorPanel: View {
 
     private func loadWaveformIfNeeded() async {
         let sourceKey = "\(slot.url.standardizedFileURL.path)#\(slot.duration)"
-        let targetSamples = waveformTargetSamples
-        guard isTimelineExpanded, !slot.cues.isEmpty else {
+        // Load even when the timeline is collapsed — the compact strip also displays
+        // the waveform, and loading early means expand-to-detail is instant.
+        guard !slot.cues.isEmpty else {
             waveform = WaveformSamples([])
             waveformSourceKey = nil
             isLoadingWaveform = false
             return
         }
+        let targetSamples = waveformTargetSamples
         guard waveformSourceKey != sourceKey || waveform.values.count < targetSamples else { return }
         guard !isLoadingWaveform else { return }
         isLoadingWaveform = true
-        let values = await WaveformLoader.samples(for: slot.url, targetSamples: targetSamples)
+        // Containers AVAssetReader can't fully demux (e.g., MKV) would yield a
+        // truncated waveform. Route through AudioSource so unsupported sources
+        // are transparently transcoded to a clean m4a before sampling.
+        let audioURL = await AudioSource.resolve(slot.url)
+        let values = await WaveformLoader.samples(for: audioURL, targetSamples: targetSamples)
         guard !Task.isCancelled else {
             isLoadingWaveform = false
             return
@@ -1339,6 +1422,115 @@ struct SubtitleEditorPanel: View {
     private func resetSelectedCue() {
         guard let selectedCueID = slot.selectedCueID else { return }
         resetCue(selectedCueID)
+    }
+
+    private func reTranscribeSelectedCue() async {
+        guard let selectedCueIndex,
+              slot.cues.indices.contains(selectedCueIndex) else { return }
+        let cue = slot.cues[selectedCueIndex]
+        let cueID = cue.id
+        guard transcribingCueID == nil else { return }
+
+        transcribingCueID = cueID
+        transcribeError = nil
+        defer { if transcribingCueID == cueID { transcribingCueID = nil } }
+
+        let isReady = await backend.ensureRunning(timeout: 25.0)
+        api.baseURL = backend.baseURL
+        guard isReady else {
+            transcribeError = backend.message
+            return
+        }
+
+        guard let clipURL = await extractCueClip(start: cue.start, end: cue.end) else {
+            transcribeError = "Audio clip extraction failed"
+            return
+        }
+        defer { try? FileManager.default.removeItem(at: clipURL) }
+
+        do {
+            let created = try await api.createJob(fileURL: clipURL, settings: settings)
+            while !Task.isCancelled {
+                let status = try await api.jobStatus(id: created.id)
+                if status.status == "done" { break }
+                if status.status == "error" {
+                    throw NSError(
+                        domain: "MSub.CueTranscribe",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: status.error ?? "Job failed"]
+                    )
+                }
+                if status.status == "cancelled" { return }
+                try await Task.sleep(for: .milliseconds(700))
+            }
+            let output = try await api.fetchOutput(jobID: created.id)
+            guard let text = String(data: output.data, encoding: .utf8) else { return }
+            let cuesFromClip = SubtitleDocument.parse(text, format: slot.outputFormat)
+            let combined: String
+            if cuesFromClip.isEmpty {
+                combined = text
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            } else {
+                combined = cuesFromClip
+                    .map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: "\n")
+            }
+            guard let updatedIndex = slot.cues.firstIndex(where: { $0.id == cueID }) else { return }
+            slot.cues[updatedIndex].text = combined
+            schedulePreviewTextSync(for: slot.cues)
+            scheduleTermStatsSync(for: slot.cues)
+        } catch {
+            transcribeError = error.localizedDescription
+        }
+    }
+
+    private func extractCueClip(start: Double, end: Double) async -> URL? {
+        let audioURL = await AudioSource.resolve(slot.url)
+        let asset = AVURLAsset(url: audioURL)
+        guard let exportSession = AVAssetExportSession(
+            asset: asset,
+            presetName: AVAssetExportPresetAppleM4A
+        ) else {
+            return nil
+        }
+
+        let cachesDir: URL
+        if let base = try? FileManager.default.url(
+            for: .cachesDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        ) {
+            cachesDir = base.appendingPathComponent("MSub-cue-clips", isDirectory: true)
+        } else {
+            cachesDir = FileManager.default.temporaryDirectory.appendingPathComponent("MSub-cue-clips", isDirectory: true)
+        }
+        try? FileManager.default.createDirectory(at: cachesDir, withIntermediateDirectories: true)
+        let dest = cachesDir.appendingPathComponent("\(UUID().uuidString).m4a")
+
+        // A small margin so the model has audio context at each edge.
+        let margin: Double = 0.2
+        let safeStart = max(0, start - margin)
+        let safeDuration = max(0.4, (end - start) + margin * 2)
+        exportSession.outputURL = dest
+        exportSession.outputFileType = .m4a
+        exportSession.timeRange = CMTimeRange(
+            start: CMTime(seconds: safeStart, preferredTimescale: 600),
+            duration: CMTime(seconds: safeDuration, preferredTimescale: 600)
+        )
+
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            exportSession.exportAsynchronously {
+                cont.resume()
+            }
+        }
+
+        if exportSession.status == .completed, FileManager.default.fileExists(atPath: dest.path) {
+            return dest
+        }
+        try? FileManager.default.removeItem(at: dest)
+        return nil
     }
 
     private func resetCue(_ cueID: SubtitleCue.ID) {
@@ -1890,6 +2082,8 @@ private struct TimelineZoomSlider: NSViewRepresentable {
 private struct ZoomableTimeline: View {
     @Binding var cues: [SubtitleCue]
     @Binding var selectedCueID: SubtitleCue.ID?
+    @Binding var highlightTerm: String?
+    let findTerm: String?
 
     let waveform: WaveformSamples
     let duration: Double
@@ -1925,6 +2119,8 @@ private struct ZoomableTimeline: View {
                     cues: $cues,
                     selectedCueID: $selectedCueID,
                     isHandleDragging: $isHandleDragging,
+                    highlightTerm: $highlightTerm,
+                    findTerm: findTerm,
                     waveform: waveform,
                     duration: duration,
                     zoom: zoom,
@@ -2028,9 +2224,70 @@ private struct ZoomableTimeline: View {
     }
 }
 
+private struct TimelineDotsCanvas: View {
+    let cues: [SubtitleCue]
+    let term: String
+    let duration: Double
+    let topY: CGFloat
+    let baseDiameter: CGFloat
+    let emphasizedDiameter: CGFloat
+    let baseColor: Color
+    let emphasizedColor: Color
+    let emphasizedCueID: SubtitleCue.ID?
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .topLeading) {
+                // Base dots — drawn in Canvas (cheap, many)
+                Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: true) { context, size in
+                    var basePath = Path()
+                    for cue in cues where cue.text.localizedCaseInsensitiveContains(term) {
+                        if cue.id == emphasizedCueID { continue }
+                        let mid = (cue.start + cue.end) / 2
+                        let x = CGFloat(max(0, min(mid / max(duration, 0.001), 1))) * size.width
+                        let rect = CGRect(
+                            x: x - baseDiameter / 2,
+                            y: topY,
+                            width: baseDiameter,
+                            height: baseDiameter
+                        )
+                        basePath.addEllipse(in: rect)
+                    }
+                    context.fill(basePath, with: .color(baseColor))
+                }
+
+                // Emphasized dot — a real SwiftUI view so position changes animate.
+                if let emphasizedCue {
+                    let mid = (emphasizedCue.start + emphasizedCue.end) / 2
+                    let x = CGFloat(max(0, min(mid / max(duration, 0.001), 1))) * proxy.size.width
+                    ZStack {
+                        Circle()
+                            .fill(emphasizedColor.opacity(0.35))
+                            .frame(width: emphasizedDiameter + 4, height: emphasizedDiameter + 4)
+                        Circle()
+                            .fill(emphasizedColor)
+                            .frame(width: emphasizedDiameter, height: emphasizedDiameter)
+                            .overlay(Circle().stroke(.white.opacity(0.9), lineWidth: 1))
+                    }
+                    .position(x: x, y: topY + emphasizedDiameter / 2)
+                    .transition(.scale(scale: 0.4).combined(with: .opacity))
+                }
+            }
+            .animation(.spring(response: 0.4, dampingFraction: 0.75), value: emphasizedCueID)
+        }
+    }
+
+    private var emphasizedCue: SubtitleCue? {
+        guard let id = emphasizedCueID else { return nil }
+        return cues.first { $0.id == id }
+    }
+}
+
 private struct CompactTimelineStrip: View {
     let cues: [SubtitleCue]
     @Binding var selectedCueID: SubtitleCue.ID?
+    @Binding var highlightTerm: String?
+    let findTerm: String?
     let waveform: WaveformSamples
     let duration: Double
     let currentTime: Double
@@ -2045,15 +2302,20 @@ private struct CompactTimelineStrip: View {
                 RoundedRectangle(cornerRadius: 7)
                     .fill(Color(nsColor: .textBackgroundColor))
 
-                WaveformCanvas(
-                    samples: waveform,
-                    visibleFractionRange: 0...1,
-                    color: Color.accentColor.opacity(0.28),
-                    verticalPadding: 6,
-                    minimumBarWidth: 2
-                )
-                    .equatable()
-                    .allowsHitTesting(false)
+                ZStack {
+                    WaveformCanvas(
+                        samples: waveform,
+                        visibleFractionRange: 0...1,
+                        color: Color.accentColor.opacity(0.28),
+                        verticalPadding: 6,
+                        minimumBarWidth: 2
+                    )
+                        .equatable()
+                        .id(ObjectIdentifier(waveform))
+                        .transition(.opacity)
+                }
+                .animation(.easeInOut(duration: 0.3), value: ObjectIdentifier(waveform))
+                .allowsHitTesting(false)
 
                 if cues.count > 240 {
                     compactDensityCanvas(width: width, height: height)
@@ -2061,6 +2323,38 @@ private struct CompactTimelineStrip: View {
                 } else {
                     compactCueCanvas(width: width, height: height)
                         .allowsHitTesting(false)
+                }
+
+                if let term = activeHighlightTerm {
+                    TimelineDotsCanvas(
+                        cues: cues,
+                        term: term,
+                        duration: duration,
+                        topY: 3,
+                        baseDiameter: 6,
+                        emphasizedDiameter: 6,
+                        baseColor: .yellow,
+                        emphasizedColor: .yellow,
+                        emphasizedCueID: nil
+                    )
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+                }
+
+                if let term = activeFindTerm {
+                    TimelineDotsCanvas(
+                        cues: cues,
+                        term: term,
+                        duration: duration,
+                        topY: 3,
+                        baseDiameter: 6,
+                        emphasizedDiameter: 10,
+                        baseColor: .green,
+                        emphasizedColor: .green,
+                        emphasizedCueID: selectedCueID
+                    )
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
                 }
 
                 if duration > 0 {
@@ -2083,7 +2377,19 @@ private struct CompactTimelineStrip: View {
                         }
                     }
             )
+            .animation(.easeInOut(duration: 0.22), value: highlightTerm)
+            .animation(.easeInOut(duration: 0.22), value: findTerm)
         }
+    }
+
+    private var activeHighlightTerm: String? {
+        guard let term = highlightTerm, !term.isEmpty else { return nil }
+        return term
+    }
+
+    private var activeFindTerm: String? {
+        guard let term = findTerm, !term.isEmpty else { return nil }
+        return term
     }
 
     private func cue(at seconds: Double) -> SubtitleCue? {
@@ -2236,6 +2542,8 @@ private struct WaveformTimelineEditor: View {
     @Binding var cues: [SubtitleCue]
     @Binding var selectedCueID: SubtitleCue.ID?
     @Binding var isHandleDragging: Bool
+    @Binding var highlightTerm: String?
+    let findTerm: String?
 
     let waveform: WaveformSamples
     let duration: Double
@@ -2279,16 +2587,21 @@ private struct WaveformTimelineEditor: View {
                 background
                     .contentShape(Rectangle())
 
-                WaveformCanvas(
-                    samples: waveform,
-                    visibleFractionRange: visibleFractionRange,
-                    color: Color.accentColor.opacity(0.38),
-                    verticalPadding: 14,
-                    minimumBarWidth: 2,
-                    bottomPadding: rulerHeight + waveformBottomGap
-                )
-                    .equatable()
-                    .allowsHitTesting(false)
+                ZStack {
+                    WaveformCanvas(
+                        samples: waveform,
+                        visibleFractionRange: visibleFractionRange,
+                        color: Color.accentColor.opacity(0.38),
+                        verticalPadding: 14,
+                        minimumBarWidth: 2,
+                        bottomPadding: rulerHeight + waveformBottomGap
+                    )
+                        .equatable()
+                        .id(ObjectIdentifier(waveform))
+                        .transition(.opacity)
+                }
+                .animation(.easeInOut(duration: 0.3), value: ObjectIdentifier(waveform))
+                .allowsHitTesting(false)
 
                 TimeRulerCanvas(
                     duration: duration,
@@ -2302,6 +2615,8 @@ private struct WaveformTimelineEditor: View {
 
                 if detailedCues {
                     cueBlocksCanvas(width: width, cueRange: visibleCueRange)
+                        .allowsHitTesting(false)
+                    cueOverlapCanvas(width: width, cueRange: visibleCueRange)
                         .allowsHitTesting(false)
                     cueHitOverlays(width: width, cueRange: visibleCueRange)
                 } else {
@@ -2317,6 +2632,40 @@ private struct WaveformTimelineEditor: View {
                     handles(cue: selectedCueBinding, width: width)
                 }
 
+                if let term = activeHighlightTerm {
+                    TimelineDotsCanvas(
+                        cues: cues,
+                        term: term,
+                        duration: duration,
+                        topY: 6,
+                        baseDiameter: 7,
+                        emphasizedDiameter: 7,
+                        baseColor: .yellow,
+                        emphasizedColor: .yellow,
+                        emphasizedCueID: nil
+                    )
+                    .frame(width: width)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+                }
+
+                if let term = activeFindTerm {
+                    TimelineDotsCanvas(
+                        cues: cues,
+                        term: term,
+                        duration: duration,
+                        topY: 6,
+                        baseDiameter: 7,
+                        emphasizedDiameter: 11,
+                        baseColor: .green,
+                        emphasizedColor: .green,
+                        emphasizedCueID: selectedCueID
+                    )
+                    .frame(width: width)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+                }
+
                 if duration > 0 {
                     playbackCursor(width: width, height: height)
                         .allowsHitTesting(false)
@@ -2330,7 +2679,19 @@ private struct WaveformTimelineEditor: View {
                         handleTimelineTap(at: value.location, width: width, height: height)
                     }
             )
+            .animation(.easeInOut(duration: 0.22), value: highlightTerm)
+            .animation(.easeInOut(duration: 0.22), value: findTerm)
         }
+    }
+
+    private var activeHighlightTerm: String? {
+        guard let term = highlightTerm, !term.isEmpty else { return nil }
+        return term
+    }
+
+    private var activeFindTerm: String? {
+        guard let term = findTerm, !term.isEmpty else { return nil }
+        return term
     }
 
     private func shouldRenderDetailedCues(width: CGFloat) -> Bool {
@@ -2400,6 +2761,33 @@ private struct WaveformTimelineEditor: View {
                     with: .color(selected ? Color.accentColor : Color.teal.opacity(0.55)),
                     lineWidth: selected ? 1.6 : 0.8
                 )
+            }
+        }
+    }
+
+    /// Renders red translucent rectangles wherever two cues overlap in time, so the
+    /// user can immediately see conflicting timings while dragging.
+    private func cueOverlapCanvas(width: CGFloat, cueRange: Range<Array<SubtitleCue>.Index>) -> some View {
+        Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: true) { context, _ in
+            let visible = Array(cues[cueRange])
+            guard visible.count > 1 else { return }
+            for i in 0..<visible.count {
+                for j in (i + 1)..<visible.count {
+                    let lower = max(visible[i].start, visible[j].start)
+                    let upper = min(visible[i].end, visible[j].end)
+                    guard lower < upper else { continue }
+                    let startX = xPosition(lower, width: width)
+                    let endX = xPosition(upper, width: width)
+                    let rect = CGRect(
+                        x: startX,
+                        y: cueTopOffset,
+                        width: max(2, endX - startX),
+                        height: cueHeight
+                    )
+                    let path = Path(roundedRect: rect, cornerRadius: 3)
+                    context.fill(path, with: .color(.red.opacity(0.42)))
+                    context.stroke(path, with: .color(.red.opacity(0.85)), lineWidth: 1)
+                }
             }
         }
     }
@@ -2535,6 +2923,10 @@ private struct WaveformTimelineEditor: View {
                 .gesture(handleDragGesture(for: cue, edge: .end, width: width))
                 .help(Copy.text("editor.handleEnd.help", language: language))
         }
+        // Sit above both cueHitOverlays (z=2) and selectedCueOverlay (z=3) so the
+        // handle's hit area (which straddles the cue boundary) isn't swallowed by
+        // an adjacent cue's overlay.
+        .zIndex(4)
     }
 
     private func handleHitArea(selected: Bool) -> some View {
@@ -2571,10 +2963,12 @@ private struct WaveformTimelineEditor: View {
                 let delta = Double(value.translation.width / max(width, 1)) * duration
                 switch edge {
                 case .start:
-                    let target = session.initialStart + delta
+                    var target = session.initialStart + delta
+                    target = snappedTime(target, excluding: cue.wrappedValue.id, width: width)
                     cue.wrappedValue.start = max(0, min(target, cue.wrappedValue.end - 0.05))
                 case .end:
-                    let target = session.initialEnd + delta
+                    var target = session.initialEnd + delta
+                    target = snappedTime(target, excluding: cue.wrappedValue.id, width: width)
                     let upper = duration > 0 ? duration : target
                     cue.wrappedValue.end = max(cue.wrappedValue.start + 0.05, min(upper, target))
                 }
@@ -2584,6 +2978,30 @@ private struct WaveformTimelineEditor: View {
                 isHandleDragging = false
                 cues = SubtitleDocument.normalize(cues)
             }
+    }
+
+    /// Returns `target` snapped to the nearest other cue edge within ~5px on screen.
+    /// Threshold scales with zoom (since seconds-per-pixel changes), so the "stickiness"
+    /// always feels the same visually.
+    private func snappedTime(_ target: Double, excluding cueID: SubtitleCue.ID, width: CGFloat) -> Double {
+        let snapPixels: CGFloat = 5
+        let secondsPerPixel = duration / Double(max(width, 1))
+        let threshold = secondsPerPixel * Double(snapPixels)
+        var bestEdge: Double?
+        var bestDistance: Double = .infinity
+        for other in cues where other.id != cueID {
+            for edge in [other.start, other.end] {
+                let dist = abs(edge - target)
+                if dist < bestDistance {
+                    bestDistance = dist
+                    bestEdge = edge
+                }
+            }
+        }
+        if let bestEdge, bestDistance <= threshold {
+            return bestEdge
+        }
+        return target
     }
 
     private func playbackCursor(width: CGFloat, height: CGFloat) -> some View {
@@ -2735,10 +3153,10 @@ private struct TimeRulerCanvas: View, Equatable {
     }
 }
 
-private struct StyledSubtitleText: View {
-    let text: String
-    let font: Font
-    let lineLimit: Int?
+private struct StyledSubtitleText: View, Equatable {
+    nonisolated let text: String
+    nonisolated let font: Font
+    nonisolated let lineLimit: Int?
 
     init(_ text: String, font: Font = .body, lineLimit: Int? = nil) {
         self.text = text
@@ -2751,6 +3169,10 @@ private struct StyledSubtitleText: View {
             .font(font)
             .lineLimit(lineLimit)
             .fixedSize(horizontal: false, vertical: true)
+    }
+
+    nonisolated static func == (lhs: StyledSubtitleText, rhs: StyledSubtitleText) -> Bool {
+        lhs.text == rhs.text && lhs.lineLimit == rhs.lineLimit
     }
 }
 
@@ -2947,9 +3369,8 @@ private struct SubtitleCueBlockRow: View {
                     .foregroundStyle(.tertiary)
             }
 
-            Text(cue.text)
-                .font(.body.monospaced())
-                .lineLimit(3)
+            StyledSubtitleText(cue.text, font: .body, lineLimit: 3)
+                .equatable()
                 .textSelection(.enabled)
                 .frame(minHeight: 48, maxHeight: 84, alignment: .topLeading)
                 .padding(6)
@@ -3079,6 +3500,20 @@ private struct SelectableTextEditor: NSViewRepresentable {
         context.coordinator.text = $text
         context.coordinator.selection = $selection
         context.coordinator.onActivate = onActivate
+        if let activatingTextView = textView as? ActivatingTextView {
+            activatingTextView.onActivate = onActivate
+        }
+        // Bail out while an input method (Chinese, Japanese, etc.) is composing —
+        // touching `string` or `selectedRange` would cancel the composition.
+        if textView.hasMarkedText() { return }
+
+        // Suppress delegate writes back to the SwiftUI binding while we mutate
+        // the text view programmatically. Without this guard, setting `string`
+        // or `setSelectedRange` synchronously triggers the delegate, which would
+        // try to write SwiftUI state mid-update.
+        context.coordinator.isApplyingUpdate = true
+        defer { context.coordinator.isApplyingUpdate = false }
+
         if textView.string != text {
             let selectedRanges = textView.selectedRanges
             textView.string = text
@@ -3091,9 +3526,6 @@ private struct SelectableTextEditor: NSViewRepresentable {
                   NSMaxRange(selection) <= textView.string.utf16.count,
                   textView.selectedRange() != selection {
             textView.setSelectedRange(selection)
-        }
-        if let activatingTextView = textView as? ActivatingTextView {
-            activatingTextView.onActivate = onActivate
         }
     }
 
@@ -3116,6 +3548,7 @@ private struct SelectableTextEditor: NSViewRepresentable {
         var text: Binding<String>
         var selection: Binding<NSRange?>
         var onActivate: () -> Void
+        var isApplyingUpdate = false
 
         init(text: Binding<String>, selection: Binding<NSRange?>, onActivate: @escaping () -> Void) {
             self.text = text
@@ -3129,21 +3562,37 @@ private struct SelectableTextEditor: NSViewRepresentable {
 
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
-            text.wrappedValue = textView.string
+            // Don't propagate intermediate IME composition states upward —
+            // the final string will be delivered once the user picks a candidate.
+            if textView.hasMarkedText() { return }
+            if isApplyingUpdate { return }
+            if text.wrappedValue != textView.string {
+                text.wrappedValue = textView.string
+            }
             updateSelection(from: textView)
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
+            if textView.hasMarkedText() { return }
+            // Ignore selection callbacks driven by our own setSelectedRange — they would
+            // try to write back into the SwiftUI binding mid view-update.
+            if isApplyingUpdate { return }
             updateSelection(from: textView)
         }
 
         private func updateSelection(from textView: NSTextView) {
             let range = textView.selectedRange()
+            let newValue: NSRange?
             if range.length > 0 {
-                selection.wrappedValue = range
+                newValue = range
             } else if textView.window?.firstResponder === textView {
-                selection.wrappedValue = nil
+                newValue = nil
+            } else {
+                return
+            }
+            if selection.wrappedValue != newValue {
+                selection.wrappedValue = newValue
             }
         }
     }
@@ -3293,6 +3742,111 @@ private struct WaveformShape: Shape {
     }
 }
 
+/// Resolves a media URL to a URL that AVFoundation can fully play and read.
+/// For natively-supported containers it returns the original URL untouched.
+/// For containers AVFoundation only partially understands (MKV, AVI, WMV…) it
+/// transcodes the audio track to an m4a sitting in the caches directory once,
+/// then re-uses that file for both playback and waveform sampling.
+enum AudioSource {
+    private static let cache = AudioExtractionCache()
+    private static let directlyPlayableExtensions: Set<String> = [
+        "mp4", "mov", "m4v", "qt", "3gp", "3g2",
+        "m4a", "mp3", "wav", "aac", "aiff", "aif", "flac", "caf"
+    ]
+
+    static func resolve(_ url: URL) async -> URL {
+        let ext = url.pathExtension.lowercased()
+        if directlyPlayableExtensions.contains(ext) {
+            return url
+        }
+        if let extracted = await cache.extracted(for: url) {
+            return extracted
+        }
+        return url
+    }
+}
+
+private actor AudioExtractionCache {
+    private var inflight: [String: Task<URL?, Never>] = [:]
+
+    func extracted(for source: URL) async -> URL? {
+        let key = Self.identifier(for: source)
+        let dest = Self.destinationURL(for: key)
+
+        if FileManager.default.fileExists(atPath: dest.path) {
+            return dest
+        }
+        if let task = inflight[key] {
+            return await task.value
+        }
+        let task = Task<URL?, Never> {
+            await Self.performExtraction(from: source, to: dest)
+        }
+        inflight[key] = task
+        let result = await task.value
+        inflight[key] = nil
+        return result
+    }
+
+    private static func identifier(for url: URL) -> String {
+        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+        let modified = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
+        let size = values?.fileSize ?? 0
+        let input = "\(url.standardizedFileURL.path)#\(modified)#\(size)"
+        let digest = SHA256.hash(data: Data(input.utf8))
+        return digest.prefix(16).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func destinationURL(for identifier: String) -> URL {
+        let base: URL
+        if let dir = try? FileManager.default.url(
+            for: .cachesDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        ) {
+            base = dir
+        } else {
+            base = FileManager.default.temporaryDirectory
+        }
+        let dir = base.appendingPathComponent("MSub-extracted-audio", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("\(identifier).m4a")
+    }
+
+    private static func performExtraction(from source: URL, to dest: URL) async -> URL? {
+        let asset = AVURLAsset(url: source)
+        // Bail early if the demuxer can't even surface the audio track — no amount
+        // of AVFoundation-based re-encoding will save formats AVF can't open
+        // (e.g., some AVI variants that fail with `FFR_AVI err=-12848`).
+        guard let audioTrack = try? await asset.loadTracks(withMediaType: .audio).first,
+              audioTrack != nil else {
+            return nil
+        }
+        try? FileManager.default.removeItem(at: dest)
+        guard let exportSession = AVAssetExportSession(
+            asset: asset,
+            presetName: AVAssetExportPresetAppleM4A
+        ) else {
+            return nil
+        }
+        exportSession.outputURL = dest
+        exportSession.outputFileType = .m4a
+
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            exportSession.exportAsynchronously {
+                continuation.resume()
+            }
+        }
+
+        if exportSession.status == .completed, FileManager.default.fileExists(atPath: dest.path) {
+            return dest
+        }
+        try? FileManager.default.removeItem(at: dest)
+        return nil
+    }
+}
+
 private enum WaveformLoader {
     private static let cache = WaveformCache()
 
@@ -3331,6 +3885,11 @@ private enum WaveformLoader {
         let duration = (try? await asset.load(.duration)) ?? .zero
         let estimatedFrames = max(1, Int(CMTimeGetSeconds(duration) * sampleRate))
         let binSize = max(1, estimatedFrames / max(1, targetSamples))
+        // Sample only a sparse subset of frames per bin to find the peak — for typical
+        // bin sizes (thousands of frames each), 32 samples per bin is a faithful peak
+        // estimate at a fraction of the CPU cost.
+        let samplesPerBin = 32
+        let frameStride = max(1, binSize / samplesPerBin)
         var bins = [Float](repeating: 0, count: max(1, targetSamples))
 
         guard reader.startReading() else { return [] }
@@ -3352,18 +3911,23 @@ private enum WaveformLoader {
             guard copyResult == noErr else { continue }
             data.withUnsafeBytes { rawBuffer in
                 let floats = rawBuffer.bindMemory(to: Float.self)
-                var offset = 0
-                while offset < floats.count {
+                let chunkFrames = floats.count / max(channelCount, 1)
+                // Align the first frame to sample in this chunk to the global stride grid.
+                let strideRemainder = frameIndex % frameStride
+                var localFrame = strideRemainder == 0 ? 0 : (frameStride - strideRemainder)
+                while localFrame < chunkFrames {
+                    let offset = localFrame * channelCount
                     var sum: Float = 0
                     for channel in 0..<channelCount where offset + channel < floats.count {
                         sum += abs(floats[offset + channel])
                     }
                     let amplitude = sum / Float(channelCount)
-                    let bin = min(bins.count - 1, frameIndex / binSize)
-                    bins[bin] = max(bins[bin], amplitude)
-                    frameIndex += 1
-                    offset += channelCount
+                    let globalFrame = frameIndex + localFrame
+                    let bin = min(bins.count - 1, globalFrame / binSize)
+                    if amplitude > bins[bin] { bins[bin] = amplitude }
+                    localFrame += frameStride
                 }
+                frameIndex += chunkFrames
             }
         }
 
@@ -3380,7 +3944,9 @@ private enum WaveformLoader {
         }
 
         private var entries: [String: Entry] = [:]
-        private let maxCachedSamples = 420_000
+        // Allow a few high-resolution waveforms (~1M samples each) to coexist
+        // in the cache so deep zooms stay instant after the first read.
+        private let maxCachedSamples = 5_000_000
 
         func samples(for url: URL, targetSamples: Int) async -> [CGFloat] {
             let key = cacheKey(for: url)
@@ -3389,7 +3955,7 @@ private enum WaveformLoader {
                 return downsample(cached.samples, targetSamples: targetSamples)
             }
 
-            let samples = await Task.detached(priority: .utility) {
+            let samples = await Task.detached(priority: .userInitiated) {
                 await WaveformLoader.readSamples(for: url, targetSamples: targetSamples)
             }.value
             guard !samples.isEmpty else { return [] }
