@@ -396,7 +396,13 @@ struct ContentView: View {
         case .player:
             MediaPreviewCard(url: url, title: t("preview.title"), playback: playback)
         case .thumbnail:
+            // Containers without a native video preview still need their audio
+            // wired into the timeline playback controller (which routes through
+            // AudioSource / ffmpeg so the audio is always playable).
             UnsupportedMediaPreview(url: url, title: t("preview.title"), language: language)
+                .task(id: url) {
+                    await playback.load(url)
+                }
         case .none:
             EmptyView()
         }
@@ -2188,27 +2194,63 @@ private struct UnsupportedMediaPreview: View {
     let title: String
     let language: AppLanguage
 
-    @State private var thumbnail: NSImage?
+    @State private var cover: NSImage?
+    @State private var filmstrip: [NSImage] = []
+    @State private var selectedFrameIndex: Int?
+    @State private var isLoadingCover = true
+
+    private static let filmstripFractions: [Double] = [0.1, 0.3, 0.5, 0.7, 0.9]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Image(systemName: "film")
                     .foregroundStyle(.teal)
                 Text(title)
                     .font(.headline)
                 Spacer()
+                Text(url.pathExtension.uppercased())
+                    .font(.caption2.monospaced().weight(.semibold))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(.quaternary, in: Capsule())
+                    .help(Copy.text("preview.unsupported", language: language))
             }
 
-            ZStack {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(.black.opacity(0.85))
-                if let thumbnail {
-                    Image(nsImage: thumbnail)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                }
+            coverSurface
+                .frame(maxWidth: .infinity)
+                .frame(height: filmstrip.isEmpty ? 230 : 196)
+
+            if !filmstrip.isEmpty {
+                filmstripRow
+                    .frame(maxWidth: .infinity)
+            }
+        }
+        .padding(12)
+        .frame(minHeight: MediaPreviewCard.cardHeight, alignment: .topLeading)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
+        .task(id: url) {
+            await reloadPreview()
+        }
+    }
+
+    private var coverSurface: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 10)
+                .fill(.black.opacity(0.85))
+            if let cover {
+                Image(nsImage: cover)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .transition(.opacity)
+            } else if isLoadingCover {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(.white)
+            } else {
                 VStack(spacing: 6) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.title3)
@@ -2217,31 +2259,108 @@ private struct UnsupportedMediaPreview: View {
                         .font(.callout.weight(.medium))
                         .foregroundStyle(.white)
                         .multilineTextAlignment(.center)
-                    Text(url.pathExtension.uppercased())
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.white.opacity(0.7))
                     Text(Copy.text("preview.transcribeStillSupported", language: language))
                         .font(.caption)
                         .foregroundStyle(.white.opacity(0.7))
                         .multilineTextAlignment(.center)
                 }
                 .padding(10)
-                .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
-                .padding(12)
             }
-            .frame(height: 238)
         }
-        .padding(12)
-        .frame(minHeight: MediaPreviewCard.cardHeight, alignment: .topLeading)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
-        .task(id: url) {
-            await loadThumbnail()
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .animation(.easeInOut(duration: 0.25), value: cover)
+    }
+
+    private var filmstripRow: some View {
+        HStack(spacing: 4) {
+            ForEach(0..<filmstrip.count, id: \.self) { idx in
+                let isSelected = idx == selectedFrameIndex
+                Image(nsImage: filmstrip[idx])
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(height: 38)
+                    .frame(maxWidth: .infinity)
+                    .clipped()
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 1.5)
+                    )
+                    .contentShape(RoundedRectangle(cornerRadius: 4))
+                    .onTapGesture {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            selectedFrameIndex = idx
+                            cover = filmstrip[idx]
+                        }
+                    }
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func reloadPreview() async {
+        cover = nil
+        filmstrip = []
+        selectedFrameIndex = nil
+        isLoadingCover = true
+
+        let duration = await assetDurationSeconds()
+
+        // Cover first — at ~10% in, or 3s if duration is unknown.
+        let coverTime = duration > 0 ? duration * 0.1 : 3.0
+        let coverImage: NSImage?
+        if let primary = await frame(at: coverTime, width: 720) {
+            coverImage = primary
+        } else {
+            coverImage = await quickLookCover()
+        }
+        await MainActor.run {
+            cover = coverImage
+            isLoadingCover = false
+        }
+
+        // Filmstrip — extract a few frames in parallel. Skip for very short
+        // clips where overlapping fractions would just produce the same frame.
+        guard duration > 4 else { return }
+        let times = Self.filmstripFractions.map { $0 * duration }
+        let strip = await loadFilmstrip(times: times)
+        guard !strip.isEmpty else { return }
+        await MainActor.run {
+            filmstrip = strip
         }
     }
 
-    private func loadThumbnail() async {
-        thumbnail = nil
+    private func loadFilmstrip(times: [Double]) async -> [NSImage] {
+        await withTaskGroup(of: (Int, NSImage?).self) { group in
+            for (idx, time) in times.enumerated() {
+                group.addTask {
+                    if let frameURL = await FFmpegRunner.extractFrame(from: url, at: time, width: 320),
+                       let image = NSImage(contentsOf: frameURL) {
+                        try? FileManager.default.removeItem(at: frameURL)
+                        return (idx, image)
+                    }
+                    return (idx, nil)
+                }
+            }
+            var collected: [(Int, NSImage)] = []
+            for await result in group {
+                if let image = result.1 {
+                    collected.append((result.0, image))
+                }
+            }
+            return collected.sorted(by: { $0.0 < $1.0 }).map(\.1)
+        }
+    }
+
+    private func frame(at seconds: Double, width: Int) async -> NSImage? {
+        guard let frameURL = await FFmpegRunner.extractFrame(from: url, at: seconds, width: width) else {
+            return nil
+        }
+        defer { try? FileManager.default.removeItem(at: frameURL) }
+        return NSImage(contentsOf: frameURL)
+    }
+
+    private func quickLookCover() async -> NSImage? {
         let scale = NSScreen.main?.backingScaleFactor ?? 2
         let request = QLThumbnailGenerator.Request(
             fileAt: url,
@@ -2249,12 +2368,26 @@ private struct UnsupportedMediaPreview: View {
             scale: scale,
             representationTypes: .thumbnail
         )
-        do {
-            let rep = try await QLThumbnailGenerator.shared.generateBestRepresentation(for: request)
-            thumbnail = rep.nsImage
-        } catch {
-            thumbnail = nil
+        if let rep = try? await QLThumbnailGenerator.shared.generateBestRepresentation(for: request) {
+            return rep.nsImage
         }
+        return nil
+    }
+
+    private func assetDurationSeconds() async -> Double {
+        let asset = AVURLAsset(url: url)
+        if let cmTime = try? await asset.load(.duration) {
+            let seconds = cmTime.seconds
+            if seconds.isFinite, seconds > 0 {
+                return seconds
+            }
+        }
+        // AVF couldn't probe the container (typical for MKV/AVI). Ask ffmpeg
+        // to extract the Duration line from its own banner.
+        if let probed = await FFmpegRunner.probeDuration(of: url), probed > 0 {
+            return probed
+        }
+        return 0
     }
 }
 

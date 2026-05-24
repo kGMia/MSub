@@ -497,22 +497,28 @@ final class PlaybackController: ObservableObject {
         player.replaceCurrentItem(with: nil)
 
         // For containers AVFoundation can't natively play (MKV, etc.) the player
-        // would stall or stop early. Resolve to a clean m4a extraction up front
+        // would stall or stop early. Resolve to a clean extraction up front
         // so playback always traverses the full audio.
         let playbackURL = await AudioSource.resolve(url)
         guard currentURL == url else { return }
 
         let asset = AVURLAsset(url: playbackURL)
-        let item = AVPlayerItem(asset: asset)
+        let keys = ["duration", "tracks", "playable"]
+        let item = AVPlayerItem(asset: asset, automaticallyLoadedAssetKeys: keys)
+        
         player.replaceCurrentItem(with: item)
 
-        let loadedDuration = (try? await asset.load(.duration)) ?? .zero
-        let seconds = loadedDuration.seconds
-        if seconds.isFinite, seconds > 0 {
-            duration = seconds
+        do {
+            let loadedDuration = try await asset.load(.duration)
+            let seconds = loadedDuration.seconds
+            if seconds.isFinite, seconds > 0 {
+                duration = seconds
+            }
+            let videoTracks = try await asset.loadTracks(withMediaType: .video)
+            hasVideo = !videoTracks.isEmpty
+        } catch {
+            print("PlaybackController: Failed to load asset metadata: \(error)")
         }
-        let videoTracks = (try? await asset.loadTracks(withMediaType: .video)) ?? []
-        hasVideo = !videoTracks.isEmpty
     }
 
     func seek(to seconds: Double, pause: Bool = false) {
@@ -1487,13 +1493,6 @@ struct SubtitleEditorPanel: View {
 
     private func extractCueClip(start: Double, end: Double) async -> URL? {
         let audioURL = await AudioSource.resolve(slot.url)
-        let asset = AVURLAsset(url: audioURL)
-        guard let exportSession = AVAssetExportSession(
-            asset: asset,
-            presetName: AVAssetExportPresetAppleM4A
-        ) else {
-            return nil
-        }
 
         let cachesDir: URL
         if let base = try? FileManager.default.url(
@@ -1513,20 +1512,56 @@ struct SubtitleEditorPanel: View {
         let margin: Double = 0.2
         let safeStart = max(0, start - margin)
         let safeDuration = max(0.4, (end - start) + margin * 2)
-        exportSession.outputURL = dest
-        exportSession.outputFileType = .m4a
+
+        if let result = await clipViaAVFoundation(
+            source: audioURL,
+            dest: dest,
+            startSeconds: safeStart,
+            durationSeconds: safeDuration
+        ) {
+            return result
+        }
+        // AVF failed (likely because AudioSource fell back to the original URL of
+        // an unsupported container). Try ffmpeg directly on the source.
+        if let result = await FFmpegRunner.extractAudio(
+            from: slot.url,
+            to: dest,
+            start: safeStart,
+            duration: safeDuration
+        ) {
+            return result
+        }
+        try? FileManager.default.removeItem(at: dest)
+        return nil
+    }
+
+    private func clipViaAVFoundation(
+        source: URL,
+        dest: URL,
+        startSeconds: Double,
+        durationSeconds: Double
+    ) async -> URL? {
+        let asset = AVURLAsset(url: source)
+        guard let exportSession = AVAssetExportSession(
+            asset: asset,
+            presetName: AVAssetExportPresetAppleM4A
+        ) else {
+            return nil
+        }
+        try? FileManager.default.removeItem(at: dest)
         exportSession.timeRange = CMTimeRange(
-            start: CMTime(seconds: safeStart, preferredTimescale: 600),
-            duration: CMTime(seconds: safeDuration, preferredTimescale: 600)
+            start: CMTime(seconds: startSeconds, preferredTimescale: 600),
+            duration: CMTime(seconds: durationSeconds, preferredTimescale: 600)
         )
 
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            exportSession.exportAsynchronously {
-                cont.resume()
-            }
+        do {
+            try await exportSession.export(to: dest, as: .m4a)
+        } catch {
+            try? FileManager.default.removeItem(at: dest)
+            return nil
         }
 
-        if exportSession.status == .completed, FileManager.default.fileExists(atPath: dest.path) {
+        if FileManager.default.fileExists(atPath: dest.path) {
             return dest
         }
         try? FileManager.default.removeItem(at: dest)
@@ -3774,7 +3809,13 @@ private actor AudioExtractionCache {
         let dest = Self.destinationURL(for: key)
 
         if FileManager.default.fileExists(atPath: dest.path) {
-            return dest
+            if await Self.isUsable(dest) {
+                return dest
+            }
+            // Stale extraction from a previous build (e.g. partial AVFoundation
+            // output from before ffmpeg was wired in). Discard and re-extract.
+            NSLog("[MSub] Discarding unusable cached extraction at %@", dest.path)
+            try? FileManager.default.removeItem(at: dest)
         }
         if let task = inflight[key] {
             return await task.value
@@ -3786,6 +3827,23 @@ private actor AudioExtractionCache {
         let result = await task.value
         inflight[key] = nil
         return result
+    }
+
+    /// A previously-cached extraction is considered usable only if AVFoundation
+    /// can read a positive duration from it — that filters out empty/partial
+    /// outputs left over from earlier failed runs.
+    private static func isUsable(_ url: URL) async -> Bool {
+        guard let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value,
+              size > 1024 else {
+            return false
+        }
+        let asset = AVURLAsset(url: url)
+        guard let duration = try? await asset.load(.duration),
+              duration.seconds.isFinite,
+              duration.seconds > 0.3 else {
+            return false
+        }
+        return true
     }
 
     private static func identifier(for url: URL) -> String {
@@ -3809,37 +3867,264 @@ private actor AudioExtractionCache {
         } else {
             base = FileManager.default.temporaryDirectory
         }
-        let dir = base.appendingPathComponent("MSub-extracted-audio", isDirectory: true)
+        // Bump this suffix whenever the extraction pipeline changes so prior
+        // partial/incompatible outputs are sidestepped automatically.
+        let dir = base.appendingPathComponent("MSub-extracted-audio-v2", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("\(identifier).m4a")
     }
 
     private static func performExtraction(from source: URL, to dest: URL) async -> URL? {
-        let asset = AVURLAsset(url: source)
-        // Bail early if the demuxer can't even surface the audio track — no amount
-        // of AVFoundation-based re-encoding will save formats AVF can't open
-        // (e.g., some AVI variants that fail with `FFR_AVI err=-12848`).
-        guard let audioTrack = try? await asset.loadTracks(withMediaType: .audio).first,
-              audioTrack != nil else {
-            return nil
+        // We only reach this for containers that aren't on the directly-playable
+        // list — meaning AVFoundation will almost certainly log noisy FFR_* errors
+        // before giving up. Prefer ffmpeg whenever it's available so we skip that
+        // failed AVF round-trip entirely.
+        if FFmpegRunner.isAvailable,
+           let url = await FFmpegRunner.extractAudio(from: source, to: dest) {
+            return url
         }
-        try? FileManager.default.removeItem(at: dest)
-        guard let exportSession = AVAssetExportSession(
+
+        // ffmpeg isn't around or its conversion failed — fall back to AVFoundation
+        // (some non-listed extensions like .ogg still demux fine through AVF).
+        let asset = AVURLAsset(url: source)
+        if let _ = try? await asset.loadTracks(withMediaType: .audio).first,
+           let exportSession = AVAssetExportSession(
             asset: asset,
             presetName: AVAssetExportPresetAppleM4A
-        ) else {
-            return nil
-        }
-        exportSession.outputURL = dest
-        exportSession.outputFileType = .m4a
-
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            exportSession.exportAsynchronously {
-                continuation.resume()
+           ) {
+            try? FileManager.default.removeItem(at: dest)
+            do {
+                try await exportSession.export(to: dest, as: .m4a)
+                if FileManager.default.fileExists(atPath: dest.path) {
+                    return dest
+                }
+            } catch {
+                try? FileManager.default.removeItem(at: dest)
             }
         }
 
-        if exportSession.status == .completed, FileManager.default.fileExists(atPath: dest.path) {
+        return nil
+    }
+}
+
+/// Locates and invokes ffmpeg so we can handle containers AVFoundation can't read
+/// (MKV, AVI, etc.). Search order:
+///   1. `ffmpeg` binary copied into the app bundle's Resources
+///   2. Common system locations (Homebrew, MacPorts, /usr)
+/// If nothing is found, every call returns nil and the AVFoundation path remains
+/// the only audio source.
+enum FFmpegRunner {
+    private static let searchPaths = [
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/opt/local/bin/ffmpeg",
+        "/usr/bin/ffmpeg"
+    ]
+
+    static let binary: URL? = {
+        let resolved = locateBinary()
+        if let resolved {
+            NSLog("[MSub] FFmpeg located at: %@", resolved.path)
+        } else {
+            NSLog("[MSub] FFmpeg not found in bundle or system search paths")
+        }
+        return resolved
+    }()
+
+    private static func locateBinary() -> URL? {
+        if let bundled = Bundle.main.url(forResource: "ffmpeg", withExtension: nil) {
+            let path = bundled.path
+            if !FileManager.default.isExecutableFile(atPath: path) {
+                // Xcode sometimes strips the execute bit when copying resources.
+                // In a dev build the bundle is writable, so try to fix it in place.
+                try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
+            }
+            if FileManager.default.isExecutableFile(atPath: path) {
+                return bundled
+            } else {
+                NSLog("[MSub] FFmpeg bundled at %@ is not executable; run `chmod +x` on the source file before building.", path)
+            }
+        }
+        for path in searchPaths where FileManager.default.isExecutableFile(atPath: path) {
+            return URL(fileURLWithPath: path)
+        }
+        return nil
+    }
+
+    static var isAvailable: Bool { binary != nil }
+
+    /// Extracts the audio track of `source` to `dest` as AAC-in-m4a. When `start`
+    /// and `duration` are provided, only that slice is exported.
+    static func extractAudio(
+        from source: URL,
+        to dest: URL,
+        start: Double? = nil,
+        duration: Double? = nil
+    ) async -> URL? {
+        guard let binary else { return nil }
+        try? FileManager.default.removeItem(at: dest)
+
+        var args: [String] = ["-y", "-nostdin", "-loglevel", "error"]
+        if let start {
+            args.append("-ss")
+            args.append(String(format: "%.3f", max(0, start)))
+        }
+        if let duration {
+            args.append("-t")
+            args.append(String(format: "%.3f", max(0.05, duration)))
+        }
+        args.append(contentsOf: [
+            "-i", source.path,
+            "-vn",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-ar", "44100",
+            "-movflags", "+faststart",
+            dest.path
+        ])
+
+        let rangeNote: String
+        if let start, let duration {
+            rangeNote = String(format: " (range %.2fs+%.2fs)", start, duration)
+        } else {
+            rangeNote = ""
+        }
+        NSLog("[MSub] FFmpeg starting on %@%@", source.lastPathComponent, rangeNote)
+
+        let started = Date()
+        let process = Process()
+        process.executableURL = binary
+        process.arguments = args
+        let stderr = Pipe()
+        process.standardError = stderr
+        process.standardOutput = Pipe()  // discard; prevents inherited stdout
+
+        do {
+            try process.run()
+        } catch {
+            NSLog("[MSub] FFmpeg launch failed for %@: %@", source.lastPathComponent, "\(error)")
+            return nil
+        }
+
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            process.terminationHandler = { _ in cont.resume() }
+        }
+
+        let elapsed = Date().timeIntervalSince(started)
+        let exitCode = process.terminationStatus
+        if exitCode != 0 {
+            let data = (try? stderr.fileHandleForReading.readToEnd()) ?? Data()
+            let text = (String(data: data, encoding: .utf8) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            NSLog(
+                "[MSub] FFmpeg exit %d on %@ in %.2fs: %@",
+                Int(exitCode), source.lastPathComponent, elapsed, text
+            )
+            try? FileManager.default.removeItem(at: dest)
+            return nil
+        }
+
+        if FileManager.default.fileExists(atPath: dest.path) {
+            let size = (try? FileManager.default.attributesOfItem(atPath: dest.path)[.size] as? NSNumber)?.int64Value ?? 0
+            NSLog(
+                "[MSub] FFmpeg ok on %@ in %.2fs → %lld bytes at %@",
+                source.lastPathComponent, elapsed, size, dest.path
+            )
+            return dest
+        }
+        NSLog(
+            "[MSub] FFmpeg exited 0 but produced no file for %@ in %.2fs",
+            source.lastPathComponent, elapsed
+        )
+        return nil
+    }
+
+    /// Probes the source for its duration in seconds. Useful for containers
+    /// AVFoundation refuses to parse (MKV, AVI…). Returns nil on failure.
+    static func probeDuration(of source: URL) async -> Double? {
+        guard let binary else { return nil }
+        let process = Process()
+        process.executableURL = binary
+        // `-i` without an output file prints stream info to stderr and exits
+        // non-zero. That's expected — we only care about the printed Duration.
+        process.arguments = ["-nostdin", "-hide_banner", "-i", source.path]
+        let stderr = Pipe()
+        process.standardError = stderr
+        process.standardOutput = Pipe()
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            process.terminationHandler = { _ in cont.resume() }
+        }
+        let data = (try? stderr.fileHandleForReading.readToEnd()) ?? Data()
+        guard let text = String(data: data, encoding: .utf8) else { return nil }
+        return parseFFmpegDuration(text)
+    }
+
+    private static func parseFFmpegDuration(_ output: String) -> Double? {
+        let pattern = #"Duration:\s*(\d{1,2}):(\d{2}):(\d{2})\.(\d+)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: output, range: NSRange(output.startIndex..., in: output)),
+              match.numberOfRanges >= 5,
+              let hRange = Range(match.range(at: 1), in: output),
+              let mRange = Range(match.range(at: 2), in: output),
+              let sRange = Range(match.range(at: 3), in: output),
+              let csRange = Range(match.range(at: 4), in: output) else {
+            return nil
+        }
+        let hStr = output[hRange]
+        let mStr = output[mRange]
+        let sStr = output[sRange]
+        let csStr = output[csRange]
+        guard let h = Int(hStr), let m = Int(mStr), let s = Int(sStr), let cs = Int(csStr) else {
+            return nil
+        }
+        let fractional = Double(cs) / pow(10.0, Double(csStr.count))
+        let total = Double(h * 3600 + m * 60 + s) + fractional
+        return total > 0 ? total : nil
+    }
+
+    /// Decodes a single video frame from `source` at `seconds` into a JPEG
+    /// written into the temporary directory. Caller is responsible for deleting
+    /// the returned file once the image is loaded.
+    static func extractFrame(
+        from source: URL,
+        at seconds: Double,
+        width: Int = 640
+    ) async -> URL? {
+        guard let binary else { return nil }
+        let dest = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MSub-frame-\(UUID().uuidString).jpg")
+
+        // `-ss` before `-i` enables fast seeking (key-frame accurate),
+        // which is what we want for thumbnail-style frame grabs.
+        let args: [String] = [
+            "-y", "-nostdin", "-loglevel", "error",
+            "-ss", String(format: "%.3f", max(0, seconds)),
+            "-i", source.path,
+            "-frames:v", "1",
+            "-vf", "scale=\(width):-2",
+            "-q:v", "4",
+            dest.path
+        ]
+
+        let process = Process()
+        process.executableURL = binary
+        process.arguments = args
+        process.standardError = Pipe()
+        process.standardOutput = Pipe()
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            process.terminationHandler = { _ in cont.resume() }
+        }
+        if process.terminationStatus == 0, FileManager.default.fileExists(atPath: dest.path) {
             return dest
         }
         try? FileManager.default.removeItem(at: dest)

@@ -17,6 +17,7 @@
 		000000000000000000000108 /* SubtitleDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000209 /* SubtitleDocument.swift */; };
 		973399062FBE32A400FDA459 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 973399052FBE32A400FDA459 /* AppIcon.icon */; };
 		974192942FBD973900E74858 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 974192942FBD973900E74857 /* Localizable.xcstrings */; };
+		978E671F2FC1B89C0054DBBA /* ffmpeg in Resources */ = {isa = PBXBuildFile; fileRef = 978E671E2FC1B89C0054DBBA /* ffmpeg */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -33,6 +34,7 @@
 		000000000000000000000301 /* MSub.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MSub.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		973399052FBE32A400FDA459 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 		974192942FBD973900E74857 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; name = Localizable.xcstrings; path = Sources/MSub/Localizable.xcstrings; sourceTree = "<group>"; };
+		978E671E2FC1B89C0054DBBA /* ffmpeg */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.executable"; path = ffmpeg; sourceTree = "<group>"; };
 		979A48422FBF74DD00FEF70A /* MSub-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "MSub-Info.plist"; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
@@ -58,6 +60,7 @@
 				000000000000000000000203 /* ContentView.swift */,
 				000000000000000000000204 /* HuzSubtitleMacApp.swift */,
 				000000000000000000000205 /* Localization.swift */,
+				978E671E2FC1B89C0054DBBA /* ffmpeg */,
 				000000000000000000000206 /* Models.swift */,
 				000000000000000000000207 /* Settings.swift */,
 				000000000000000000000209 /* SubtitleDocument.swift */,
@@ -139,6 +142,7 @@
 			isa = PBXResourcesBuildPhase;
 			files = (
 				974192942FBD973900E74858 /* Localizable.xcstrings in Resources */,
+				978E671F2FC1B89C0054DBBA /* ffmpeg in Resources */,
 				973399062FBE32A400FDA459 /* AppIcon.icon in Resources */,
 			);
 		};
