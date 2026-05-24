@@ -27,6 +27,7 @@ struct ContentView: View {
     @State private var processingTask: Task<Void, Never>?
     @State private var selectedFrequentTerm: String?
     @State private var chipScrollEdges = ChipScrollEdges(leading: false, trailing: false)
+    @State private var isCapturingFrame = false
 
     private var language: AppLanguage {
         AppLanguage(rawValue: languageRaw) ?? .zh
@@ -189,7 +190,7 @@ struct ContentView: View {
                 HStack(alignment: .top, spacing: 10) {
                     VStack(spacing: 10) {
                         if let slot = activeSlot {
-                            previewView(for: slot.url)
+                            previewView(for: slot)
                         }
                     }
                     .frame(width: 350, alignment: .topLeading)
@@ -197,7 +198,7 @@ struct ContentView: View {
 
                     VStack(spacing: 10) {
                         if let slot = activeSlot {
-                            mediaInfoCard(slot)
+                            mediaInfoCard(slot, fixedHeight: PreviewCardMetrics.height)
                         }
                     }
                     .frame(minWidth: 135, maxWidth: .infinity, alignment: .top)
@@ -206,7 +207,7 @@ struct ContentView: View {
 
                 VStack(spacing: 12) {
                     if let slot = activeSlot {
-                        previewView(for: slot.url)
+                        previewView(for: slot)
                     }
                     if let slot = activeSlot {
                         mediaInfoCard(slot)
@@ -218,7 +219,7 @@ struct ContentView: View {
         }
     }
 
-    private func mediaInfoCard(_ slot: FileSlot) -> some View {
+    private func mediaInfoCard(_ slot: FileSlot, fixedHeight: CGFloat? = nil) -> some View {
         let terms = slot.frequentTerms
 
         return VStack(alignment: .leading, spacing: 8) {
@@ -258,8 +259,8 @@ struct ContentView: View {
             }
         }
         .padding(12)
-        .frame(minHeight: MediaPreviewCard.cardHeight, alignment: .topLeading)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(height: fixedHeight, alignment: .topLeading)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
     }
 
@@ -391,20 +392,100 @@ struct ContentView: View {
     }
 
     @ViewBuilder
-    private func previewView(for url: URL) -> some View {
-        switch previewKind(url) {
+    private func previewView(for slot: FileSlot) -> some View {
+        let subtitleText = subtitleOverlayText(for: slot, at: playback.currentTime)
+        let canCaptureFrame = isVideoSlot(slot)
+        switch previewKind(slot.url) {
         case .player:
-            MediaPreviewCard(url: url, title: t("preview.title"), playback: playback)
+            MediaPreviewCard(
+                url: slot.url,
+                title: t("preview.title"),
+                subtitleText: subtitleText,
+                canCaptureFrame: canCaptureFrame,
+                isCapturingFrame: isCapturingFrame,
+                captureHelp: t("action.captureFrame.help"),
+                playback: playback
+            ) {
+                Task { await captureFrameForActiveSlot() }
+            }
         case .thumbnail:
             // Containers without a native video preview still need their audio
             // wired into the timeline playback controller (which routes through
             // AudioSource / ffmpeg so the audio is always playable).
-            UnsupportedMediaPreview(url: url, title: t("preview.title"), language: language)
-                .task(id: url) {
-                    await playback.load(url)
+            UnsupportedMediaPreview(
+                url: slot.url,
+                title: t("preview.title"),
+                language: language,
+                subtitleText: subtitleText,
+                canCaptureFrame: canCaptureFrame,
+                isCapturingFrame: isCapturingFrame,
+                captureHelp: t("action.captureFrame.help")
+            ) {
+                Task { await captureFrameForActiveSlot() }
+            }
+                .task(id: slot.url) {
+                    await playback.load(slot.url)
                 }
         case .none:
             EmptyView()
+        }
+    }
+
+    private func isVideoSlot(_ slot: FileSlot) -> Bool {
+        if MediaPreviewKind.isVideoURL(slot.url) {
+            return true
+        }
+        guard let info = slot.mediaInfo else { return false }
+        if let codec = info.videoCodec, !codec.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return true
+        }
+        return (info.width ?? 0) > 0 && (info.height ?? 0) > 0
+    }
+
+    private func subtitleOverlayText(for slot: FileSlot, at seconds: Double) -> String? {
+        guard seconds.isFinite else { return nil }
+        guard let cue = slot.cues.first(where: { seconds >= $0.start && seconds <= $0.end }) else {
+            return nil
+        }
+        let text = VideoFrameCapture.cleanSubtitleText(cue.text)
+        return text.isEmpty ? nil : text
+    }
+
+    private func captureFrameForActiveSlot() async {
+        guard !isCapturingFrame, files.indices.contains(activeIndex) else { return }
+        let index = activeIndex
+        let slot = files[index]
+        guard isVideoSlot(slot) else { return }
+
+        let seconds = playback.currentTime
+        let subtitleText = subtitleOverlayText(for: slot, at: seconds)
+        isCapturingFrame = true
+        update(at: index) {
+            $0.statusKey = "status.capturingFrame"
+            $0.statusDetail = SubtitleDocument.displayTime(seconds)
+        }
+        defer { isCapturingFrame = false }
+
+        do {
+            let destination = try await VideoFrameCapture.capture(
+                source: slot.url,
+                at: seconds,
+                subtitleText: subtitleText
+            )
+            if let refreshedIndex = files.firstIndex(where: { $0.id == slot.id }) {
+                update(at: refreshedIndex) {
+                    $0.statusKey = "status.screenshotSaved"
+                    $0.statusDetail = destination.lastPathComponent
+                }
+            }
+        } catch {
+            if let refreshedIndex = files.firstIndex(where: { $0.id == slot.id }) {
+                update(at: refreshedIndex) {
+                    $0.statusKey = "status.failed"
+                    $0.statusDetail = error.localizedDescription
+                }
+            }
+            errorMessage = String(format: t("error.screenshotFailed"), error.localizedDescription)
         }
     }
 
@@ -2187,12 +2268,34 @@ private enum MediaPreviewKind {
         "mpg", "mpeg", "ts", "mts", "m2ts",
         "vob", "ogv", "ogg", "rm", "rmvb", "asf", "divx"
     ]
+
+    private static let videoExtensions: Set<String> = [
+        "mp4", "mov", "m4v", "qt", "3gp", "3g2",
+        "mkv", "avi", "webm", "flv", "wmv",
+        "mpg", "mpeg", "ts", "mts", "m2ts",
+        "vob", "ogv", "rm", "rmvb", "asf", "divx"
+    ]
+
+    static func isVideoURL(_ url: URL) -> Bool {
+        videoExtensions.contains(url.pathExtension.lowercased())
+    }
+}
+
+private enum PreviewCardMetrics {
+    static let height: CGFloat = 296
+    static let cornerRadius: CGFloat = 14
+    static let shadowColor = Color.black.opacity(0.16)
 }
 
 private struct UnsupportedMediaPreview: View {
     let url: URL
     let title: String
     let language: AppLanguage
+    let subtitleText: String?
+    let canCaptureFrame: Bool
+    let isCapturingFrame: Bool
+    let captureHelp: String
+    let onCaptureFrame: () -> Void
 
     @State private var cover: NSImage?
     @State private var filmstrip: [NSImage] = []
@@ -2209,6 +2312,13 @@ private struct UnsupportedMediaPreview: View {
                 Text(title)
                     .font(.headline)
                 Spacer()
+                if canCaptureFrame {
+                    CaptureFrameButton(
+                        isCapturing: isCapturingFrame,
+                        help: captureHelp,
+                        action: onCaptureFrame
+                    )
+                }
                 Text(url.pathExtension.uppercased())
                     .font(.caption2.monospaced().weight(.semibold))
                     .padding(.horizontal, 6)
@@ -2227,44 +2337,50 @@ private struct UnsupportedMediaPreview: View {
             }
         }
         .padding(12)
-        .frame(minHeight: MediaPreviewCard.cardHeight, alignment: .topLeading)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
+        .frame(height: PreviewCardMetrics.height, alignment: .topLeading)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: PreviewCardMetrics.cornerRadius))
+        .clipShape(RoundedRectangle(cornerRadius: PreviewCardMetrics.cornerRadius))
+        .shadow(color: PreviewCardMetrics.shadowColor, radius: 9, x: 0, y: 4)
         .task(id: url) {
             await reloadPreview()
         }
     }
 
     private var coverSurface: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 10)
-                .fill(.black.opacity(0.85))
-            if let cover {
-                Image(nsImage: cover)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                    .transition(.opacity)
-            } else if isLoadingCover {
-                ProgressView()
-                    .controlSize(.small)
-                    .tint(.white)
-            } else {
-                VStack(spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.title3)
-                        .foregroundStyle(.yellow)
-                    Text(Copy.text("preview.unsupported", language: language))
-                        .font(.callout.weight(.medium))
-                        .foregroundStyle(.white)
-                        .multilineTextAlignment(.center)
-                    Text(Copy.text("preview.transcribeStillSupported", language: language))
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.7))
-                        .multilineTextAlignment(.center)
+        GeometryReader { proxy in
+            ZStack(alignment: .bottom) {
+                Color.clear
+                if let cover {
+                    Image(nsImage: cover)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .transition(.opacity)
+                    PreviewSubtitleOverlay(text: subtitleText)
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 12)
+                        .allowsHitTesting(false)
+                } else if isLoadingCover {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    VStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.title3)
+                            .foregroundStyle(.yellow)
+                        Text(Copy.text("preview.unsupported", language: language))
+                            .font(.callout.weight(.medium))
+                            .foregroundStyle(.primary)
+                            .multilineTextAlignment(.center)
+                        Text(Copy.text("preview.transcribeStillSupported", language: language))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    .padding(10)
+                    .frame(width: proxy.size.width, height: proxy.size.height)
                 }
-                .padding(10)
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -2275,12 +2391,19 @@ private struct UnsupportedMediaPreview: View {
         HStack(spacing: 4) {
             ForEach(0..<filmstrip.count, id: \.self) { idx in
                 let isSelected = idx == selectedFrameIndex
-                Image(nsImage: filmstrip[idx])
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(height: 38)
+                // Use a clear sizing rectangle that owns the actual frame, and
+                // overlay the image. `.aspectRatio(.fill)` directly on Image
+                // ignores `.frame(maxWidth: .infinity)` and falls back to the
+                // NSImage's native pixel size when given an unbounded width
+                // proposal, which would blow past the column's 350pt allotment.
+                Color.clear
                     .frame(maxWidth: .infinity)
-                    .clipped()
+                    .frame(height: 38)
+                    .overlay(
+                        Image(nsImage: filmstrip[idx])
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                    )
                     .clipShape(RoundedRectangle(cornerRadius: 4))
                     .overlay(
                         RoundedRectangle(cornerRadius: 4)
@@ -2410,12 +2533,60 @@ private struct AVPlayerViewRepresentable: NSViewRepresentable {
     }
 }
 
+private struct CaptureFrameButton: View {
+    let isCapturing: Bool
+    let help: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            if isCapturing {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 18, height: 18)
+            } else {
+                Image(systemName: "camera.viewfinder")
+                    .frame(width: 18, height: 18)
+            }
+        }
+        .buttonStyle(.borderless)
+        .controlSize(.small)
+        .disabled(isCapturing)
+        .help(help)
+        .accessibilityLabel(help)
+    }
+}
+
+private struct PreviewSubtitleOverlay: View {
+    let text: String?
+
+    var body: some View {
+        if let text, !text.isEmpty {
+            Text(text)
+                .font(.system(size: 16, weight: .semibold))
+                .multilineTextAlignment(.center)
+                .lineLimit(3)
+                .foregroundStyle(.white)
+                .shadow(color: .black.opacity(0.95), radius: 1, x: 0, y: 1)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(.black.opacity(0.48), in: RoundedRectangle(cornerRadius: 6))
+                .frame(maxWidth: .infinity)
+        }
+    }
+}
+
 private struct MediaPreviewCard: View {
-    static let cardHeight: CGFloat = 296
+    static let cardHeight: CGFloat = PreviewCardMetrics.height
 
     let url: URL
     let title: String
+    let subtitleText: String?
+    let canCaptureFrame: Bool
+    let isCapturingFrame: Bool
+    let captureHelp: String
     @ObservedObject var playback: PlaybackController
+    let onCaptureFrame: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -2425,21 +2596,226 @@ private struct MediaPreviewCard: View {
                 Text(title)
                     .font(.headline)
                 Spacer()
+                if canCaptureFrame {
+                    CaptureFrameButton(
+                        isCapturing: isCapturingFrame,
+                        help: captureHelp,
+                        action: onCaptureFrame
+                    )
+                }
             }
 
-            AVPlayerViewRepresentable(player: playback.player)
-                .frame(height: playback.hasVideo ? 238 : 80)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+            ZStack(alignment: .bottom) {
+                AVPlayerViewRepresentable(player: playback.player)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if playback.hasVideo {
+                    PreviewSubtitleOverlay(text: subtitleText)
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 12)
+                        .allowsHitTesting(false)
+                }
+            }
+            .frame(height: playback.hasVideo ? 238 : 80)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
         }
         .padding(12)
-        .frame(minHeight: Self.cardHeight, alignment: .topLeading)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
+        .frame(height: PreviewCardMetrics.height, alignment: .topLeading)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: PreviewCardMetrics.cornerRadius))
+        .clipShape(RoundedRectangle(cornerRadius: PreviewCardMetrics.cornerRadius))
+        .shadow(color: PreviewCardMetrics.shadowColor, radius: 9, x: 0, y: 4)
         .task(id: url) {
             await playback.load(url)
         }
         .onDisappear {
             playback.player.pause()
         }
+    }
+}
+
+private enum VideoFrameCapture {
+    static func capture(source: URL, at seconds: Double, subtitleText: String?) async throws -> URL {
+        let avFrame = await frameViaAVFoundation(source: source, seconds: seconds)
+        let frame: NSImage?
+        if let avFrame {
+            frame = avFrame
+        } else {
+            frame = await frameViaFFmpeg(source: source, seconds: seconds)
+        }
+        guard let frame else {
+            throw error("Could not decode a video frame at the current time.")
+        }
+
+        let cleanSubtitle = subtitleText.flatMap { text -> String? in
+            let cleaned = cleanSubtitleText(text)
+            return cleaned.isEmpty ? nil : cleaned
+        }
+        let data = try renderPNG(frame: frame, subtitleText: cleanSubtitle)
+        let destination = uniqueDestination(for: source, seconds: seconds)
+        try data.write(to: destination, options: .atomic)
+        return destination
+    }
+
+    static func cleanSubtitleText(_ raw: String) -> String {
+        raw
+            .replacingOccurrences(
+                of: #"</?(?:b|i|u|font)\b[^>]*>"#,
+                with: "",
+                options: [.regularExpression, .caseInsensitive]
+            )
+            .replacingOccurrences(of: "&nbsp;", with: " ")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func frameViaAVFoundation(source: URL, seconds: Double) async -> NSImage? {
+        let asset = AVURLAsset(url: source)
+        guard let tracks = try? await asset.loadTracks(withMediaType: .video), !tracks.isEmpty else {
+            return nil
+        }
+
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = CMTime(seconds: 0.08, preferredTimescale: 600)
+        generator.requestedTimeToleranceAfter = CMTime(seconds: 0.08, preferredTimescale: 600)
+
+        let time = CMTime(seconds: max(0, seconds.isFinite ? seconds : 0), preferredTimescale: 600)
+        do {
+            let cgImage = try await generator.image(at: time).image
+            return NSImage(
+                cgImage: cgImage,
+                size: NSSize(width: CGFloat(cgImage.width), height: CGFloat(cgImage.height))
+            )
+        } catch {
+            return nil
+        }
+    }
+
+    private static func frameViaFFmpeg(source: URL, seconds: Double) async -> NSImage? {
+        guard let frameURL = await FFmpegRunner.extractFrame(from: source, at: seconds, width: nil) else {
+            return nil
+        }
+        defer { try? FileManager.default.removeItem(at: frameURL) }
+        return NSImage(contentsOf: frameURL)
+    }
+
+    private static func renderPNG(frame: NSImage, subtitleText: String?) throws -> Data {
+        guard let cgImage = frame.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            throw error("Could not prepare the captured frame for saving.")
+        }
+        let pixelWidth = cgImage.width
+        let pixelHeight = cgImage.height
+        let width = CGFloat(pixelWidth)
+        let height = CGFloat(pixelHeight)
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixelWidth,
+            pixelsHigh: pixelHeight,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ), let context = NSGraphicsContext(bitmapImageRep: bitmap) else {
+            throw error("Could not create the image canvas.")
+        }
+
+        let previousContext = NSGraphicsContext.current
+        NSGraphicsContext.current = context
+        context.imageInterpolation = .high
+        NSGraphicsContext.saveGraphicsState()
+        defer {
+            NSGraphicsContext.restoreGraphicsState()
+            NSGraphicsContext.current = previousContext
+        }
+
+        let canvasSize = NSSize(width: width, height: height)
+        frame.draw(in: NSRect(origin: .zero, size: canvasSize))
+        if let subtitleText {
+            drawSubtitle(subtitleText, canvasSize: canvasSize)
+        }
+
+        guard let data = bitmap.representation(using: .png, properties: [:]) else {
+            throw error("Could not encode the captured frame as PNG.")
+        }
+        return data
+    }
+
+    private static func drawSubtitle(_ text: String, canvasSize: NSSize) {
+        let width = canvasSize.width
+        let height = canvasSize.height
+        let fontSize = min(max(width * 0.036, 18), 64)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.lineBreakMode = .byWordWrapping
+
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: fontSize, weight: .semibold),
+            .foregroundColor: NSColor.white,
+            .paragraphStyle: paragraph
+        ]
+        let attributed = NSAttributedString(string: text, attributes: attributes)
+        let maxTextWidth = width * 0.84
+        let measured = attributed.boundingRect(
+            with: NSSize(width: maxTextWidth, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading]
+        )
+
+        let textWidth = min(maxTextWidth, ceil(measured.width) + 4)
+        let textHeight = min(height * 0.32, ceil(measured.height) + 4)
+        let paddingX = max(12, fontSize * 0.45)
+        let paddingY = max(7, fontSize * 0.24)
+        let bottom = max(18, height * 0.055)
+        let textRect = NSRect(
+            x: (width - textWidth) / 2,
+            y: bottom + paddingY,
+            width: textWidth,
+            height: textHeight
+        )
+        let backgroundRect = textRect.insetBy(dx: -paddingX, dy: -paddingY)
+        let background = NSBezierPath(
+            roundedRect: backgroundRect,
+            xRadius: max(6, fontSize * 0.18),
+            yRadius: max(6, fontSize * 0.18)
+        )
+        NSColor.black.withAlphaComponent(0.42).setFill()
+        background.fill()
+        attributed.draw(in: textRect)
+    }
+
+    private static func uniqueDestination(for source: URL, seconds: Double) -> URL {
+        let directory = source.deletingLastPathComponent()
+        let base = source.deletingPathExtension().lastPathComponent
+        let safeBase = base.isEmpty ? "frame" : base
+        let time = filenameTimecode(seconds)
+        var candidate = directory
+            .appendingPathComponent("\(safeBase)_\(time)")
+            .appendingPathExtension("png")
+        var counter = 2
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            candidate = directory
+                .appendingPathComponent("\(safeBase)_\(time)-\(counter)")
+                .appendingPathExtension("png")
+            counter += 1
+        }
+        return candidate
+    }
+
+    private static func filenameTimecode(_ seconds: Double) -> String {
+        let totalMilliseconds = Int((max(0, seconds.isFinite ? seconds : 0) * 1000).rounded())
+        let milliseconds = totalMilliseconds % 1000
+        let totalSeconds = totalMilliseconds / 1000
+        let second = totalSeconds % 60
+        let minute = (totalSeconds / 60) % 60
+        let hour = totalSeconds / 3600
+        return String(format: "%02d-%02d-%02d-%03d", hour, minute, second, milliseconds)
+    }
+
+    private static func error(_ message: String) -> NSError {
+        NSError(domain: "MSub.VideoFrameCapture", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
     }
 }

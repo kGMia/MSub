@@ -815,6 +815,15 @@ struct SubtitleEditorPanel: View {
                     ProgressView()
                         .controlSize(.small)
                 }
+                if !isTimelineExpanded {
+                    Button {
+                        playback.togglePlayPause()
+                    } label: {
+                        Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
+                    }
+                    .buttonStyle(.borderless)
+                    .help(Copy.text(playback.isPlaying ? "editor.pause" : "editor.play", language: language))
+                }
                 Text(timecodeLabel)
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
@@ -2186,9 +2195,12 @@ private struct ZoomableTimeline: View {
                 guard magnifySession == nil else { return }
                 centerOnSelectedCue(viewport: viewportWidth, content: contentWidth, animated: true, cueID: newValue)
             }
-            .onChange(of: zoom) { _, _ in
+            .onChange(of: zoom) { _, newZoom in
                 guard magnifySession == nil else { return }
-                centerOnSelectedCue(viewport: viewportWidth, content: contentWidth, animated: true, cueID: selectedCueID)
+                // Anchor on the currently visible center rather than re-centering on
+                // the selected cue — slider / keyboard zoom should preserve the
+                // point of interest the user is looking at, not warp the view.
+                anchorOnVisibleCenter(viewport: viewportWidth, newZoom: newZoom)
             }
             .onAppear {
                 centerOnSelectedCue(viewport: viewportWidth, content: contentWidth, animated: false, cueID: selectedCueID)
@@ -2211,6 +2223,21 @@ private struct ZoomableTimeline: View {
             withAnimation(.easeInOut(duration: 0.22)) { scroll() }
         } else {
             DispatchQueue.main.async { scroll() }
+        }
+    }
+
+    /// Adjusts `scrollPosition` so the timeline coordinate currently at the
+    /// viewport's midpoint stays at the viewport's midpoint after `newZoom`
+    /// takes effect. Skips re-centering on the selected cue, which would have
+    /// looked like a jump immediately after the slider finished dragging.
+    private func anchorOnVisibleCenter(viewport: CGFloat, newZoom: Double) {
+        let centerFraction = (visibleFractionRange.lowerBound + visibleFractionRange.upperBound) / 2
+        let newContentWidth = max(viewport, viewport * newZoom)
+        let target = centerFraction * newContentWidth - viewport / 2
+        let maxOffset = max(0, newContentWidth - viewport)
+        let clamped = min(max(0, target), maxOffset)
+        DispatchQueue.main.async {
+            scrollPosition.scrollTo(x: clamped)
         }
     }
 
@@ -4093,7 +4120,7 @@ enum FFmpegRunner {
     static func extractFrame(
         from source: URL,
         at seconds: Double,
-        width: Int = 640
+        width: Int? = 640
     ) async -> URL? {
         guard let binary else { return nil }
         let dest = FileManager.default.temporaryDirectory
@@ -4101,15 +4128,16 @@ enum FFmpegRunner {
 
         // `-ss` before `-i` enables fast seeking (key-frame accurate),
         // which is what we want for thumbnail-style frame grabs.
-        let args: [String] = [
+        var args: [String] = [
             "-y", "-nostdin", "-loglevel", "error",
             "-ss", String(format: "%.3f", max(0, seconds)),
             "-i", source.path,
-            "-frames:v", "1",
-            "-vf", "scale=\(width):-2",
-            "-q:v", "4",
-            dest.path
+            "-frames:v", "1"
         ]
+        if let width {
+            args.append(contentsOf: ["-vf", "scale=\(width):-2"])
+        }
+        args.append(contentsOf: ["-q:v", "4", dest.path])
 
         let process = Process()
         process.executableURL = binary
