@@ -11,6 +11,7 @@ struct SubtitleCue: Identifiable, Codable, Equatable {
     var end: Double
     var text: String
     var confidence: Double?
+    var speaker: String?
 
     var duration: Double {
         max(0, end - start)
@@ -37,7 +38,7 @@ enum SubtitleDocument {
                 """
                 \(cue.index)
                 \(formatSRTTime(cue.start)) --> \(formatSRTTime(cue.end))
-                \(cue.text.trimmingCharacters(in: .whitespacesAndNewlines))
+                \(displayText(for: cue))
                 """
             }
             .joined(separator: "\n\n") + (normalized.isEmpty ? "" : "\n")
@@ -47,25 +48,26 @@ enum SubtitleDocument {
                 """
                 \(cue.index)
                 \(formatVTTTime(cue.start)) --> \(formatVTTTime(cue.end))
-                \(cue.text.trimmingCharacters(in: .whitespacesAndNewlines))
+                \(displayText(for: cue))
                 """
             }
             .joined(separator: "\n\n")
             return "WEBVTT\n\n" + body + (normalized.isEmpty ? "" : "\n")
 
         case .txt:
-            return normalized.map(\.text).joined(separator: "\n")
+            return normalized.map { displayText(for: $0) }.joined(separator: "\n")
 
         case .json:
             let payload = SubtitleJSONPayload(
-                text: normalized.map(\.text).joined(separator: "\n"),
+                text: normalized.map { displayText(for: $0) }.joined(separator: "\n"),
                 segments: normalized.map {
                     SubtitleJSONSegment(
                         index: $0.index,
                         start: $0.start,
                         end: $0.end,
                         text: $0.text,
-                        confidence: $0.confidence
+                        confidence: $0.confidence,
+                        speaker: normalizedSpeakerName($0.speaker)
                     )
                 }
             )
@@ -103,6 +105,20 @@ enum SubtitleDocument {
         return String(format: "%02d:%05.2f", minutes, remainder)
     }
 
+    static func normalizedSpeakerName(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let cleaned = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? nil : cleaned
+    }
+
+    static func displayText(for cue: SubtitleCue) -> String {
+        let text = cue.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let speaker = normalizedSpeakerName(cue.speaker) else {
+            return text
+        }
+        return text.isEmpty ? "\(speaker):" : "\(speaker): \(text)"
+    }
+
     private static func parseTimedText(_ text: String) -> [SubtitleCue] {
         let normalized = text
             .replacingOccurrences(of: "\r\n", with: "\n")
@@ -134,12 +150,14 @@ enum SubtitleDocument {
             let textLines = lines.dropFirst(timeIndex + 1)
             let cueText = textLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
             guard !cueText.isEmpty else { continue }
+            let speakerSplit = splitSpeakerPrefix(from: cueText)
             cues.append(
                 SubtitleCue(
                     index: cues.count + 1,
                     start: start,
                     end: max(start + 0.05, end),
-                    text: cueText
+                    text: speakerSplit.text,
+                    speaker: speakerSplit.speaker
                 )
             )
         }
@@ -152,14 +170,132 @@ enum SubtitleDocument {
             return []
         }
         return payload.segments.map {
-            SubtitleCue(
+            let speaker = normalizedSpeakerName($0.speaker)
+            let speakerSplit = speaker == nil ? splitSpeakerPrefix(from: $0.text) : (speaker: nil, text: $0.text)
+            return SubtitleCue(
                 index: $0.index,
                 start: $0.start,
                 end: $0.end,
-                text: $0.text,
-                confidence: $0.confidence
+                text: speakerSplit.text,
+                confidence: $0.confidence,
+                speaker: speaker ?? speakerSplit.speaker
             )
         }
+    }
+
+    private static func splitSpeakerPrefix(from raw: String) -> (speaker: String?, text: String) {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return (nil, "") }
+
+        if let voice = splitWebVTTSpeaker(from: text) {
+            return voice
+        }
+
+        if let bracketed = splitBracketedSpeaker(from: text) {
+            return bracketed
+        }
+
+        let firstLineEnd = text.firstIndex(of: "\n") ?? text.endIndex
+        let firstLine = text[..<firstLineEnd]
+        guard let colon = firstLine.firstIndex(where: { $0 == ":" || $0 == "：" }) else {
+            let candidate = String(firstLine).trimmingCharacters(in: .whitespacesAndNewlines)
+            if firstLineEnd < text.endIndex, isExplicitSpeakerLabel(candidate) {
+                let remainder = String(text[text.index(after: firstLineEnd)...])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !remainder.isEmpty {
+                    return (normalizedSpeakerName(candidate), remainder)
+                }
+            }
+            return (nil, text)
+        }
+
+        let candidate = String(firstLine[..<colon]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanedCandidate = candidate.trimmingCharacters(in: CharacterSet(charactersIn: "-–— \t"))
+        guard isPlausibleSpeakerLabel(cleanedCandidate) else {
+            return (nil, text)
+        }
+
+        let afterColon = String(firstLine[firstLine.index(after: colon)...])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let remainder: String
+        if firstLineEnd < text.endIndex {
+            remainder = String(text[text.index(after: firstLineEnd)...])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            remainder = ""
+        }
+        let body = [afterColon, remainder]
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        return (normalizedSpeakerName(cleanedCandidate), body)
+    }
+
+    private static func splitWebVTTSpeaker(from text: String) -> (speaker: String?, text: String)? {
+        guard text.lowercased().hasPrefix("<v ") else { return nil }
+        guard let tagEnd = text.firstIndex(of: ">") else { return nil }
+        let rawSpeaker = String(text[text.index(text.startIndex, offsetBy: 3)..<tagEnd])
+            .split(separator: ".")
+            .first
+            .map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let speaker = normalizedSpeakerName(rawSpeaker),
+              isPlausibleSpeakerLabel(speaker) else { return nil }
+        var body = String(text[text.index(after: tagEnd)...])
+            .replacingOccurrences(of: "</v>", with: "", options: [.caseInsensitive])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if body.hasPrefix("<") {
+            body = body.replacingOccurrences(of: #"^<[^>]+>"#, with: "", options: [.regularExpression])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return (speaker, body)
+    }
+
+    private static func splitBracketedSpeaker(from text: String) -> (speaker: String?, text: String)? {
+        guard let first = text.first, first == "[" || first == "【" || first == "(" || first == "（" else {
+            return nil
+        }
+        let closing: Character = switch first {
+        case "[": "]"
+        case "【": "】"
+        case "(": ")"
+        default: "）"
+        }
+        guard let closeIndex = text.firstIndex(of: closing) else { return nil }
+        let candidate = String(text[text.index(after: text.startIndex)..<closeIndex])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isPlausibleSpeakerLabel(candidate) else { return nil }
+        let body = String(text[text.index(after: closeIndex)...])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { return nil }
+        return (normalizedSpeakerName(candidate), body)
+    }
+
+    private static func isPlausibleSpeakerLabel(_ label: String) -> Bool {
+        guard (1...40).contains(label.count) else { return false }
+        let lowered = label.lowercased()
+        guard lowered != "http", lowered != "https" else { return false }
+        let allowed = CharacterSet.letters
+            .union(.decimalDigits)
+            .union(CharacterSet(charactersIn: " _.-"))
+        guard label.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return false }
+        if label.unicodeScalars.contains(where: { CharacterSet.letters.contains($0) }) {
+            return true
+        }
+        return label.count <= 12
+            && label.unicodeScalars.allSatisfy { CharacterSet.decimalDigits.contains($0) }
+    }
+
+    private static func isExplicitSpeakerLabel(_ label: String) -> Bool {
+        guard isPlausibleSpeakerLabel(label) else { return false }
+        let lower = label.lowercased()
+        return lower.contains("speaker")
+            || lower.contains("spk")
+            || lower.contains("发言人")
+            || lower.contains("說話者")
+            || lower.contains("說話人")
+            || lower.contains("说话人")
+            || lower.contains("讲话人")
+            || lower.contains("話者")
     }
 
     private static func parseTime(_ raw: String) -> Double? {
@@ -213,6 +349,7 @@ private struct SubtitleJSONSegment: Codable {
     var end: Double
     var text: String
     var confidence: Double?
+    var speaker: String?
 }
 
 struct SubtitleTermFrequency: Identifiable, Equatable, Sendable {
@@ -600,6 +737,7 @@ struct SubtitleEditorPanel: View {
     @State private var waveform = WaveformSamples([])
     @State private var isLoadingWaveform = false
     @State private var timelineZoom = 1.0
+    @State private var timelineZoomAnchorFraction: Double?
     @State private var findText = ""
     @State private var replacementText = ""
     @State private var matchCase = false
@@ -607,6 +745,7 @@ struct SubtitleEditorPanel: View {
     @State private var isFindReplaceExpanded = false
     @State private var isTimelineExpanded = false
     @State private var styleColor = Color.yellow
+    @State private var speakerStyleColor = Color.yellow
     @State private var selectedTextRange: NSRange?
     @State private var waveformSourceKey: String?
     @State private var previewSyncTask: Task<Void, Never>?
@@ -614,8 +753,13 @@ struct SubtitleEditorPanel: View {
     @State private var waveformReloadTask: Task<Void, Never>?
     @State private var transcribingCueID: SubtitleCue.ID?
     @State private var transcribeError: String?
+    @State private var editingSpeakerCueID: SubtitleCue.ID?
+    @State private var speakerEditOriginalName: String?
+    @State private var speakerEditText = ""
+    @State private var editorColumnHeight: CGFloat = 300
+    @FocusState private var isSpeakerEditorFocused: Bool
 
-    private static let waveformResolutionSteps = [720, 1_440, 2_880, 5_760, 11_520, 23_040, 46_080, 92_160, 131_072, 262_144, 524_288, 1_048_576]
+    private static let waveformResolutionSteps = [180, 360, 720, 1_440, 2_880, 5_760, 11_520, 23_040, 46_080, 92_160, 131_072, 262_144, 524_288, 1_048_576]
 
     private var duration: Double {
         let cueEnd = slot.cues.map(\.end).max() ?? 0.001
@@ -637,6 +781,30 @@ struct SubtitleEditorPanel: View {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    private var speakerNames: [String] {
+        var seen = Set<String>()
+        var names: [String] = []
+        for cue in slot.cues {
+            guard let speaker = SubtitleDocument.normalizedSpeakerName(cue.speaker),
+                  !seen.contains(speaker) else { continue }
+            seen.insert(speaker)
+            names.append(speaker)
+        }
+        return names
+    }
+
+    private var activeTimelineSpeakerName: String? {
+        guard settings.timelineSpeakerMarkersEnabled, let editingSpeakerCueID else { return nil }
+        if let speaker = speakerEditOriginalName {
+            return speaker
+        }
+        if let index = slot.cues.firstIndex(where: { $0.id == editingSpeakerCueID }),
+           let speaker = SubtitleDocument.normalizedSpeakerName(slot.cues[index].speaker) {
+            return speaker
+        }
+        return SubtitleDocument.normalizedSpeakerName(speakerEditText)
+    }
+
     private var waveformTargetSamples: Int {
         let zoom = max(timelineZoom, 1.0)
         let visibleSeconds = max(1.0, duration / zoom)
@@ -650,7 +818,7 @@ struct SubtitleEditorPanel: View {
         } else {
             visibleTarget = 720
         }
-        let desired = Int(visibleTarget * zoom)
+        let desired = Int(visibleTarget * zoom * settings.waveformResolution.targetMultiplier)
         return Self.waveformResolutionSteps.first { $0 >= desired } ?? Self.waveformResolutionSteps.last ?? 720
     }
 
@@ -669,15 +837,25 @@ struct SubtitleEditorPanel: View {
                 HStack(alignment: .top, spacing: 18) {
                     subtitleBlocks
                         .frame(minWidth: 240, maxWidth: .infinity)
+                        .frame(height: max(300, editorColumnHeight), alignment: .top)
 
                     VStack(spacing: 10) {
                         selectedCueEditor
                         findReplaceBar
                     }
-                    .frame(width: 235)
+                    .frame(width: 320)
+                    .background {
+                        GeometryReader { proxy in
+                            Color.clear.preference(key: EditorColumnHeightPreferenceKey.self, value: proxy.size.height)
+                        }
+                    }
                 }
                 .padding(.trailing, 6)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
+                .onPreferenceChange(EditorColumnHeightPreferenceKey.self) { newValue in
+                    guard newValue.isFinite, newValue > 0 else { return }
+                    editorColumnHeight = newValue
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -690,6 +868,9 @@ struct SubtitleEditorPanel: View {
         }
         .onChange(of: waveformTargetSamples) { _, _ in
             guard isTimelineExpanded else { return }
+            scheduleWaveformReload(debounce: true)
+        }
+        .onChange(of: settings.waveformResolution) { _, _ in
             scheduleWaveformReload(debounce: true)
         }
         .onChange(of: slot.cues.count) { _, newValue in
@@ -706,6 +887,9 @@ struct SubtitleEditorPanel: View {
             }
         }
         .onChange(of: slot.selectedCueID) { _, newValue in
+            if let editingSpeakerCueID {
+                commitSpeakerEdit(for: editingSpeakerCueID)
+            }
             guard let newValue,
                   let cue = slot.cues.first(where: { $0.id == newValue }) else { return }
             selectedTextRange = nil
@@ -745,6 +929,9 @@ struct SubtitleEditorPanel: View {
             timelineZoom = max(1.0, timelineZoom - 0.5)
         }
         .onDisappear {
+            if let editingSpeakerCueID {
+                commitSpeakerEdit(for: editingSpeakerCueID)
+            }
             previewSyncTask?.cancel()
             termStatsTask?.cancel()
             waveformReloadTask?.cancel()
@@ -848,7 +1035,12 @@ struct SubtitleEditorPanel: View {
                     .buttonStyle(.borderless)
                     .help(Copy.text("editor.zoomOut", language: language))
 
-                    TimelineZoomSlider(value: $timelineZoom, range: 1...maxTimelineZoom, step: 0.5)
+                    TimelineZoomSlider(
+                        value: $timelineZoom,
+                        anchorFraction: $timelineZoomAnchorFraction,
+                        range: 1...maxTimelineZoom,
+                        step: 0.5
+                    )
                     .frame(maxWidth: 210)
                     .accessibilityLabel(Copy.text("editor.zoom", language: language))
                     .help(Copy.text("editor.zoom", language: language))
@@ -896,6 +1088,9 @@ struct SubtitleEditorPanel: View {
                     zoom: $timelineZoom,
                     zoomRange: 1...maxTimelineZoom,
                     currentTime: playback.currentTime,
+                    sliderAnchorFraction: $timelineZoomAnchorFraction,
+                    activeSpeakerName: activeTimelineSpeakerName,
+                    speakerColors: settings.timelineSpeakerMarkersEnabled ? slot.speakerColors : [:],
                     language: language,
                     onSeek: { time in
                         playback.seek(to: time, pause: true)
@@ -915,6 +1110,7 @@ struct SubtitleEditorPanel: View {
                     waveform: waveform,
                     duration: duration,
                     currentTime: playback.currentTime,
+                    activeSpeakerName: activeTimelineSpeakerName,
                     onSeek: { time in
                         playback.seek(to: time, pause: true)
                     }
@@ -954,7 +1150,7 @@ struct SubtitleEditorPanel: View {
                 }
                 .padding(2)
             }
-            .frame(minHeight: 300, maxHeight: 520)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .padding(2)
             .background(.quinary, in: RoundedRectangle(cornerRadius: 10))
             .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 10))
@@ -1116,26 +1312,38 @@ struct SubtitleEditorPanel: View {
                 .controlSize(.small)
 
                 let selectedCueID = slot.cues[selectedCueIndex].id
+                speakerControls(cueID: selectedCueID, cue: slot.cues[selectedCueIndex])
+
                 SelectableTextEditor(text: cueTextBinding(for: selectedCueID), selection: $selectedTextRange) {}
-                    .frame(height: 156)
+                    .frame(height: 118)
                     .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary))
 
-                compactNumberField(
-                    Copy.text("editor.start", language: language),
-                    value: cueStartBinding(for: selectedCueID)
-                )
-                compactNumberField(
-                    Copy.text("editor.end", language: language),
-                    value: cueEndBinding(for: selectedCueID)
-                )
+                HStack(spacing: 8) {
+                    compactNumberField(
+                        Copy.text("editor.start", language: language),
+                        value: cueStartBinding(for: selectedCueID)
+                    )
+                    .frame(maxWidth: .infinity)
+
+                    compactNumberField(
+                        Copy.text("editor.end", language: language),
+                        value: cueEndBinding(for: selectedCueID)
+                    )
+                    .frame(maxWidth: .infinity)
+                }
 
                 HStack {
                     Text(Copy.text("editor.duration", language: language))
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Spacer()
                     Text(String(format: "%.2fs", slot.cues[selectedCueIndex].duration))
+                        .font(.caption.monospacedDigit().bold())
+                    Spacer()
+                    Text(Copy.text("editor.speechRate", language: language))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(speechRateText(for: slot.cues[selectedCueIndex]))
                         .font(.caption.monospacedDigit().bold())
                 }
 
@@ -1169,6 +1377,148 @@ struct SubtitleEditorPanel: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(.quinary, in: RoundedRectangle(cornerRadius: 10))
             .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 10))
+        }
+    }
+
+    private func speakerControls(cueID: SubtitleCue.ID, cue: SubtitleCue) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if editingSpeakerCueID == cueID {
+                HStack(spacing: 6) {
+                    Image(systemName: "person.crop.circle.fill")
+                        .foregroundStyle(.secondary)
+                    TextField(Copy.text("editor.speaker.rename", language: language), text: $speakerEditText)
+                        .textFieldStyle(.roundedBorder)
+                        .controlSize(.small)
+                        .frame(width: 104)
+                        .focused($isSpeakerEditorFocused)
+                        .onSubmit {
+                            commitSpeakerEdit(for: cueID)
+                        }
+
+                    Spacer(minLength: 14)
+                    speakerEditColorControls(cueID: cueID)
+                }
+
+                let candidates = speakerCandidateNames()
+                if !candidates.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(candidates, id: \.self) { speaker in
+                                Button {
+                                    chooseSpeakerCandidate(speaker, for: cueID)
+                                } label: {
+                                    Text(speaker)
+                                        .font(.caption.weight(.medium))
+                                        .lineLimit(1)
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 4)
+                                        .background(.thinMaterial, in: Capsule())
+                                        .overlay(Capsule().stroke(.quaternary, lineWidth: 0.7))
+                                }
+                                .buttonStyle(.plain)
+                                .help(Copy.text("editor.speaker.merge.help", language: language))
+                            }
+                        }
+                        .padding(.vertical, 1)
+                    }
+                    .frame(height: 28)
+                }
+            } else {
+                HStack(spacing: 6) {
+                    Button {
+                        beginSpeakerEdit(cueID)
+                    } label: {
+                        SpeakerBadge(speaker: SubtitleDocument.normalizedSpeakerName(cue.speaker), language: language)
+                    }
+                    .buttonStyle(.plain)
+                    .help(Copy.text("editor.speaker.edit.help", language: language))
+                    .contextMenu {
+                        speakerAssignmentMenuContent(cueID: cueID)
+                    }
+
+                    Spacer(minLength: 4)
+
+                    Menu {
+                        speakerAssignmentMenuContent(cueID: cueID)
+                    } label: {
+                        Image(systemName: "person.crop.circle.badge.plus")
+                            .frame(width: 24, height: 24)
+                    }
+                    .menuStyle(.button)
+                    .controlSize(.small)
+                    .help(Copy.text("editor.speaker.change.help", language: language))
+                }
+            }
+        }
+    }
+
+    private func speakerEditColorControls(cueID: SubtitleCue.ID) -> some View {
+        HStack(spacing: 6) {
+            ColorPicker("", selection: $speakerStyleColor, supportsOpacity: false)
+                .labelsHidden()
+                .controlSize(.small)
+                .frame(width: 30)
+                .help(Copy.text("editor.speaker.color.help", language: language))
+
+            Button {
+                applySpeakerColor(speakerStyleColor, for: cueID)
+            } label: {
+                Image(systemName: "paintpalette")
+                    .frame(width: 20, height: 20)
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .disabled(activeSpeakerNameForColor(cueID) == nil)
+            .help(Copy.text("editor.speaker.applyColor.help", language: language))
+
+            Button {
+                commitSpeakerEdit(for: cueID)
+            } label: {
+                Image(systemName: "checkmark")
+                    .frame(width: 20, height: 20)
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .help(Copy.text("editor.speaker.apply.help", language: language))
+
+            Button {
+                cancelSpeakerEdit()
+            } label: {
+                Image(systemName: "xmark")
+                    .frame(width: 20, height: 20)
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .help(Copy.text("editor.speaker.cancel.help", language: language))
+        }
+        .fixedSize()
+    }
+
+    @ViewBuilder
+    private func speakerAssignmentMenuContent(cueID: SubtitleCue.ID) -> some View {
+        Button {
+            assignSpeaker(nil, to: cueID)
+        } label: {
+            Label(Copy.text("editor.speaker.clear", language: language), systemImage: "xmark.circle")
+        }
+
+        if !speakerNames.isEmpty {
+            Divider()
+            ForEach(speakerNames, id: \.self) { speaker in
+                Button {
+                    assignSpeaker(speaker, to: cueID)
+                } label: {
+                    Label(speaker, systemImage: "person.crop.circle")
+                }
+            }
+        }
+
+        Divider()
+
+        Button {
+            assignSpeaker(nextSpeakerName(), to: cueID)
+        } label: {
+            Label(Copy.text("editor.speaker.new", language: language), systemImage: "plus")
         }
     }
 
@@ -1289,6 +1639,45 @@ struct SubtitleEditorPanel: View {
         }
     }
 
+    private func speechRateText(for cue: SubtitleCue) -> String {
+        let units = lexicalUnitCount(in: cue.text)
+        let rate = cue.duration > 0 ? Double(units) / cue.duration : 0
+        return String(format: Copy.text("editor.speechRate.value", language: language), rate)
+    }
+
+    private func lexicalUnitCount(in text: String) -> Int {
+        var count = 0
+        var isInsideWord = false
+        func flushWord() {
+            if isInsideWord {
+                count += 1
+                isInsideWord = false
+            }
+        }
+
+        for scalar in fontMarkupRemoved(from: text).unicodeScalars {
+            if isHanScalar(scalar) {
+                flushWord()
+                count += 1
+            } else if CharacterSet.letters.contains(scalar) || CharacterSet.decimalDigits.contains(scalar) {
+                isInsideWord = true
+            } else {
+                flushWord()
+            }
+        }
+        flushWord()
+        return count
+    }
+
+    private func isHanScalar(_ scalar: UnicodeScalar) -> Bool {
+        switch scalar.value {
+        case 0x4E00...0x9FFF, 0x3400...0x4DBF, 0x20000...0x2A6DF, 0x2A700...0x2B73F, 0x2B740...0x2B81F, 0x2B820...0x2CEAF, 0xF900...0xFAFF:
+            return true
+        default:
+            return false
+        }
+    }
+
     private func cueStartBinding(for cueID: SubtitleCue.ID) -> Binding<Double> {
         Binding(
             get: {
@@ -1318,6 +1707,167 @@ struct SubtitleEditorPanel: View {
         )
     }
 
+    private func assignSpeaker(_ speaker: String?, to cueID: SubtitleCue.ID) {
+        guard let index = cueIndex(for: cueID) else { return }
+        let normalized = SubtitleDocument.normalizedSpeakerName(speaker)
+        var didChange = false
+        if SubtitleDocument.normalizedSpeakerName(slot.cues[index].speaker) != normalized {
+            slot.cues[index].speaker = normalized
+            didChange = true
+        }
+        if applyStoredSpeakerColor(toCueAt: index) {
+            didChange = true
+        }
+        if didChange {
+            schedulePreviewTextSync(for: slot.cues)
+            scheduleTermStatsSync(for: slot.cues)
+        }
+    }
+
+    private func renameSpeaker(_ oldSpeaker: String, to newSpeaker: String?) {
+        guard let old = SubtitleDocument.normalizedSpeakerName(oldSpeaker) else { return }
+        let normalizedNew = SubtitleDocument.normalizedSpeakerName(newSpeaker)
+        let oldColor = slot.speakerColors[old]
+        let targetColor: String?
+        if let normalizedNew {
+            if let existingColor = slot.speakerColors[normalizedNew] {
+                targetColor = existingColor
+            } else if let oldColor {
+                slot.speakerColors[normalizedNew] = oldColor
+                targetColor = oldColor
+            } else {
+                targetColor = nil
+            }
+        } else {
+            targetColor = nil
+        }
+        if old != normalizedNew {
+            slot.speakerColors.removeValue(forKey: old)
+        }
+        var didChange = false
+        for index in slot.cues.indices {
+            guard SubtitleDocument.normalizedSpeakerName(slot.cues[index].speaker) == old else { continue }
+            slot.cues[index].speaker = normalizedNew
+            if let targetColor {
+                slot.cues[index].text = fontColoredText(slot.cues[index].text, hex: targetColor)
+            }
+            didChange = true
+        }
+        if didChange {
+            schedulePreviewTextSync(for: slot.cues)
+            scheduleTermStatsSync(for: slot.cues)
+        }
+    }
+
+    private func beginSpeakerEdit(_ cueID: SubtitleCue.ID) {
+        guard let index = cueIndex(for: cueID) else { return }
+        let speaker = SubtitleDocument.normalizedSpeakerName(slot.cues[index].speaker)
+        speakerEditOriginalName = speaker
+        speakerEditText = speaker ?? ""
+        if let speaker,
+           let hex = slot.speakerColors[speaker],
+           let color = color(fromHex: hex) {
+            speakerStyleColor = color
+        }
+        editingSpeakerCueID = cueID
+        Task { @MainActor in
+            isSpeakerEditorFocused = true
+        }
+    }
+
+    private func activeSpeakerNameForColor(_ cueID: SubtitleCue.ID) -> String? {
+        if let speaker = speakerEditOriginalName {
+            return speaker
+        }
+        if let index = cueIndex(for: cueID),
+           let speaker = SubtitleDocument.normalizedSpeakerName(slot.cues[index].speaker) {
+            return speaker
+        }
+        return SubtitleDocument.normalizedSpeakerName(speakerEditText)
+    }
+
+    private func applySpeakerColor(_ color: Color, for cueID: SubtitleCue.ID) {
+        var targetSpeaker = activeSpeakerNameForColor(cueID)
+        if speakerEditOriginalName == nil,
+           let typedSpeaker = SubtitleDocument.normalizedSpeakerName(speakerEditText),
+           cueIndex(for: cueID) != nil {
+            assignSpeaker(typedSpeaker, to: cueID)
+            speakerEditOriginalName = typedSpeaker
+            targetSpeaker = typedSpeaker
+        }
+        guard let targetSpeaker else { return }
+
+        let hex = hexString(for: color)
+        slot.speakerColors[targetSpeaker] = hex
+        var didChange = false
+        for index in slot.cues.indices {
+            guard SubtitleDocument.normalizedSpeakerName(slot.cues[index].speaker) == targetSpeaker else { continue }
+            let updated = fontColoredText(slot.cues[index].text, hex: hex)
+            guard updated != slot.cues[index].text else { continue }
+            slot.cues[index].text = updated
+            didChange = true
+        }
+        if didChange {
+            schedulePreviewTextSync(for: slot.cues)
+            scheduleTermStatsSync(for: slot.cues)
+        }
+    }
+
+    private func commitSpeakerEdit(for cueID: SubtitleCue.ID) {
+        guard editingSpeakerCueID == cueID else { return }
+        let newSpeaker = SubtitleDocument.normalizedSpeakerName(speakerEditText)
+        if let original = speakerEditOriginalName {
+            renameSpeaker(original, to: newSpeaker)
+        } else {
+            assignSpeaker(newSpeaker, to: cueID)
+        }
+        cancelSpeakerEdit()
+    }
+
+    private func cancelSpeakerEdit() {
+        editingSpeakerCueID = nil
+        speakerEditOriginalName = nil
+        speakerEditText = ""
+        isSpeakerEditorFocused = false
+    }
+
+    private func chooseSpeakerCandidate(_ speaker: String, for cueID: SubtitleCue.ID) {
+        if let original = speakerEditOriginalName {
+            renameSpeaker(original, to: speaker)
+        } else {
+            assignSpeaker(speaker, to: cueID)
+        }
+        cancelSpeakerEdit()
+    }
+
+    private func speakerCandidateNames() -> [String] {
+        return speakerNames.filter { speaker in
+            speaker != speakerEditOriginalName
+        }
+    }
+
+    private func applyStoredSpeakerColor(toCueAt index: Int) -> Bool {
+        guard slot.cues.indices.contains(index),
+              let speaker = SubtitleDocument.normalizedSpeakerName(slot.cues[index].speaker),
+              let hex = slot.speakerColors[speaker] else {
+            return false
+        }
+        let updated = fontColoredText(slot.cues[index].text, hex: hex)
+        guard updated != slot.cues[index].text else { return false }
+        slot.cues[index].text = updated
+        return true
+    }
+
+    private func nextSpeakerName() -> String {
+        var number = max(1, speakerNames.count + 1)
+        var candidate = String(format: Copy.text("editor.speaker.newName", language: language), number)
+        while speakerNames.contains(candidate) {
+            number += 1
+            candidate = String(format: Copy.text("editor.speaker.newName", language: language), number)
+        }
+        return candidate
+    }
+
     private func cueEndBinding(for cueID: SubtitleCue.ID) -> Binding<Double> {
         Binding(
             get: {
@@ -1345,7 +1895,7 @@ struct SubtitleEditorPanel: View {
     }
 
     private func loadWaveformIfNeeded() async {
-        let sourceKey = "\(slot.url.standardizedFileURL.path)#\(slot.duration)"
+        let sourceKey = "\(slot.url.standardizedFileURL.path)#\(slot.duration)#\(settings.waveformResolution.rawValue)"
         // Load even when the timeline is collapsed — the compact strip also displays
         // the waveform, and loading early means expand-to-detail is instant.
         guard !slot.cues.isEmpty else {
@@ -1402,6 +1952,7 @@ struct SubtitleEditorPanel: View {
             || current.end != original.end
             || current.text != original.text
             || current.confidence != original.confidence
+            || SubtitleDocument.normalizedSpeakerName(current.speaker) != SubtitleDocument.normalizedSpeakerName(original.speaker)
     }
 
     private var timelineCueActions: TimelineCueActions {
@@ -1424,6 +1975,7 @@ struct SubtitleEditorPanel: View {
             || current.end != original.end
             || current.text != original.text
             || current.confidence != original.confidence
+            || SubtitleDocument.normalizedSpeakerName(current.speaker) != SubtitleDocument.normalizedSpeakerName(original.speaker)
     }
 
     private func originalCue(for cueID: SubtitleCue.ID) -> SubtitleCue? {
@@ -1481,6 +2033,12 @@ struct SubtitleEditorPanel: View {
             let output = try await api.fetchOutput(jobID: created.id)
             guard let text = String(data: output.data, encoding: .utf8) else { return }
             let cuesFromClip = SubtitleDocument.parse(text, format: slot.outputFormat)
+            let parsedSpeakers = cuesFromClip.compactMap { SubtitleDocument.normalizedSpeakerName($0.speaker) }
+            let uniqueParsedSpeakers = parsedSpeakers.reduce(into: [String]()) { speakers, speaker in
+                if !speakers.contains(speaker) {
+                    speakers.append(speaker)
+                }
+            }
             let combined: String
             if cuesFromClip.isEmpty {
                 combined = text
@@ -1493,6 +2051,10 @@ struct SubtitleEditorPanel: View {
             }
             guard let updatedIndex = slot.cues.firstIndex(where: { $0.id == cueID }) else { return }
             slot.cues[updatedIndex].text = combined
+            if uniqueParsedSpeakers.count == 1 {
+                slot.cues[updatedIndex].speaker = uniqueParsedSpeakers.first
+                _ = applyStoredSpeakerColor(toCueAt: updatedIndex)
+            }
             schedulePreviewTextSync(for: slot.cues)
             scheduleTermStatsSync(for: slot.cues)
         } catch {
@@ -1585,6 +2147,7 @@ struct SubtitleEditorPanel: View {
         slot.cues[selectedCueIndex].end = original.end
         slot.cues[selectedCueIndex].text = original.text
         slot.cues[selectedCueIndex].confidence = original.confidence
+        slot.cues[selectedCueIndex].speaker = original.speaker
         slot.cues = SubtitleDocument.normalize(slot.cues)
         slot.selectedCueID = original.id
         scheduleCueTimingSync(for: slot.cues)
@@ -1596,7 +2159,7 @@ struct SubtitleEditorPanel: View {
         let source = slot.cues[index]
         let start = source.end
         let end = start + max(0.5, source.duration)
-        insertCue(at: index + 1, start: start, end: end, text: source.text, confidence: source.confidence)
+        insertCue(at: index + 1, start: start, end: end, text: source.text, confidence: source.confidence, speaker: source.speaker)
     }
 
     private func insertCue(before cueID: SubtitleCue.ID) {
@@ -1629,16 +2192,22 @@ struct SubtitleEditorPanel: View {
         start: Double,
         end: Double,
         text: String,
-        confidence: Double? = nil
+        confidence: Double? = nil,
+        speaker: String? = nil
     ) {
         previewSyncTask?.cancel()
-        let cue = SubtitleCue(
+        var cue = SubtitleCue(
             index: insertionIndex + 1,
             start: max(0, start),
             end: max(max(0, start) + 0.05, end),
             text: text,
-            confidence: confidence
+            confidence: confidence,
+            speaker: speaker
         )
+        if let speaker = SubtitleDocument.normalizedSpeakerName(speaker),
+           let hex = slot.speakerColors[speaker] {
+            cue.text = fontColoredText(cue.text, hex: hex)
+        }
         let safeIndex = min(max(0, insertionIndex), slot.cues.count)
         slot.cues.insert(cue, at: safeIndex)
         slot.cues = SubtitleDocument.normalize(slot.cues)
@@ -1810,23 +2379,19 @@ struct SubtitleEditorPanel: View {
         guard let selectedCueIndex else { return }
         var text = slot.cues[selectedCueIndex].text
         guard !text.isEmpty else { return }
+        let hex = hexString(for: color)
 
         if var selection = activeStyleSelection(in: text) {
-            if unwrapSelectedFont(in: &text, selection: &selection)
-                || unwrapImmediateFont(in: &text, selection: &selection) {
-                commitStyleText(text, selection: selection)
-                return
-            }
-            wrapSelection(opening: "<font color=\"\(hexString(for: color))\">", closing: "</font>", in: &text, selection: &selection)
-            commitStyleText(text, selection: selection)
+            while unwrapImmediateFont(in: &text, selection: &selection) {}
+            guard let range = Range(selection, in: text) else { return }
+            let selectedText = fontMarkupRemoved(from: String(text[range]))
+            let colored = fontColoredText(selectedText, hex: hex)
+            text.replaceSubrange(range, with: colored)
+            commitStyleText(text, selection: nil)
             return
         }
 
-        if let unwrapped = unwrappedFontText(text) {
-            commitStyleText(unwrapped, selection: nil)
-        } else {
-            commitStyleText("<font color=\"\(hexString(for: color))\">\(text)</font>", selection: nil)
-        }
+        commitStyleText(fontColoredText(text, hex: hex), selection: nil)
     }
 
     private func clearCueStyle() {
@@ -1996,6 +2561,24 @@ struct SubtitleEditorPanel: View {
         return text
     }
 
+    private func fontMarkupRemoved(from text: String) -> String {
+        text.replacingOccurrences(
+            of: #"<font\b[^>]*>"#,
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        )
+        .replacingOccurrences(
+            of: "</font>",
+            with: "",
+            options: [.caseInsensitive]
+        )
+    }
+
+    private func fontColoredText(_ text: String, hex: String) -> String {
+        let body = fontMarkupRemoved(from: text).trimmingCharacters(in: .whitespacesAndNewlines)
+        return body.isEmpty ? "" : "<font color=\"\(hex)\">\(body)</font>"
+    }
+
     private func hasOuterMarkupTag(_ tag: String) -> Bool {
         guard let selectedCueIndex else { return false }
         let text = slot.cues[selectedCueIndex].text
@@ -2050,10 +2633,30 @@ struct SubtitleEditorPanel: View {
         let blue = Int((nsColor.blueComponent * 255).rounded())
         return String(format: "#%02X%02X%02X", red, green, blue)
     }
+
+    private func color(fromHex raw: String) -> Color? {
+        let hex = raw.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
+        let expanded: String
+        if hex.count == 3 {
+            expanded = hex.map { "\($0)\($0)" }.joined()
+        } else {
+            expanded = hex
+        }
+        guard expanded.count == 6,
+              let rgb = Int(expanded, radix: 16) else {
+            return nil
+        }
+        return Color(
+            red: Double((rgb >> 16) & 0xFF) / 255.0,
+            green: Double((rgb >> 8) & 0xFF) / 255.0,
+            blue: Double(rgb & 0xFF) / 255.0
+        )
+    }
 }
 
 private struct TimelineZoomSlider: NSViewRepresentable {
     @Binding var value: Double
+    @Binding var anchorFraction: Double?
     let range: ClosedRange<Double>
     let step: Double
 
@@ -2118,6 +2721,11 @@ private struct TimelineZoomSlider: NSViewRepresentable {
         }
 
         @objc func valueChanged(_ sender: NSSlider) {
+            if let window = sender.window {
+                let mouse = sender.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+                let fraction = Double(mouse.x / max(sender.bounds.width, 1))
+                parent.anchorFraction = min(max(fraction, 0), 1)
+            }
             parent.value = parent.value(for: sender.doubleValue)
         }
     }
@@ -2134,6 +2742,9 @@ private struct ZoomableTimeline: View {
     @Binding var zoom: Double
     let zoomRange: ClosedRange<Double>
     let currentTime: Double
+    @Binding var sliderAnchorFraction: Double?
+    let activeSpeakerName: String?
+    let speakerColors: [String: String]
     let language: AppLanguage
     let onSeek: (Double) -> Void
     let onScrub: (Double) -> Void
@@ -2169,6 +2780,8 @@ private struct ZoomableTimeline: View {
                     duration: duration,
                     zoom: zoom,
                     currentTime: currentTime,
+                    activeSpeakerName: activeSpeakerName,
+                    speakerColors: speakerColors,
                     language: language,
                     visibleFractionRange: effectiveVisibleRange,
                     onSeek: onSeek,
@@ -2197,10 +2810,14 @@ private struct ZoomableTimeline: View {
             }
             .onChange(of: zoom) { _, newZoom in
                 guard magnifySession == nil else { return }
-                // Anchor on the currently visible center rather than re-centering on
-                // the selected cue — slider / keyboard zoom should preserve the
-                // point of interest the user is looking at, not warp the view.
-                anchorOnVisibleCenter(viewport: viewportWidth, newZoom: newZoom)
+                if sliderAnchorFraction != nil {
+                    anchorOnTime(currentTime, viewport: viewportWidth, newZoom: newZoom)
+                    self.sliderAnchorFraction = nil
+                } else {
+                    // Keyboard / button zoom keeps the old center; slider zoom
+                    // centers on the red playback cursor.
+                    anchorOnVisibleCenter(viewport: viewportWidth, newZoom: newZoom)
+                }
             }
             .onAppear {
                 centerOnSelectedCue(viewport: viewportWidth, content: contentWidth, animated: false, cueID: selectedCueID)
@@ -2235,6 +2852,18 @@ private struct ZoomableTimeline: View {
         let newContentWidth = max(viewport, viewport * newZoom)
         let target = centerFraction * newContentWidth - viewport / 2
         let maxOffset = max(0, newContentWidth - viewport)
+        let clamped = min(max(0, target), maxOffset)
+        DispatchQueue.main.async {
+            scrollPosition.scrollTo(x: clamped)
+        }
+    }
+
+    private func anchorOnTime(_ seconds: Double, viewport: CGFloat, newZoom: Double) {
+        let safeViewport = max(viewport, 1)
+        let anchorFraction = min(max(seconds / max(duration, 0.001), 0), 1)
+        let newContentWidth = max(safeViewport, safeViewport * newZoom)
+        let target = anchorFraction * newContentWidth - safeViewport / 2
+        let maxOffset = max(0, newContentWidth - safeViewport)
         let clamped = min(max(0, target), maxOffset)
         DispatchQueue.main.async {
             scrollPosition.scrollTo(x: clamped)
@@ -2353,6 +2982,7 @@ private struct CompactTimelineStrip: View {
     let waveform: WaveformSamples
     let duration: Double
     let currentTime: Double
+    let activeSpeakerName: String?
     let onSeek: (Double) -> Void
 
     var body: some View {
@@ -2464,6 +3094,7 @@ private struct CompactTimelineStrip: View {
         Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: true) { context, _ in
             for cue in cues {
                 let selected = cue.id == selectedCueID
+                let speakerMatched = speakerMatchesActive(cue)
                 let blockHeight = selected ? height - 10 : height - 16
                 let startX = xPosition(cue.start, width: width)
                 let endX = xPosition(cue.end, width: width)
@@ -2475,7 +3106,7 @@ private struct CompactTimelineStrip: View {
                 )
                 context.fill(
                     Path(roundedRect: rect, cornerRadius: 2),
-                    with: .color(selected ? Color.accentColor.opacity(0.55) : Color.teal.opacity(0.28))
+                    with: .color(compactCueFillColor(selected: selected, speakerMatched: speakerMatched))
                 )
             }
         }
@@ -2485,6 +3116,7 @@ private struct CompactTimelineStrip: View {
         Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: true) { context, _ in
             let binCount = max(20, min(180, Int(width / 4)))
             var deltas = [Int](repeating: 0, count: binCount + 1)
+            var speakerDeltas = [Int](repeating: 0, count: binCount + 1)
             var selectedBin: Int?
 
             for cue in cues {
@@ -2493,6 +3125,12 @@ private struct CompactTimelineStrip: View {
                 deltas[lower] += 1
                 if upper + 1 < deltas.count {
                     deltas[upper + 1] -= 1
+                }
+                if speakerMatchesActive(cue) {
+                    speakerDeltas[lower] += 1
+                    if upper + 1 < speakerDeltas.count {
+                        speakerDeltas[upper + 1] -= 1
+                    }
                 }
                 if cue.id == selectedCueID {
                     selectedBin = lower
@@ -2522,6 +3160,21 @@ private struct CompactTimelineStrip: View {
                 )
             }
 
+            if activeSpeakerName != nil {
+                var runningSpeakerCount = 0
+                for index in 0..<binCount {
+                    runningSpeakerCount += speakerDeltas[index]
+                    guard runningSpeakerCount > 0 else { continue }
+                    let rect = CGRect(
+                        x: CGFloat(index) * binWidth,
+                        y: 4,
+                        width: max(1, binWidth * 0.82),
+                        height: height - 8
+                    )
+                    context.fill(Path(roundedRect: rect, cornerRadius: 2), with: .color(Color.teal.opacity(0.34)))
+                }
+            }
+
             if let selectedBin {
                 let rect = CGRect(
                     x: CGFloat(selectedBin) * binWidth,
@@ -2536,6 +3189,18 @@ private struct CompactTimelineStrip: View {
 
     private func xPosition(_ seconds: Double, width: CGFloat) -> CGFloat {
         CGFloat(max(0, min(seconds / max(duration, 0.001), 1))) * width
+    }
+
+    private func compactCueFillColor(selected: Bool, speakerMatched: Bool) -> Color {
+        if selected {
+            return Color.accentColor.opacity(speakerMatched ? 0.68 : 0.55)
+        }
+        return Color.teal.opacity(speakerMatched ? 0.42 : 0.28)
+    }
+
+    private func speakerMatchesActive(_ cue: SubtitleCue) -> Bool {
+        guard let activeSpeakerName else { return false }
+        return SubtitleDocument.normalizedSpeakerName(cue.speaker) == activeSpeakerName
     }
 
     private func clamp(_ value: Double, _ lower: Double, _ upper: Double) -> Double {
@@ -2611,6 +3276,8 @@ private struct WaveformTimelineEditor: View {
     let duration: Double
     let zoom: Double
     let currentTime: Double
+    let activeSpeakerName: String?
+    let speakerColors: [String: String]
     let language: AppLanguage
     let visibleFractionRange: ClosedRange<Double>
     let onSeek: (Double) -> Void
@@ -2675,24 +3342,31 @@ private struct WaveformTimelineEditor: View {
                 .offset(y: height - rulerHeight)
                 .allowsHitTesting(false)
 
-                if detailedCues {
-                    cueBlocksCanvas(width: width, cueRange: visibleCueRange)
-                        .allowsHitTesting(false)
-                    cueOverlapCanvas(width: width, cueRange: visibleCueRange)
-                        .allowsHitTesting(false)
-                    cueHitOverlays(width: width, cueRange: visibleCueRange)
-                } else {
-                    cueDensityCanvas(width: width)
-                        .allowsHitTesting(false)
-                }
+                ZStack(alignment: .topLeading) {
+                    if detailedCues {
+                        ZStack(alignment: .topLeading) {
+                            cueBlocksCanvas(width: width, cueRange: visibleCueRange)
+                                .allowsHitTesting(false)
+                            cueOverlapCanvas(width: width, cueRange: visibleCueRange)
+                                .allowsHitTesting(false)
+                            cueHitOverlays(width: width, cueRange: visibleCueRange)
 
-                if detailedCues, let selectedCue {
-                    selectedCueOverlay(cue: selectedCue, width: width)
-                }
+                            if let selectedCue {
+                                selectedCueOverlay(cue: selectedCue, width: width)
+                            }
 
-                if detailedCues, let selectedCueBinding {
-                    handles(cue: selectedCueBinding, width: width)
+                            if let selectedCueBinding {
+                                handles(cue: selectedCueBinding, width: width)
+                            }
+                        }
+                        .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .center)))
+                    } else {
+                        cueDensityCanvas(width: width)
+                            .allowsHitTesting(false)
+                            .transition(.opacity.combined(with: .scale(scale: 0.995, anchor: .center)))
+                    }
                 }
+                .animation(.easeInOut(duration: 0.22), value: detailedCues)
 
                 if let term = activeHighlightTerm {
                     TimelineDotsCanvas(
@@ -2812,17 +3486,30 @@ private struct WaveformTimelineEditor: View {
         Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: true) { context, _ in
             for cue in cues[cueRange] {
                 let selected = cue.id == selectedCueID
+                let speakerMatched = speakerMatchesActive(cue)
                 let startX = xPosition(cue.start, width: width)
                 let endX = xPosition(cue.end, width: width)
                 let cueWidth = max(2, endX - startX)
                 let rect = CGRect(x: startX, y: cueTopOffset, width: cueWidth, height: cueHeight)
                 let path = Path(roundedRect: rect, cornerRadius: 5)
-                context.fill(path, with: .color(selected ? Color.accentColor.opacity(0.28) : Color.teal.opacity(0.22)))
+                context.fill(path, with: .color(cueFillColor(selected: selected, speakerMatched: speakerMatched)))
                 context.stroke(
                     path,
-                    with: .color(selected ? Color.accentColor : Color.teal.opacity(0.55)),
+                    with: .color(cueStrokeColor(selected: selected, speakerMatched: speakerMatched)),
                     lineWidth: selected ? 1.6 : 0.8
                 )
+                if !selected, let lineColor = speakerColor(for: cue) {
+                    let lineRect = CGRect(
+                        x: rect.minX + 3,
+                        y: rect.maxY - 5,
+                        width: max(0, rect.width - 6),
+                        height: 3
+                    )
+                    context.fill(
+                        Path(roundedRect: lineRect, cornerRadius: 1.5),
+                        with: .color(lineColor.opacity(0.9))
+                    )
+                }
             }
         }
     }
@@ -2858,6 +3545,7 @@ private struct WaveformTimelineEditor: View {
         Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: true) { context, _ in
             let binCount = max(24, min(260, Int(width / 3)))
             var deltas = [Int](repeating: 0, count: binCount + 1)
+            var speakerDeltas = [Int](repeating: 0, count: binCount + 1)
             var selectedBin: Int?
 
             for cue in cues {
@@ -2866,6 +3554,12 @@ private struct WaveformTimelineEditor: View {
                 deltas[lower] += 1
                 if upper + 1 < deltas.count {
                     deltas[upper + 1] -= 1
+                }
+                if speakerMatchesActive(cue) {
+                    speakerDeltas[lower] += 1
+                    if upper + 1 < speakerDeltas.count {
+                        speakerDeltas[upper + 1] -= 1
+                    }
                 }
                 if cue.id == selectedCueID {
                     selectedBin = lower
@@ -2895,6 +3589,21 @@ private struct WaveformTimelineEditor: View {
                 )
             }
 
+            if activeSpeakerName != nil {
+                var runningSpeakerCount = 0
+                for index in 0..<binCount {
+                    runningSpeakerCount += speakerDeltas[index]
+                    guard runningSpeakerCount > 0 else { continue }
+                    let rect = CGRect(
+                        x: CGFloat(index) * binWidth,
+                        y: cueTopOffset,
+                        width: max(1, binWidth * 0.82),
+                        height: cueHeight
+                    )
+                    context.fill(Path(roundedRect: rect, cornerRadius: 2), with: .color(Color.teal.opacity(0.34)))
+                }
+            }
+
             if let selectedBin {
                 let rect = CGRect(
                     x: CGFloat(selectedBin) * binWidth,
@@ -2913,6 +3622,7 @@ private struct WaveformTimelineEditor: View {
         let cueWidth = max(2, endX - startX)
         let hitWidth = max(24, cueWidth)
         let hitOffset = max(0, startX - (hitWidth - cueWidth) / 2)
+        let visualOffset = startX - hitOffset
 
         return ZStack(alignment: .leading) {
             Color.white.opacity(0.001)
@@ -2920,6 +3630,7 @@ private struct WaveformTimelineEditor: View {
 
             RoundedRectangle(cornerRadius: 5)
                 .fill(Color.accentColor.opacity(0.28))
+                .frame(width: cueWidth, height: cueHeight)
                 .overlay(
                     RoundedRectangle(cornerRadius: 5)
                         .stroke(
@@ -2927,10 +3638,17 @@ private struct WaveformTimelineEditor: View {
                             lineWidth: 1.6
                         )
                 )
+                .offset(x: visualOffset)
+            if let lineColor = speakerColor(for: cue) {
+                Capsule()
+                    .fill(lineColor.opacity(0.92))
+                    .frame(width: max(0, cueWidth - 6), height: 3)
+                    .offset(x: visualOffset + 3, y: cueHeight / 2 - 6)
+            }
             Text("\(cue.index)")
                 .font(.caption2.monospacedDigit().bold())
                 .foregroundStyle(.primary)
-                .padding(.leading, 5)
+                .padding(.leading, visualOffset + 5)
                 .lineLimit(1)
         }
         .frame(width: hitWidth, height: cueHeight, alignment: .leading)
@@ -3135,9 +3853,57 @@ private struct WaveformTimelineEditor: View {
         CGFloat(max(0, min(seconds / max(duration, 0.001), 1))) * width
     }
 
+    private func cueFillColor(selected: Bool, speakerMatched: Bool) -> Color {
+        if selected {
+            return Color.accentColor.opacity(speakerMatched ? 0.36 : 0.28)
+        }
+        return Color.teal.opacity(speakerMatched ? 0.34 : 0.22)
+    }
+
+    private func cueStrokeColor(selected: Bool, speakerMatched: Bool) -> Color {
+        if selected {
+            return Color.accentColor
+        }
+        return Color.teal.opacity(speakerMatched ? 0.75 : 0.55)
+    }
+
+    private func speakerMatchesActive(_ cue: SubtitleCue) -> Bool {
+        guard let activeSpeakerName else { return false }
+        return SubtitleDocument.normalizedSpeakerName(cue.speaker) == activeSpeakerName
+    }
+
+    private func speakerColor(for cue: SubtitleCue) -> Color? {
+        guard let speaker = SubtitleDocument.normalizedSpeakerName(cue.speaker),
+              let hex = speakerColors[speaker] else {
+            return nil
+        }
+        return TimelineSpeakerColor.color(fromHex: hex)
+    }
+
     private func clamp(_ value: Double, _ lower: Double, _ upper: Double) -> Double {
         if upper <= lower { return lower }
         return min(max(value, lower), upper)
+    }
+}
+
+private enum TimelineSpeakerColor {
+    static func color(fromHex raw: String) -> Color? {
+        let hex = raw.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
+        let expanded: String
+        if hex.count == 3 {
+            expanded = hex.map { "\($0)\($0)" }.joined()
+        } else {
+            expanded = hex
+        }
+        guard expanded.count == 6,
+              let rgb = Int(expanded, radix: 16) else {
+            return nil
+        }
+        return Color(
+            red: Double((rgb >> 16) & 0xFF) / 255.0,
+            green: Double((rgb >> 8) & 0xFF) / 255.0,
+            blue: Double(rgb & 0xFF) / 255.0
+        )
     }
 }
 
@@ -3403,6 +4169,38 @@ private enum SubtitleMarkupRenderer {
     }
 }
 
+private struct EditorColumnHeightPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 300
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private struct SpeakerBadge: View {
+    let speaker: String?
+    let language: AppLanguage
+
+    var body: some View {
+        Label(displayName, systemImage: speaker == nil ? "person.crop.circle" : "person.crop.circle.fill")
+            .font(.caption.weight(.semibold))
+            .lineLimit(1)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(badgeFill, in: Capsule())
+            .overlay(Capsule().stroke(.quaternary, lineWidth: 0.7))
+            .foregroundStyle(speaker == nil ? .secondary : .primary)
+    }
+
+    private var displayName: String {
+        speaker ?? Copy.text("editor.speaker.none", language: language)
+    }
+
+    private var badgeFill: some ShapeStyle {
+        speaker == nil ? AnyShapeStyle(.quinary) : AnyShapeStyle(.thinMaterial)
+    }
+}
+
 private struct SubtitleCueBlockRow: View {
     @Binding var cue: SubtitleCue
     let isSelected: Bool
@@ -3431,7 +4229,7 @@ private struct SubtitleCueBlockRow: View {
                     .foregroundStyle(.tertiary)
             }
 
-            StyledSubtitleText(cue.text, font: .body, lineLimit: 3)
+            StyledSubtitleText(SubtitleDocument.displayText(for: cue), font: .body, lineLimit: 3)
                 .equatable()
                 .textSelection(.enabled)
                 .frame(minHeight: 48, maxHeight: 84, alignment: .topLeading)
@@ -4066,6 +4864,61 @@ enum FFmpegRunner {
         return nil
     }
 
+    static func clipMedia(
+        from source: URL,
+        to dest: URL,
+        start: Double,
+        duration: Double
+    ) async -> URL? {
+        guard binary != nil else { return nil }
+        let safeStart = String(format: "%.3f", max(0, start))
+        let safeDuration = String(format: "%.3f", max(0.05, duration))
+        let accurateDest: URL
+        if ["mp4", "m4v", "mov"].contains(dest.pathExtension.lowercased()) {
+            accurateDest = dest
+        } else {
+            accurateDest = dest.deletingPathExtension().appendingPathExtension("mp4")
+        }
+
+        try? FileManager.default.removeItem(at: accurateDest)
+        let reencodeArgs = [
+            "-y", "-nostdin", "-loglevel", "error",
+            "-ss", safeStart,
+            "-i", source.path,
+            "-t", safeDuration,
+            "-map", "0:v:0?",
+            "-map", "0:a?",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "20",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-movflags", "+faststart",
+            accurateDest.path
+        ]
+        if await runFFmpeg(reencodeArgs, source: source, dest: accurateDest, operation: "media clip") {
+            return accurateDest
+        }
+
+        try? FileManager.default.removeItem(at: dest)
+        let copyArgs = [
+            "-y", "-nostdin", "-loglevel", "error",
+            "-ss", safeStart,
+            "-i", source.path,
+            "-t", safeDuration,
+            "-map", "0:v?",
+            "-map", "0:a?",
+            "-map", "0:s?",
+            "-c", "copy",
+            "-avoid_negative_ts", "make_zero",
+            dest.path
+        ]
+        if await runFFmpeg(copyArgs, source: source, dest: dest, operation: "media clip copy") {
+            return dest
+        }
+        return nil
+    }
+
     /// Probes the source for its duration in seconds. Useful for containers
     /// AVFoundation refuses to parse (MKV, AVI…). Returns nil on failure.
     static func probeDuration(of source: URL) async -> Double? {
@@ -4112,6 +4965,54 @@ enum FFmpegRunner {
         let fractional = Double(cs) / pow(10.0, Double(csStr.count))
         let total = Double(h * 3600 + m * 60 + s) + fractional
         return total > 0 ? total : nil
+    }
+
+    private static func runFFmpeg(
+        _ arguments: [String],
+        source: URL,
+        dest: URL,
+        operation: String
+    ) async -> Bool {
+        guard let binary else { return false }
+        NSLog("[MSub] FFmpeg %@ starting on %@", operation, source.lastPathComponent)
+        let started = Date()
+        let process = Process()
+        process.executableURL = binary
+        process.arguments = arguments
+        let stderr = Pipe()
+        process.standardError = stderr
+        process.standardOutput = Pipe()
+        do {
+            try process.run()
+        } catch {
+            NSLog("[MSub] FFmpeg %@ launch failed for %@: %@", operation, source.lastPathComponent, "\(error)")
+            return false
+        }
+
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            process.terminationHandler = { _ in cont.resume() }
+        }
+
+        let elapsed = Date().timeIntervalSince(started)
+        let exitCode = process.terminationStatus
+        guard exitCode == 0, FileManager.default.fileExists(atPath: dest.path) else {
+            let data = (try? stderr.fileHandleForReading.readToEnd()) ?? Data()
+            let text = (String(data: data, encoding: .utf8) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            NSLog(
+                "[MSub] FFmpeg %@ exit %d on %@ in %.2fs: %@",
+                operation, Int(exitCode), source.lastPathComponent, elapsed, text
+            )
+            try? FileManager.default.removeItem(at: dest)
+            return false
+        }
+
+        let size = (try? FileManager.default.attributesOfItem(atPath: dest.path)[.size] as? NSNumber)?.int64Value ?? 0
+        NSLog(
+            "[MSub] FFmpeg %@ ok on %@ in %.2fs → %lld bytes at %@",
+            operation, source.lastPathComponent, elapsed, size, dest.path
+        )
+        return true
     }
 
     /// Decodes a single video frame from `source` at `seconds` into a JPEG

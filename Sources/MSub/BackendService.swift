@@ -1,8 +1,10 @@
 import Darwin
 import Foundation
+import CryptoKit
 
 private struct BackendManifest: Decodable {
     let sourceModelPath: String?
+    let sourceDiarizationModelPath: String?
 }
 
 @MainActor
@@ -40,11 +42,16 @@ final class BackendService: ObservableObject {
             environment["MSUB_MODEL"] = modelPath.path
             environment["HUZ_MODEL"] = modelPath.path
         }
+        if let diarizationModelPath = bundledOrWorkspaceDiarizationModel(in: workspace) {
+            environment["MSUB_DIARIZATION_MODEL"] = diarizationModelPath.path
+        }
         environment["MSUB_HOST"] = "127.0.0.1"
         environment["MSUB_PORT"] = "\(port)"
         environment["MSUB_BACKEND_ROOT"] = workspace.path
         environment["MSUB_PARENT_PID"] = "\(ProcessInfo.processInfo.processIdentifier)"
-        environment["MSUB_MODEL_IDLE_SECONDS"] = environment["MSUB_MODEL_IDLE_SECONDS"] ?? "120"
+        environment["MSUB_MODEL_IDLE_SECONDS"] = environment["MSUB_MODEL_IDLE_SECONDS"] ?? "60"
+        environment["MSUB_STT_MODEL_CACHE_SIZE"] = environment["MSUB_STT_MODEL_CACHE_SIZE"] ?? "1"
+        environment["MSUB_CLEAR_MLX_CACHE_EACH_CHUNK"] = environment["MSUB_CLEAR_MLX_CACHE_EACH_CHUNK"] ?? "1"
         environment["PYTHONUNBUFFERED"] = "1"
         environment["PYTHONIOENCODING"] = "utf-8"
         environment["UV_NO_PROGRESS"] = "1"
@@ -111,14 +118,20 @@ final class BackendService: ObservableObject {
     func ensureRunning(timeout: TimeInterval = 25.0) async -> Bool {
         let expectedBackendRootPath = expectedBackendRootPath()
         let expectedModelPath = expectedModelPath()
+        let expectedBackendFingerprint = expectedBackendSourceFingerprint()
         if await healthCheck(
             url: baseURL,
             expectedBackendRootPath: expectedBackendRootPath,
-            expectedModelPath: expectedModelPath
+            expectedModelPath: expectedModelPath,
+            expectedBackendFingerprint: expectedBackendFingerprint
         ) {
             isRunning = true
             message = "Backend running at \(baseURL.host() ?? "127.0.0.1"):\(baseURL.port ?? 7860)"
             return true
+        }
+        if process != nil {
+            appendLog("Restarting stale backend")
+            stop(waitForExit: true)
         }
         if process == nil {
             start()
@@ -130,12 +143,14 @@ final class BackendService: ObservableObject {
     func waitUntilHealthy(timeout: TimeInterval = 4.0) async -> Bool {
         let expectedBackendRootPath = expectedBackendRootPath()
         let expectedModelPath = expectedModelPath()
+        let expectedBackendFingerprint = expectedBackendSourceFingerprint()
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if await healthCheck(
                 url: baseURL,
                 expectedBackendRootPath: expectedBackendRootPath,
-                expectedModelPath: expectedModelPath
+                expectedModelPath: expectedModelPath,
+                expectedBackendFingerprint: expectedBackendFingerprint
             ) {
                 return true
             }
@@ -147,40 +162,60 @@ final class BackendService: ObservableObject {
         return false
     }
 
-    func stop() {
-        requestBackendShutdown()
+    func stop(waitForExit: Bool = false) {
+        requestBackendShutdown(waitForResponse: waitForExit)
         pipe?.fileHandleForReading.readabilityHandler = nil
         pipe = nil
-        if let process, process.isRunning {
-            process.terminationHandler = nil
-            process.terminate()
-            let pid = process.processIdentifier
-            DispatchQueue.global(qos: .utility).async {
-                let deadline = Date().addingTimeInterval(2.0)
-                while process.isRunning && Date() < deadline {
-                    Thread.sleep(forTimeInterval: 0.05)
-                }
-                if process.isRunning {
-                    kill(pid, SIGKILL)
+        let runningProcess = process
+        process = nil
+        if let runningProcess, runningProcess.isRunning {
+            runningProcess.terminationHandler = nil
+            runningProcess.terminate()
+            let pid = runningProcess.processIdentifier
+            if waitForExit {
+                Self.waitForBackendExit(runningProcess, pid: pid)
+            } else {
+                DispatchQueue.global(qos: .utility).async {
+                    Self.waitForBackendExit(runningProcess, pid: pid)
                 }
             }
         }
-        process = nil
         isRunning = false
         message = "Backend stopped"
     }
 
-    private func requestBackendShutdown() {
+    private nonisolated static func waitForBackendExit(_ process: Process, pid: pid_t) {
+        let deadline = Date().addingTimeInterval(2.0)
+        while process.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        if process.isRunning {
+            kill(pid, SIGKILL)
+            process.waitUntilExit()
+        }
+    }
+
+    private func requestBackendShutdown(waitForResponse: Bool = false) {
         var request = URLRequest(url: baseURL.appending(path: "/api/shutdown"))
         request.httpMethod = "POST"
-        request.timeoutInterval = 0.5
-        URLSession.shared.dataTask(with: request).resume()
+        request.timeoutInterval = waitForResponse ? 1.0 : 0.5
+        if waitForResponse {
+            let semaphore = DispatchSemaphore(value: 0)
+            URLSession.shared.dataTask(with: request) { _, _, _ in
+                semaphore.signal()
+            }
+            .resume()
+            _ = semaphore.wait(timeout: .now() + 1.0)
+        } else {
+            URLSession.shared.dataTask(with: request).resume()
+        }
     }
 
     private func healthCheck(
         url baseURL: URL,
         expectedBackendRootPath: String?,
-        expectedModelPath: String?
+        expectedModelPath: String?,
+        expectedBackendFingerprint: String?
     ) async -> Bool {
         do {
             let url = baseURL.appending(path: "/api/health")
@@ -189,10 +224,18 @@ final class BackendService: ObservableObject {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse else { return false }
             guard (200..<300).contains(http.statusCode) else { return false }
+            let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
             if let expectedBackendRootPath {
-                guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                guard let object,
                       let backendRoot = object["backendRoot"] as? String,
                       pathsReferToSameFile(backendRoot, expectedBackendRootPath) else {
+                    return false
+                }
+            }
+            if let expectedBackendFingerprint {
+                guard let object,
+                      let backendFingerprint = object["backendSourceFingerprint"] as? String,
+                      backendFingerprint == expectedBackendFingerprint else {
                     return false
                 }
             }
@@ -237,6 +280,21 @@ final class BackendService: ObservableObject {
 
     private func expectedBackendRootPath() -> String? {
         findWorkspaceRoot()?.standardizedFileURL.path
+    }
+
+    private func expectedBackendSourceFingerprint() -> String? {
+        guard let workspace = findWorkspaceRoot() else { return nil }
+        let files = [
+            workspace.appending(path: "src/huz_subtitle/cli.py"),
+            workspace.appending(path: "src/huz_subtitle/web.py"),
+        ]
+        var digest = SHA256()
+        for file in files {
+            guard let data = try? Data(contentsOf: file) else { return nil }
+            digest.update(data: Data(file.lastPathComponent.utf8))
+            digest.update(data: data)
+        }
+        return digest.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     private func findWorkspaceRoot() -> URL? {
@@ -439,11 +497,46 @@ final class BackendService: ObservableObject {
         return nil
     }
 
+    private func bundledOrWorkspaceDiarizationModel(in workspace: URL) -> URL? {
+        for key in ["MSUB_DIARIZATION_MODEL", "PYANNOTE_MODEL"] {
+            if let value = ProcessInfo.processInfo.environment[key], !value.isEmpty {
+                let modelURL = URL(fileURLWithPath: value).standardizedFileURL
+                if isValidDiarizationModelDirectory(modelURL) {
+                    return modelURL
+                }
+            }
+        }
+
+        let modelPath = workspace.appending(path: "models/pyannote-speaker-diarization-community-1")
+        if isValidDiarizationModelDirectory(modelPath) {
+            return modelPath
+        }
+
+        if isBundledBackend(workspace),
+           let sourceModelPath = sourceDiarizationModelPathFromManifest(in: workspace),
+           isValidDiarizationModelDirectory(sourceModelPath) {
+            return sourceModelPath
+        }
+
+        return nil
+    }
+
     private func sourceModelPathFromManifest(in workspace: URL) -> URL? {
         let manifestURL = workspace.appending(path: "backend-manifest.json")
         guard let data = try? Data(contentsOf: manifestURL),
               let manifest = try? JSONDecoder().decode(BackendManifest.self, from: data),
               let path = manifest.sourceModelPath,
+              !path.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: path).standardizedFileURL
+    }
+
+    private func sourceDiarizationModelPathFromManifest(in workspace: URL) -> URL? {
+        let manifestURL = workspace.appending(path: "backend-manifest.json")
+        guard let data = try? Data(contentsOf: manifestURL),
+              let manifest = try? JSONDecoder().decode(BackendManifest.self, from: data),
+              let path = manifest.sourceDiarizationModelPath,
               !path.isEmpty else {
             return nil
         }
@@ -459,6 +552,10 @@ final class BackendService: ObservableObject {
         return requiredFiles.allSatisfy {
             FileManager.default.fileExists(atPath: url.appending(path: $0).path)
         }
+    }
+
+    private func isValidDiarizationModelDirectory(_ url: URL) -> Bool {
+        FileManager.default.fileExists(atPath: url.appending(path: "config.yaml").path)
     }
 
     private func appendLog(_ text: String) {

@@ -151,6 +151,8 @@
 /* Begin PBXShellScriptBuildPhase section */
 		000000000000000000000402 /* Package Backend */ = {
 			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			basedOnDependencyAnalysis = 0;
 			inputPaths = (
 				"$(SRCROOT)/../../src",
 				"$(SRCROOT)/../../pyproject.toml",

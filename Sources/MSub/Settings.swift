@@ -20,6 +20,10 @@ final class TranscriptionSettings: ObservableObject {
     @Published var lengthPenalty = 0.6
     @Published var eosPenalty = 1.0
     @Published var decodeMaxLen = 0
+    @Published var diarizeSpeakers = false
+    @Published var diarizationSpeakerCount = 0
+    @Published var timelineSpeakerMarkersEnabled = true
+    @Published var waveformResolution: WaveformResolution = .high
 
     func apply(config: AppConfig) {
         model = config.defaultModel
@@ -41,6 +45,8 @@ final class TranscriptionSettings: ObservableObject {
         lengthPenalty = 0.6
         eosPenalty = 1.0
         decodeMaxLen = 0
+        diarizeSpeakers = false
+        diarizationSpeakerCount = 0
     }
 
     func applyPreset(_ preset: RecognitionPreset) {
@@ -126,11 +132,29 @@ final class TranscriptionSettings: ObservableObject {
                 ("softmax_smoothing", "\(softmaxSmoothing)"),
                 ("length_penalty", "\(lengthPenalty)"),
                 ("eos_penalty", "\(eosPenalty)"),
-                ("decode_max_len", "\(decodeMaxLen)")
+                ("decode_max_len", "\(decodeMaxLen)"),
+                ("diarize_speakers", diarizeSpeakers ? "true" : "false"),
+                ("diarization_num_speakers", "\(diarizationSpeakerCount)")
             ])
         }
 
         return fields
+    }
+}
+
+enum WaveformResolution: String, CaseIterable, Identifiable {
+    case high
+    case medium
+    case low
+
+    var id: String { rawValue }
+
+    var targetMultiplier: Double {
+        switch self {
+        case .high: 1.0
+        case .medium: 0.5
+        case .low: 0.25
+        }
     }
 }
 

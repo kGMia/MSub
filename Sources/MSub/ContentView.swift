@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import AVKit
+import QuickLook
 import QuickLookThumbnailing
 import SwiftUI
 import UniformTypeIdentifiers
@@ -28,6 +29,10 @@ struct ContentView: View {
     @State private var selectedFrequentTerm: String?
     @State private var chipScrollEdges = ChipScrollEdges(leading: false, trailing: false)
     @State private var isCapturingFrame = false
+    @State private var isClippingVideo = false
+    @State private var quickLookURL: URL?
+    @State private var isBackendStatusPopoverPresented = false
+    @FocusState private var focusedMediaNameSlotID: UUID?
 
     private var language: AppLanguage {
         AppLanguage(rawValue: languageRaw) ?? .zh
@@ -41,7 +46,7 @@ struct ContentView: View {
     private var hasFiles: Bool { !files.isEmpty }
 
     private var canRun: Bool {
-        hasFiles && !isProcessing && !isSaving
+        hasFiles && !isProcessing && !isSaving && !isClippingVideo
     }
 
     private var statusLine: String {
@@ -59,7 +64,7 @@ struct ContentView: View {
     }
 
     private var canSaveAll: Bool {
-        files.contains { $0.hasEditableSubtitle } && !isSaving
+        files.contains { $0.hasEditableSubtitle } && !isSaving && !isClippingVideo
     }
 
     private var aggregateProgress: Double {
@@ -77,12 +82,29 @@ struct ContentView: View {
     }
 
     private var stats: SegmentStats {
-        SegmentStats(segments: activeSlot?.segments ?? [], duration: activeSlot?.duration ?? 0)
+        let slot = activeSlot
+        return SegmentStats(segments: slot?.segments ?? [], duration: timelineDuration(for: slot))
+    }
+
+    private var activeClipRangeBinding: Binding<MediaClipRange?> {
+        Binding {
+            guard files.indices.contains(activeIndex) else { return nil }
+            return files[activeIndex].clipRange
+        } set: { newValue in
+            guard files.indices.contains(activeIndex) else { return }
+            let duration = timelineDuration(for: files[activeIndex])
+            files[activeIndex].clipRange = newValue?.normalized(in: duration)
+        }
     }
 
     private static let subtitleExtensions = ["srt", "vtt", "json", "txt"]
 
     var body: some View {
+        content
+            .quickLookPreview($quickLookURL)
+    }
+
+    private var content: some View {
         NavigationSplitView {
             settingsPanel
                 .navigationSplitViewColumnWidth(min: 260, ideal: 285, max: 320)
@@ -95,21 +117,6 @@ struct ContentView: View {
                 connectionBadge
             }
             ToolbarItemGroup(placement: .primaryAction) {
-                Button {
-                    Task { await loadConfig() }
-                } label: {
-                    Label(t("backend.check"), systemImage: "dot.radiowaves.left.and.right")
-                }
-                .help(t("backend.check"))
-
-                Button {
-                    Task { await toggleBackend() }
-                } label: {
-                    Label(t(backend.isRunning ? "backend.stop" : "backend.start"),
-                          systemImage: backend.isRunning ? "stop.circle" : "play.circle")
-                }
-                .help(t(backend.isRunning ? "backend.stop" : "backend.start"))
-
                 Button {
                     Task { await previewAll() }
                 } label: {
@@ -126,7 +133,7 @@ struct ContentView: View {
             await loadConfig()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
-            backend.stop()
+            backend.stop(waitForExit: true)
         }
         .alert(t("error.title"), isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
             Button(t("button.ok"), role: .cancel) {}
@@ -228,7 +235,7 @@ struct ContentView: View {
 
             Divider()
 
-            compactInfoRow(t("media.name"), value: slot.url.lastPathComponent)
+            editableFileNameRow(slot)
             compactInfoRow(t("media.duration"), value: mediaDurationText(slot))
             compactInfoRow(t("media.size"), value: fileSizeText(slot.url))
             compactInfoRow(t("media.resolution"), value: resolutionText(slot.mediaInfo))
@@ -314,6 +321,43 @@ struct ContentView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(minWidth: 0, maxWidth: .infinity, alignment: .trailing)
+        }
+    }
+
+    private func editableFileNameRow(_ slot: FileSlot) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(t("media.name"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+
+            TextField(t("media.name"), text: fileNameBinding(for: slot.id))
+                .font(.caption.monospacedDigit())
+                .textFieldStyle(.roundedBorder)
+                .controlSize(.small)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .focused($focusedMediaNameSlotID, equals: slot.id)
+                .disabled(isProcessing || isSaving || isClippingVideo)
+                .help(t("media.rename.help"))
+                .onSubmit {
+                    commitFileRename(for: slot.id)
+                }
+                .onChange(of: focusedMediaNameSlotID) { oldValue, newValue in
+                    if oldValue == slot.id, newValue != slot.id {
+                        commitFileRename(for: slot.id)
+                    }
+                }
+        }
+    }
+
+    private func fileNameBinding(for slotID: UUID) -> Binding<String> {
+        Binding {
+            guard let index = files.firstIndex(where: { $0.id == slotID }) else { return "" }
+            return files[index].fileNameDraft ?? files[index].url.lastPathComponent
+        } set: { newValue in
+            guard let index = files.firstIndex(where: { $0.id == slotID }) else { return }
+            files[index].fileNameDraft = newValue
         }
     }
 
@@ -404,10 +448,15 @@ struct ContentView: View {
                 canCaptureFrame: canCaptureFrame,
                 isCapturingFrame: isCapturingFrame,
                 captureHelp: t("action.captureFrame.help"),
-                playback: playback
-            ) {
-                Task { await captureFrameForActiveSlot() }
-            }
+                nativePreviewHelp: t("action.nativePreview.help"),
+                playback: playback,
+                onCaptureFrame: {
+                    Task { await captureFrameForActiveSlot() }
+                },
+                onNativePreview: {
+                    openNativePreview(slot.url)
+                }
+            )
         case .thumbnail:
             // Containers without a native video preview still need their audio
             // wired into the timeline playback controller (which routes through
@@ -419,10 +468,15 @@ struct ContentView: View {
                 subtitleText: subtitleText,
                 canCaptureFrame: canCaptureFrame,
                 isCapturingFrame: isCapturingFrame,
-                captureHelp: t("action.captureFrame.help")
-            ) {
-                Task { await captureFrameForActiveSlot() }
-            }
+                captureHelp: t("action.captureFrame.help"),
+                nativePreviewHelp: t("action.nativePreview.help"),
+                onCaptureFrame: {
+                    Task { await captureFrameForActiveSlot() }
+                },
+                onNativePreview: { previewURL in
+                    openNativePreview(previewURL)
+                }
+            )
                 .task(id: slot.url) {
                     await playback.load(slot.url)
                 }
@@ -447,7 +501,7 @@ struct ContentView: View {
         guard let cue = slot.cues.first(where: { seconds >= $0.start && seconds <= $0.end }) else {
             return nil
         }
-        let text = VideoFrameCapture.cleanSubtitleText(cue.text)
+        let text = VideoFrameCapture.cleanSubtitleText(SubtitleDocument.displayText(for: cue))
         return text.isEmpty ? nil : text
     }
 
@@ -489,20 +543,121 @@ struct ContentView: View {
         }
     }
 
+    private func openNativePreview(_ url: URL) {
+        quickLookURL = url
+    }
+
     // MARK: - Toolbar / status
 
     private var connectionBadge: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(connectionState.color)
-                .frame(width: 8, height: 8)
-            Text(connectionState.title(language: language))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+        Button {
+            isBackendStatusPopoverPresented.toggle()
+        } label: {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(connectionState.color)
+                    .frame(width: 8, height: 8)
+                Text(connectionState.title(language: language))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .contentShape(Capsule())
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
+        .buttonStyle(.plain)
+        .popover(isPresented: $isBackendStatusPopoverPresented, arrowEdge: .top) {
+            backendStatusPopover
+        }
+        .help(t("backend.status"))
+    }
+
+    private var backendStatusPopover: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Circle()
+                    .fill(connectionState.color)
+                    .frame(width: 10, height: 10)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(t("backend.status"))
+                        .font(.headline)
+                    Text(connectionState.title(language: language))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 8)
+            }
+
+            Divider()
+
+            backendDetailRow(t("backend.process"), backend.isRunning ? t("backend.running") : t("backend.stopped"))
+            backendDetailRow(t("backend.connection"), connectionState.title(language: language))
+            backendDetailRow(t("backend.endpoint"), backend.baseURL.absoluteString)
+
+            if !backend.message.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(t("backend.message"))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text(backend.message)
+                        .font(.caption)
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            if !backend.lastLog.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(t("backend.lastLog"))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text(backend.lastLog)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(4)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    Task { await loadConfig() }
+                } label: {
+                    Label(t("backend.check"), systemImage: "dot.radiowaves.left.and.right")
+                }
+
+                Spacer(minLength: 8)
+
+                Button {
+                    Task { await toggleBackend() }
+                } label: {
+                    Label(
+                        t(backend.isRunning ? "backend.stop" : "backend.start"),
+                        systemImage: backend.isRunning ? "stop.circle" : "play.circle"
+                    )
+                }
+                .tint(backend.isRunning ? .red : .accentColor)
+            }
+        }
+        .padding(14)
+        .frame(width: 320, alignment: .leading)
+    }
+
+    private func backendDetailRow(_ title: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 64, alignment: .leading)
+            Text(value)
+                .font(.caption)
+                .foregroundStyle(.primary)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     private var statusCard: some View {
@@ -569,10 +724,10 @@ struct ContentView: View {
     private var statusSystemImage: String {
         let key = activeSlot?.statusKey ?? "status.ready"
         switch key {
-        case "status.done", "status.saved", "status.savedAll", "status.copied": return "checkmark.circle.fill"
+        case "status.done", "status.saved", "status.savedAll", "status.copied", "status.renamed", "status.videoClipped": return "checkmark.circle.fill"
         case "status.failed", "status.previewFailed": return "exclamationmark.triangle.fill"
         case "status.cancelled": return "minus.circle.fill"
-        case "status.transcribing", "status.detecting", "status.loading", "status.starting", "status.saving":
+        case "status.transcribing", "status.detecting", "status.loading", "status.starting", "status.saving", "status.clippingMedia", "status.videoClipping":
             return "waveform"
         default: return "circle.dotted"
         }
@@ -581,10 +736,10 @@ struct ContentView: View {
     private var statusTint: Color {
         let key = activeSlot?.statusKey ?? "status.ready"
         switch key {
-        case "status.done", "status.saved", "status.savedAll", "status.copied": return .green
+        case "status.done", "status.saved", "status.savedAll", "status.copied", "status.renamed", "status.videoClipped": return .green
         case "status.failed", "status.previewFailed": return .red
         case "status.cancelled": return .orange
-        case "status.transcribing", "status.detecting", "status.loading", "status.starting", "status.saving":
+        case "status.transcribing", "status.detecting", "status.loading", "status.starting", "status.saving", "status.clippingMedia", "status.videoClipping":
             return .teal
         default: return .secondary
         }
@@ -664,6 +819,13 @@ struct ContentView: View {
                 stepperField(t("settings.beam"), value: $settings.beamSize, in: 1...8, help: t("help.beam"))
                 numericField(t("settings.confidence"), value: $settings.minConfidence, suffix: "", help: t("help.confidence"))
                 stepperField(t("settings.lineChars"), value: $settings.lineChars, in: 0...80, help: t("help.lineChars"))
+                Toggle(isOn: $settings.diarizeSpeakers) {
+                    parameterLabel(t("settings.diarizeSpeakers"), help: t("help.diarizeSpeakers"))
+                }
+                .toggleStyle(.switch)
+                if settings.diarizeSpeakers {
+                    stepperField(t("settings.speakerCount"), value: $settings.diarizationSpeakerCount, in: 0...12, help: t("help.speakerCount"))
+                }
 
                 DisclosureGroup(t("settings.decoding")) {
                     numericField(t("settings.softmaxSmoothing"), value: $settings.softmaxSmoothing, suffix: "", help: t("help.softmaxSmoothing"))
@@ -675,6 +837,23 @@ struct ContentView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Section(t("settings.timeline")) {
+                Toggle(isOn: $settings.timelineSpeakerMarkersEnabled) {
+                    parameterLabel(t("settings.timelineSpeakerMarkers"), help: t("help.timelineSpeakerMarkers"))
+                }
+                .toggleStyle(.switch)
+
+                stackedField(t("settings.waveformResolution"), help: t("help.waveformResolution")) {
+                    Picker("", selection: $settings.waveformResolution) {
+                        ForEach(WaveformResolution.allCases) { resolution in
+                            Text(t("settings.waveformResolution.\(resolution.rawValue)")).tag(resolution)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
                 }
             }
         }
@@ -947,8 +1126,10 @@ struct ContentView: View {
     // MARK: - Segments panel
 
     private var segmentsPanel: some View {
-        let segments = activeSlot?.segments ?? []
-        let duration = activeSlot?.duration ?? 0
+        let slot = activeSlot
+        let segments = slot?.segments ?? []
+        let duration = timelineDuration(for: slot)
+        let clipRange = slot.flatMap { normalizedClipRange(for: $0) }
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text(t("segments.title"))
@@ -959,9 +1140,18 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             }
 
-            TimelineView(segments: segments, duration: duration)
-                .frame(height: 48)
+            TimelineView(
+                segments: segments,
+                duration: duration,
+                clipRange: activeClipRangeBinding,
+                language: language,
+                isEnabled: !isProcessing
+            )
+                .frame(height: 62)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
+                .help(t("segments.keepRange.help"))
+
+            clipRangeRow(clipRange)
 
             SegmentStatsView(stats: stats, language: language)
 
@@ -1001,6 +1191,47 @@ struct ContentView: View {
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func clipRangeRow(_ clipRange: MediaClipRange?) -> some View {
+        HStack(spacing: 8) {
+            Label(t("segments.keepRange"), systemImage: "scissors")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(clipRangeSummary(clipRange))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(clipRange == nil ? .secondary : .primary)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            if clipRange != nil {
+                if let slot = activeSlot, isVideoSlot(slot) {
+                    Button {
+                        Task { await clipActiveVideoToSelectedRange() }
+                    } label: {
+                        if isClippingVideo {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Label(t("segments.clipVideo"), systemImage: "film")
+                        }
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .disabled(isProcessing || isSaving || isClippingVideo)
+                    .help(t("segments.clipVideo.help"))
+                }
+                Button {
+                    clearClipRangeForActiveSlot()
+                } label: {
+                    Label(t("segments.clearClip"), systemImage: "xmark.circle")
+                }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.borderless)
+                .disabled(isProcessing)
+                .help(t("segments.clearClip"))
+            }
+        }
+        .padding(.horizontal, 2)
     }
 
     // MARK: - Output panel
@@ -1161,21 +1392,28 @@ struct ContentView: View {
 
     private var transcribeButton: some View {
         Button {
-            Task { await transcribeAll() }
+            if isProcessing {
+                cancelProcessing()
+            } else {
+                Task { await transcribeAll() }
+            }
         } label: {
-            Label(t("action.transcribe"), systemImage: "captions.bubble")
+            Label(
+                t(isProcessing ? "action.stop" : "action.transcribe"),
+                systemImage: isProcessing ? "stop.circle" : "captions.bubble"
+            )
                 .labelStyle(.titleAndIcon)
                 .font(.body.weight(.semibold))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 6)
         }
-        .glassEffect(.regular.tint(.accentColor).interactive())
+        .glassEffect(.regular.tint(isProcessing ? .red : .accentColor).interactive())
         .buttonBorderShape(.capsule)
         .controlSize(.large)
         .keyboardShortcut(.return, modifiers: [.command])
-        .disabled(!canRun)
-        .help(t("action.transcribe"))
+        .disabled(!isProcessing && !canRun)
+        .help(t(isProcessing ? "action.stop" : "action.transcribe"))
     }
 
     // MARK: - File handling
@@ -1246,6 +1484,57 @@ struct ContentView: View {
             }
         } else if files.indices.contains(activeIndex) == false {
             activeIndex = files.isEmpty ? 0 : files.count - 1
+        }
+    }
+
+    private func commitFileRename(for slotID: UUID) {
+        guard let index = files.firstIndex(where: { $0.id == slotID }) else { return }
+        let oldURL = files[index].url
+        let originalName = oldURL.lastPathComponent
+        var newName = (files[index].fileNameDraft ?? originalName)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !newName.isEmpty, !newName.contains("/"), !newName.contains("\0") else {
+            files[index].fileNameDraft = originalName
+            errorMessage = t("error.invalidFileName")
+            return
+        }
+
+        if newName.contains(":") {
+            newName = newName.replacingOccurrences(of: ":", with: "-")
+        }
+        if newName.first == "." {
+            newName = "_" + String(newName.dropFirst())
+        }
+        if (newName as NSString).pathExtension.isEmpty, !oldURL.pathExtension.isEmpty {
+            newName += ".\(oldURL.pathExtension)"
+        }
+
+        let newURL = oldURL.deletingLastPathComponent()
+            .appendingPathComponent(newName)
+            .standardizedFileURL
+        guard newURL != oldURL.standardizedFileURL else {
+            files[index].fileNameDraft = nil
+            return
+        }
+        guard !FileManager.default.fileExists(atPath: newURL.path) else {
+            files[index].fileNameDraft = originalName
+            errorMessage = String(format: t("error.fileExists"), newURL.lastPathComponent)
+            return
+        }
+
+        do {
+            try FileManager.default.moveItem(at: oldURL, to: newURL)
+            recentFiles.replace(oldURL, with: newURL)
+            files[index].url = newURL
+            files[index].fileNameDraft = nil
+            files[index].mediaInfo = nil
+            files[index].statusKey = "status.renamed"
+            files[index].statusDetail = newURL.lastPathComponent
+            loadMediaInfo(for: newURL, slotID: slotID)
+        } catch {
+            files[index].fileNameDraft = originalName
+            errorMessage = String(format: t("error.renameFailed"), error.localizedDescription)
         }
     }
 
@@ -1488,38 +1777,58 @@ struct ContentView: View {
     // MARK: - Sequential processing
 
     private func previewAll() async {
-        guard hasFiles else { return }
+        guard hasFiles, !isProcessing else { return }
+        isProcessing = true
         guard await ensureBackendReady() else {
-            errorMessage = backend.message
+            if isProcessing {
+                errorMessage = backend.message
+                isProcessing = false
+            }
             return
         }
-        isProcessing = true
-        processingTask = Task { @MainActor in
+        guard isProcessing else {
+            return
+        }
+        let task = Task { @MainActor in
+            defer {
+                isProcessing = false
+                processingTask = nil
+            }
             for index in files.indices {
                 if Task.isCancelled { break }
                 await preview(at: index)
             }
-            isProcessing = false
         }
-        await processingTask?.value
+        processingTask = task
+        await task.value
     }
 
     private func transcribeAll() async {
-        guard hasFiles else { return }
+        guard hasFiles, !isProcessing else { return }
+        isProcessing = true
         guard await ensureBackendReady() else {
-            errorMessage = backend.message
+            if isProcessing {
+                errorMessage = backend.message
+                isProcessing = false
+            }
+            return
+        }
+        guard isProcessing else {
             return
         }
         detailTab = .output
-        isProcessing = true
-        processingTask = Task { @MainActor in
+        let task = Task { @MainActor in
+            defer {
+                isProcessing = false
+                processingTask = nil
+            }
             for index in files.indices {
                 if Task.isCancelled { break }
                 await transcribe(at: index)
             }
-            isProcessing = false
         }
-        await processingTask?.value
+        processingTask = task
+        await task.value
     }
 
     private func cancelProcessing() {
@@ -1543,22 +1852,46 @@ struct ContentView: View {
         isProcessing = false
     }
 
+    private func preparedMediaInput(for slot: FileSlot, clipRange: MediaClipRange?) async throws -> PreparedMediaInput {
+        try await MediaClipExporter.prepare(
+            source: slot.url,
+            clipRange: clipRange,
+            failureMessage: t("error.clipFailed")
+        )
+    }
+
     private func preview(at index: Int) async {
         guard files.indices.contains(index) else { return }
         activeIndex = index
-        let url = files[index].url
+        let slot = files[index]
+        let url = slot.url
+        let clipRange = processingClipRange(for: slot)
+        let displayDuration = timelineDuration(for: slot)
         update(at: index) {
             $0.processingState = .previewing
-            $0.statusKey = "status.detecting"
-            $0.statusDetail = url.lastPathComponent
+            $0.statusKey = clipRange == nil ? "status.detecting" : "status.clippingMedia"
+            $0.statusDetail = clipRange.map { clipRangeSummary($0) } ?? url.lastPathComponent
             $0.progress = 0
         }
         do {
-            let payload = try await api.preview(fileURL: url, settings: settings)
+            let preparedInput = try await preparedMediaInput(for: slot, clipRange: clipRange)
+            defer { preparedInput.cleanup() }
+            if clipRange != nil {
+                update(at: index) {
+                    $0.statusKey = "status.detecting"
+                    $0.statusDetail = clipRange.map { clipRangeSummary($0) } ?? url.lastPathComponent
+                }
+            }
+            let payload = try await api.preview(fileURL: preparedInput.uploadURL, settings: settings)
+            let segments = shiftedSegments(payload.segments, by: preparedInput.timeOffset)
             update(at: index) {
-                $0.duration = payload.duration
-                $0.mediaInfo = payload.mediaInfo ?? $0.mediaInfo
-                $0.segments = payload.segments
+                $0.duration = preparedInput.clipRange == nil
+                    ? max($0.duration, payload.duration)
+                    : max($0.duration, displayDuration, preparedInput.clipRange?.end ?? 0, segments.map(\.end).max() ?? 0)
+                if preparedInput.clipRange == nil {
+                    $0.mediaInfo = payload.mediaInfo ?? $0.mediaInfo
+                }
+                $0.segments = segments
                 $0.statusKey = "status.previewReady"
                 $0.statusDetail = "\(payload.count) \(t("segments.count"))"
                 $0.processingState = .done
@@ -1577,7 +1910,9 @@ struct ContentView: View {
     private func transcribe(at index: Int) async {
         guard files.indices.contains(index) else { return }
         activeIndex = index
-        let url = files[index].url
+        let slot = files[index]
+        let url = slot.url
+        let clipRange = processingClipRange(for: slot)
         update(at: index) {
             $0.processingState = .transcribing
             $0.previewText = ""
@@ -1588,13 +1923,21 @@ struct ContentView: View {
             $0.lastOutputPath = nil
             $0.outputFormat = settings.format
             $0.progress = 0
-            $0.statusKey = "status.starting"
-            $0.statusDetail = url.lastPathComponent
+            $0.statusKey = clipRange == nil ? "status.starting" : "status.clippingMedia"
+            $0.statusDetail = clipRange.map { clipRangeSummary($0) } ?? url.lastPathComponent
         }
         do {
-            let created = try await api.createJob(fileURL: url, settings: settings)
+            let preparedInput = try await preparedMediaInput(for: slot, clipRange: clipRange)
+            defer { preparedInput.cleanup() }
+            if clipRange != nil {
+                update(at: index) {
+                    $0.statusKey = "status.starting"
+                    $0.statusDetail = clipRange.map { clipRangeSummary($0) } ?? url.lastPathComponent
+                }
+            }
+            let created = try await api.createJob(fileURL: preparedInput.uploadURL, settings: settings)
             update(at: index) { $0.jobID = created.id }
-            try await poll(jobID: created.id, fileIndex: index)
+            try await poll(jobID: created.id, fileIndex: index, timeOffset: preparedInput.timeOffset)
         } catch {
             if Task.isCancelled {
                 update(at: index) {
@@ -1612,7 +1955,7 @@ struct ContentView: View {
         }
     }
 
-    private func poll(jobID: String, fileIndex: Int) async throws {
+    private func poll(jobID: String, fileIndex: Int, timeOffset: Double) async throws {
         while !Task.isCancelled {
             let job = try await api.jobStatus(id: jobID)
             let total = max(job.total ?? 0, 0)
@@ -1644,7 +1987,7 @@ struct ContentView: View {
                     let format = files[fileIndex].outputFormat
                     if let output = try? await api.fetchOutput(jobID: jobID),
                        let text = String(data: output.data, encoding: .utf8) {
-                        installSubtitleText(text, at: fileIndex, format: format)
+                        installSubtitleText(text, at: fileIndex, format: format, timeOffset: timeOffset)
                     }
                 }
                 update(at: fileIndex) {
@@ -1778,8 +2121,15 @@ struct ContentView: View {
         Data(slot.editableSubtitleText.utf8)
     }
 
-    private func installSubtitleText(_ text: String, at index: Int, format: OutputFormat, parsedCues: [SubtitleCue]? = nil) {
-        let cues = parsedCues ?? SubtitleDocument.parse(text, format: format)
+    private func installSubtitleText(
+        _ text: String,
+        at index: Int,
+        format: OutputFormat,
+        parsedCues: [SubtitleCue]? = nil,
+        timeOffset: Double = 0
+    ) {
+        let parsed = parsedCues ?? SubtitleDocument.parse(text, format: format)
+        let cues = offsetCues(parsed, by: timeOffset)
         let termsSource = cues.isEmpty ? text : cues.map(\.text).joined(separator: " ")
         let frequentTerms = SubtitleTextStats.topTerms(in: termsSource, limit: 8)
         update(at: index) {
@@ -1800,8 +2150,204 @@ struct ContentView: View {
         }
     }
 
+    private func offsetCues(_ cues: [SubtitleCue], by offset: Double) -> [SubtitleCue] {
+        guard offset > 0, !cues.isEmpty else { return cues }
+        return cues.map {
+            var cue = $0
+            cue.start += offset
+            cue.end += offset
+            return cue
+        }
+    }
+
     private func timeRange(_ segment: SubtitleSegment) -> String {
         "\(timeString(segment.start)) -> \(timeString(segment.end))"
+    }
+
+    private func timelineDuration(for slot: FileSlot?) -> Double {
+        guard let slot else { return 0 }
+        var candidates: [Double] = [slot.duration]
+        if let duration = slot.mediaInfo?.duration {
+            candidates.append(duration)
+        }
+        if let clipRange = slot.clipRange {
+            candidates.append(clipRange.end)
+        }
+        if let segmentEnd = slot.segments.map(\.end).max() {
+            candidates.append(segmentEnd)
+        }
+        if let cueEnd = slot.cues.map(\.end).max() {
+            candidates.append(cueEnd)
+        }
+        return candidates
+            .filter { $0.isFinite && $0 > 0 }
+            .max() ?? 0
+    }
+
+    private func normalizedClipRange(for slot: FileSlot) -> MediaClipRange? {
+        slot.clipRange?.normalized(in: timelineDuration(for: slot))
+    }
+
+    private func processingClipRange(for slot: FileSlot) -> MediaClipRange? {
+        let duration = timelineDuration(for: slot)
+        guard let range = slot.clipRange?.normalized(in: duration),
+              !range.coversFullDuration(duration: duration) else {
+            return nil
+        }
+        return range
+    }
+
+    private func clearClipRangeForActiveSlot() {
+        guard files.indices.contains(activeIndex) else { return }
+        files[activeIndex].clipRange = nil
+    }
+
+    private func clipActiveVideoToSelectedRange() async {
+        guard !isClippingVideo,
+              files.indices.contains(activeIndex) else { return }
+        let index = activeIndex
+        let slot = files[index]
+        guard isVideoSlot(slot),
+              let range = processingClipRange(for: slot) else { return }
+
+        guard FFmpegRunner.isAvailable else {
+            errorMessage = t("error.ffmpegUnavailable")
+            return
+        }
+
+        let destination = clippedMediaDestination(for: slot.url, range: range)
+        isClippingVideo = true
+        update(at: index) {
+            $0.statusKey = "status.videoClipping"
+            $0.statusDetail = clipRangeSummary(range)
+            $0.progress = 0
+        }
+        defer { isClippingVideo = false }
+
+        guard let clippedURL = await FFmpegRunner.clipMedia(
+            from: slot.url,
+            to: destination,
+            start: range.start,
+            duration: range.duration
+        ) else {
+            guard let refreshedIndex = files.firstIndex(where: { $0.id == slot.id }) else { return }
+            update(at: refreshedIndex) {
+                $0.statusKey = "status.failed"
+                $0.statusDetail = t("error.videoClipFailed")
+                $0.progress = 0
+            }
+            errorMessage = t("error.videoClipFailed")
+            return
+        }
+
+        guard let refreshedIndex = files.firstIndex(where: { $0.id == slot.id }) else { return }
+        let updatedSegments = clippedSegments(from: slot.segments, keeping: range)
+        let updatedCues = clippedCues(from: slot.cues, keeping: range)
+        let updatedOriginalCues = clippedCues(from: slot.originalCues, keeping: range)
+        recentFiles.add(clippedURL)
+        update(at: refreshedIndex) {
+            $0.url = clippedURL.standardizedFileURL
+            $0.fileNameDraft = nil
+            $0.clipRange = nil
+            $0.segments = updatedSegments
+            $0.cues = updatedCues
+            $0.originalCues = updatedOriginalCues
+            $0.previewText = updatedCues.isEmpty ? "" : SubtitleDocument.serialize(updatedCues, format: $0.outputFormat)
+            $0.selectedCueID = updatedCues.first?.id
+            $0.mediaInfo = nil
+            $0.duration = range.duration
+            $0.statusKey = "status.videoClipped"
+            $0.statusDetail = clippedURL.lastPathComponent
+            $0.progress = 1
+            $0.processingState = .done
+        }
+        loadMediaInfo(for: clippedURL, slotID: slot.id)
+    }
+
+    private func clipRangeSummary(_ range: MediaClipRange?) -> String {
+        guard let range else { return t("segments.keepRange.none") }
+        return String(
+            format: t("segments.keepRange.value"),
+            SubtitleDocument.displayTime(range.start),
+            SubtitleDocument.displayTime(range.end)
+        )
+    }
+
+    private func clippedMediaDestination(for source: URL, range: MediaClipRange) -> URL {
+        let directory = source.deletingLastPathComponent()
+        let stem = source.deletingPathExtension().lastPathComponent
+        let safeStem = stem.isEmpty ? "clip" : stem
+        let suffix = "clip_\(fileTimeToken(range.start))-\(fileTimeToken(range.end))"
+        let candidate = directory
+            .appendingPathComponent("\(safeStem)_\(suffix)")
+            .appendingPathExtension("mp4")
+        return uniqueFileURL(candidate)
+    }
+
+    private func uniqueFileURL(_ candidate: URL) -> URL {
+        let directory = candidate.deletingLastPathComponent()
+        let stem = candidate.deletingPathExtension().lastPathComponent
+        let ext = candidate.pathExtension
+        var url = candidate
+        var counter = 2
+        while FileManager.default.fileExists(atPath: url.path) {
+            let name = "\(stem)-\(counter)"
+            url = directory.appendingPathComponent(name)
+            if !ext.isEmpty {
+                url = url.appendingPathExtension(ext)
+            }
+            counter += 1
+        }
+        return url
+    }
+
+    private func fileTimeToken(_ seconds: Double) -> String {
+        let safe = max(0, seconds)
+        let whole = Int(safe)
+        let centiseconds = Int(((safe - Double(whole)) * 100).rounded())
+        let hours = whole / 3600
+        let minutes = (whole % 3600) / 60
+        let secs = whole % 60
+        return String(format: "%02d%02d%02d%02d", hours, minutes, secs, min(centiseconds, 99))
+    }
+
+    private func clippedSegments(from segments: [SubtitleSegment], keeping range: MediaClipRange) -> [SubtitleSegment] {
+        let clipped: [SubtitleSegment] = segments.compactMap { segment -> SubtitleSegment? in
+            let start = max(segment.start, range.start)
+            let end = min(segment.end, range.end)
+            guard end - start > 0.05 else { return nil }
+            return SubtitleSegment(index: 0, start: start - range.start, end: end - range.start, duration: end - start)
+        }
+        return clipped
+        .enumerated()
+        .map { offset, segment in
+            SubtitleSegment(index: offset + 1, start: segment.start, end: segment.end, duration: segment.duration)
+        }
+    }
+
+    private func clippedCues(from cues: [SubtitleCue], keeping range: MediaClipRange) -> [SubtitleCue] {
+        let clipped = cues.compactMap { cue -> SubtitleCue? in
+            let start = max(cue.start, range.start)
+            let end = min(cue.end, range.end)
+            guard end - start > 0.05 else { return nil }
+            var copy = cue
+            copy.start = start - range.start
+            copy.end = end - range.start
+            return copy
+        }
+        return SubtitleDocument.normalize(clipped)
+    }
+
+    private func shiftedSegments(_ segments: [SubtitleSegment], by offset: Double) -> [SubtitleSegment] {
+        guard offset > 0 else { return segments }
+        return segments.map {
+            SubtitleSegment(
+                index: $0.index,
+                start: $0.start + offset,
+                end: $0.end + offset,
+                duration: $0.duration
+            )
+        }
     }
 
     private func timeString(_ seconds: Double) -> String {
@@ -1932,12 +2478,157 @@ private struct ParameterHelpIcon: View {
 
 // MARK: - Supporting types
 
+struct MediaClipRange: Equatable {
+    var start: Double
+    var end: Double
+
+    var duration: Double {
+        max(0, end - start)
+    }
+
+    func normalized(in duration: Double, minimumDuration: Double = 0.25) -> MediaClipRange? {
+        guard duration.isFinite, duration > 0 else { return nil }
+        var lower = min(start, end)
+        var upper = max(start, end)
+        lower = min(max(0, lower), duration)
+        upper = min(max(0, upper), duration)
+
+        if upper - lower < minimumDuration {
+            let midpoint = min(max((lower + upper) / 2, 0), duration)
+            lower = max(0, midpoint - minimumDuration / 2)
+            upper = min(duration, lower + minimumDuration)
+            lower = max(0, upper - minimumDuration)
+        }
+
+        guard upper > lower else { return nil }
+        return MediaClipRange(start: lower, end: upper)
+    }
+
+    func coversFullDuration(duration: Double) -> Bool {
+        guard duration.isFinite, duration > 0 else { return false }
+        return start <= 0.05 && end >= duration - 0.05
+    }
+}
+
+private struct PreparedMediaInput {
+    let uploadURL: URL
+    let clipRange: MediaClipRange?
+    let timeOffset: Double
+    let cleanupURL: URL?
+
+    func cleanup() {
+        if let cleanupURL {
+            try? FileManager.default.removeItem(at: cleanupURL)
+        }
+    }
+}
+
+private enum MediaClipExporter {
+    static func prepare(
+        source: URL,
+        clipRange: MediaClipRange?,
+        failureMessage: String
+    ) async throws -> PreparedMediaInput {
+        guard let clipRange else {
+            return PreparedMediaInput(uploadURL: source, clipRange: nil, timeOffset: 0, cleanupURL: nil)
+        }
+
+        let dest = temporaryDestination(for: source)
+        if let result = await exportViaAVFoundation(
+            source: source,
+            dest: dest,
+            startSeconds: clipRange.start,
+            durationSeconds: clipRange.duration
+        ) {
+            return PreparedMediaInput(uploadURL: result, clipRange: clipRange, timeOffset: clipRange.start, cleanupURL: result)
+        }
+
+        if let result = await FFmpegRunner.extractAudio(
+            from: source,
+            to: dest,
+            start: clipRange.start,
+            duration: clipRange.duration
+        ) {
+            return PreparedMediaInput(uploadURL: result, clipRange: clipRange, timeOffset: clipRange.start, cleanupURL: result)
+        }
+
+        let resolvedAudio = await AudioSource.resolve(source)
+        if resolvedAudio.standardizedFileURL != source.standardizedFileURL,
+           let result = await exportViaAVFoundation(
+            source: resolvedAudio,
+            dest: dest,
+            startSeconds: clipRange.start,
+            durationSeconds: clipRange.duration
+           ) {
+            return PreparedMediaInput(uploadURL: result, clipRange: clipRange, timeOffset: clipRange.start, cleanupURL: result)
+        }
+
+        try? FileManager.default.removeItem(at: dest)
+        throw NSError(domain: "MSub.MediaClip", code: 1, userInfo: [NSLocalizedDescriptionKey: failureMessage])
+    }
+
+    private static func temporaryDestination(for source: URL) -> URL {
+        let base: URL
+        if let cachesDir = try? FileManager.default.url(
+            for: .cachesDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        ) {
+            base = cachesDir
+        } else {
+            base = FileManager.default.temporaryDirectory
+        }
+        let dir = base.appendingPathComponent("MSub-selected-ranges", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let stem = source.deletingPathExtension().lastPathComponent
+        let safeStem = stem.isEmpty ? "clip" : stem
+        return dir.appendingPathComponent("\(safeStem)-\(UUID().uuidString)").appendingPathExtension("m4a")
+    }
+
+    private static func exportViaAVFoundation(
+        source: URL,
+        dest: URL,
+        startSeconds: Double,
+        durationSeconds: Double
+    ) async -> URL? {
+        let asset = AVURLAsset(url: source)
+        guard let tracks = try? await asset.loadTracks(withMediaType: .audio),
+              !tracks.isEmpty,
+              let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else {
+            return nil
+        }
+
+        try? FileManager.default.removeItem(at: dest)
+        exportSession.timeRange = CMTimeRange(
+            start: CMTime(seconds: max(0, startSeconds), preferredTimescale: 600),
+            duration: CMTime(seconds: max(0.05, durationSeconds), preferredTimescale: 600)
+        )
+
+        do {
+            try await exportSession.export(to: dest, as: .m4a)
+        } catch {
+            try? FileManager.default.removeItem(at: dest)
+            return nil
+        }
+
+        if FileManager.default.fileExists(atPath: dest.path) {
+            return dest
+        }
+        try? FileManager.default.removeItem(at: dest)
+        return nil
+    }
+}
+
 struct FileSlot: Identifiable {
     let id = UUID()
     var url: URL
+    var fileNameDraft: String?
+    var clipRange: MediaClipRange?
     var segments: [SubtitleSegment] = []
     var cues: [SubtitleCue] = []
     var originalCues: [SubtitleCue] = []
+    var speakerColors: [String: String] = [:]
     var frequentTerms: [SubtitleTermFrequency] = []
     var selectedCueID: SubtitleCue.ID?
     var mediaInfo: MediaInfo?
@@ -2166,24 +2857,161 @@ private struct SegmentStatsView: View {
 struct TimelineView: View {
     let segments: [SubtitleSegment]
     let duration: Double
+    @Binding var clipRange: MediaClipRange?
+    let language: AppLanguage
+    let isEnabled: Bool
+
+    @State private var selectionAnchorTime: Double?
+    @State private var handleDragBase: MediaClipRange?
+
+    private let minimumClipDuration = 0.25
 
     var body: some View {
         GeometryReader { proxy in
+            let width = max(proxy.size.width, 1)
+            let height = max(proxy.size.height, 1)
+            let selectedRange = clipRange?.normalized(in: duration, minimumDuration: minimumClipDuration)
+
             ZStack(alignment: .leading) {
                 RoundedRectangle(cornerRadius: 6)
                     .fill(.quinary)
+
+                if let selectedRange {
+                    selectionOverlay(selectedRange, width: width, height: height)
+                }
+
                 ForEach(segments) { segment in
+                    let startX = xPosition(segment.start, width: width)
+                    let endX = xPosition(segment.end, width: width)
+                    let barHeight = min(30, max(20, height - 22))
                     RoundedRectangle(cornerRadius: 2)
-                        .fill(.teal)
+                        .fill(.teal.opacity(segmentOpacity(segment, selectedRange: selectedRange)))
                         .frame(
-                            width: max(2, proxy.size.width * segment.duration / max(duration, 0.001)),
-                            height: 28
+                            width: max(2, endX - startX),
+                            height: barHeight
                         )
-                        .offset(x: proxy.size.width * segment.start / max(duration, 0.001))
+                        .offset(x: startX, y: (height - barHeight) / 2)
+                }
+
+                if let selectedRange {
+                    clipHandle(edge: .start, range: selectedRange, width: width, height: height)
+                    clipHandle(edge: .end, range: selectedRange, width: width, height: height)
                 }
             }
+            .contentShape(Rectangle())
+            .gesture(selectionGesture(width: width))
+            .allowsHitTesting(isEnabled && duration > 0)
+            .accessibilityLabel(Text(Copy.text("segments.keepRange", language: language)))
         }
     }
+
+    private func selectionOverlay(_ range: MediaClipRange, width: CGFloat, height: CGFloat) -> some View {
+        let startX = xPosition(range.start, width: width)
+        let endX = xPosition(range.end, width: width)
+        let selectionWidth = max(2, endX - startX)
+        return ZStack(alignment: .leading) {
+            Rectangle()
+                .fill(.black.opacity(0.13))
+                .frame(width: max(0, startX), height: height)
+            Rectangle()
+                .fill(.black.opacity(0.13))
+                .frame(width: max(0, width - endX), height: height)
+                .offset(x: endX)
+            RoundedRectangle(cornerRadius: 6)
+                .fill(.teal.opacity(0.16))
+                .frame(width: selectionWidth, height: height)
+                .offset(x: startX)
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(.teal.opacity(0.9), lineWidth: 1.5)
+                .frame(width: selectionWidth, height: max(0, height - 1))
+                .offset(x: startX)
+        }
+    }
+
+    private func clipHandle(edge: ClipHandleEdge, range: MediaClipRange, width: CGFloat, height: CGFloat) -> some View {
+        let handleWidth: CGFloat = 10
+        let handleHeight = max(34, height - 12)
+        let rawX = xPosition(edge == .start ? range.start : range.end, width: width) - handleWidth / 2
+        let clampedX = min(max(0, rawX), max(0, width - handleWidth))
+        return Capsule()
+            .fill(.white.opacity(0.94))
+            .overlay(Capsule().stroke(.teal.opacity(0.95), lineWidth: 1.2))
+            .frame(width: handleWidth, height: handleHeight)
+            .shadow(color: .black.opacity(0.14), radius: 2, x: 0, y: 1)
+            .offset(x: clampedX, y: (height - handleHeight) / 2)
+            .gesture(handleGesture(edge: edge, width: width))
+            .accessibilityLabel(Text(Copy.text("segments.keepRange", language: language)))
+    }
+
+    private func selectionGesture(width: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 3)
+            .onChanged { value in
+                guard isEnabled, duration > 0 else { return }
+                let anchor = selectionAnchorTime ?? time(for: value.startLocation.x, width: width)
+                selectionAnchorTime = anchor
+                let current = time(for: value.location.x, width: width)
+                clipRange = MediaClipRange(start: anchor, end: current)
+                    .normalized(in: duration, minimumDuration: minimumClipDuration)
+            }
+            .onEnded { value in
+                guard isEnabled, duration > 0 else {
+                    selectionAnchorTime = nil
+                    return
+                }
+                let anchor = selectionAnchorTime ?? time(for: value.startLocation.x, width: width)
+                let current = time(for: value.location.x, width: width)
+                clipRange = MediaClipRange(start: anchor, end: current)
+                    .normalized(in: duration, minimumDuration: minimumClipDuration)
+                selectionAnchorTime = nil
+            }
+    }
+
+    private func handleGesture(edge: ClipHandleEdge, width: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                guard isEnabled, duration > 0 else { return }
+                let base = handleDragBase
+                    ?? clipRange?.normalized(in: duration, minimumDuration: minimumClipDuration)
+                    ?? MediaClipRange(start: 0, end: duration)
+                if handleDragBase == nil {
+                    handleDragBase = base
+                }
+                let delta = Double(value.translation.width / max(width, 1)) * duration
+                let nextRange: MediaClipRange
+                switch edge {
+                case .start:
+                    nextRange = MediaClipRange(start: min(base.start + delta, base.end - minimumClipDuration), end: base.end)
+                case .end:
+                    nextRange = MediaClipRange(start: base.start, end: max(base.end + delta, base.start + minimumClipDuration))
+                }
+                clipRange = nextRange.normalized(in: duration, minimumDuration: minimumClipDuration)
+            }
+            .onEnded { _ in
+                handleDragBase = nil
+            }
+    }
+
+    private func xPosition(_ seconds: Double, width: CGFloat) -> CGFloat {
+        guard duration > 0 else { return 0 }
+        let fraction = min(max(seconds / duration, 0), 1)
+        return CGFloat(fraction) * width
+    }
+
+    private func time(for x: CGFloat, width: CGFloat) -> Double {
+        guard duration > 0 else { return 0 }
+        let fraction = min(max(x / max(width, 1), 0), 1)
+        return Double(fraction) * duration
+    }
+
+    private func segmentOpacity(_ segment: SubtitleSegment, selectedRange: MediaClipRange?) -> Double {
+        guard let selectedRange else { return 1 }
+        return segment.end >= selectedRange.start && segment.start <= selectedRange.end ? 1 : 0.24
+    }
+}
+
+private enum ClipHandleEdge {
+    case start
+    case end
 }
 
 extension Notification.Name {
@@ -2219,6 +3047,19 @@ final class RecentFilesStore: ObservableObject {
         let normalized = url.standardizedFileURL
         urls.removeAll { $0.standardizedFileURL == normalized }
         urls.insert(normalized, at: 0)
+        if urls.count > limit {
+            urls = Array(urls.prefix(limit))
+        }
+        save()
+    }
+
+    func replace(_ oldURL: URL, with newURL: URL) {
+        let oldNormalized = oldURL.standardizedFileURL
+        let newNormalized = newURL.standardizedFileURL
+        urls.removeAll {
+            $0.standardizedFileURL == oldNormalized || $0.standardizedFileURL == newNormalized
+        }
+        urls.insert(newNormalized, at: 0)
         if urls.count > limit {
             urls = Array(urls.prefix(limit))
         }
@@ -2284,7 +3125,6 @@ private enum MediaPreviewKind {
 private enum PreviewCardMetrics {
     static let height: CGFloat = 296
     static let cornerRadius: CGFloat = 14
-    static let shadowColor = Color.black.opacity(0.16)
 }
 
 private struct UnsupportedMediaPreview: View {
@@ -2295,7 +3135,9 @@ private struct UnsupportedMediaPreview: View {
     let canCaptureFrame: Bool
     let isCapturingFrame: Bool
     let captureHelp: String
+    let nativePreviewHelp: String
     let onCaptureFrame: () -> Void
+    let onNativePreview: (URL) -> Void
 
     @State private var cover: NSImage?
     @State private var filmstrip: [NSImage] = []
@@ -2319,6 +3161,9 @@ private struct UnsupportedMediaPreview: View {
                         action: onCaptureFrame
                     )
                 }
+                NativePreviewButton(help: nativePreviewHelp) {
+                    onNativePreview(nativePreviewURL())
+                }
                 Text(url.pathExtension.uppercased())
                     .font(.caption2.monospaced().weight(.semibold))
                     .padding(.horizontal, 6)
@@ -2340,11 +3185,17 @@ private struct UnsupportedMediaPreview: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: PreviewCardMetrics.height, alignment: .topLeading)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: PreviewCardMetrics.cornerRadius))
-        .clipShape(RoundedRectangle(cornerRadius: PreviewCardMetrics.cornerRadius))
-        .shadow(color: PreviewCardMetrics.shadowColor, radius: 9, x: 0, y: 4)
         .task(id: url) {
             await reloadPreview()
         }
+    }
+
+    private func nativePreviewURL() -> URL {
+        guard let cover,
+              let previewURL = NativePreviewImageStore.write(image: cover, sourceURL: url) else {
+            return url
+        }
+        return previewURL
     }
 
     private var coverSurface: some View {
@@ -2557,6 +3408,47 @@ private struct CaptureFrameButton: View {
     }
 }
 
+private struct NativePreviewButton: View {
+    let help: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "eye")
+                .frame(width: 18, height: 18)
+        }
+        .buttonStyle(.borderless)
+        .controlSize(.small)
+        .help(help)
+        .accessibilityLabel(help)
+    }
+}
+
+private enum NativePreviewImageStore {
+    static func write(image: NSImage, sourceURL: URL) -> URL? {
+        guard let data = pngData(for: image) else { return nil }
+        let base = sourceURL.deletingPathExtension().lastPathComponent
+        let safeBase = base.isEmpty ? "preview" : base
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MSub-native-preview-\(safeBase)-\(UUID().uuidString)")
+            .appendingPathExtension("png")
+        do {
+            try data.write(to: destination, options: .atomic)
+            return destination
+        } catch {
+            return nil
+        }
+    }
+
+    private static func pngData(for image: NSImage) -> Data? {
+        guard let tiffData = image.tiffRepresentation,
+              let representation = NSBitmapImageRep(data: tiffData) else {
+            return nil
+        }
+        return representation.representation(using: .png, properties: [:])
+    }
+}
+
 private struct PreviewSubtitleOverlay: View {
     let text: String?
 
@@ -2585,8 +3477,10 @@ private struct MediaPreviewCard: View {
     let canCaptureFrame: Bool
     let isCapturingFrame: Bool
     let captureHelp: String
+    let nativePreviewHelp: String
     @ObservedObject var playback: PlaybackController
     let onCaptureFrame: () -> Void
+    let onNativePreview: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -2603,6 +3497,7 @@ private struct MediaPreviewCard: View {
                         action: onCaptureFrame
                     )
                 }
+                NativePreviewButton(help: nativePreviewHelp, action: onNativePreview)
             }
 
             ZStack(alignment: .bottom) {
@@ -2622,8 +3517,6 @@ private struct MediaPreviewCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: PreviewCardMetrics.height, alignment: .topLeading)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: PreviewCardMetrics.cornerRadius))
-        .clipShape(RoundedRectangle(cornerRadius: PreviewCardMetrics.cornerRadius))
-        .shadow(color: PreviewCardMetrics.shadowColor, radius: 9, x: 0, y: 4)
         .task(id: url) {
             await playback.load(url)
         }

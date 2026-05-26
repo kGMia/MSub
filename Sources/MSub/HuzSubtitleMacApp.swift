@@ -28,6 +28,9 @@ struct MSubApp: App {
                 .environmentObject(recentFiles)
                 .environment(\.locale, language.locale)
                 .frame(minWidth: 820, minHeight: 640)
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                    backend.stop(waitForExit: true)
+                }
         }
         .commands {
             CommandGroup(replacing: .newItem) {
@@ -275,6 +278,17 @@ struct PreferencesView: View {
                 Picker("", selection: languageBinding) {
                     ForEach(AppLanguage.allCases) { lang in
                         Text(lang.title).tag(lang)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+            }
+            Toggle(t("settings.timelineSpeakerMarkers"), isOn: $settings.timelineSpeakerMarkersEnabled)
+                .toggleStyle(.switch)
+            stackedRow(t("settings.waveformResolution")) {
+                Picker("", selection: $settings.waveformResolution) {
+                    ForEach(WaveformResolution.allCases) { resolution in
+                        Text(t("settings.waveformResolution.\(resolution.rawValue)")).tag(resolution)
                     }
                 }
                 .labelsHidden()

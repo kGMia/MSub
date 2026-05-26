@@ -9,6 +9,7 @@ fi
 REPO_ROOT="$(cd "${SRCROOT}/../.." && pwd)"
 DEST="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/backend"
 MODEL_SOURCE="$REPO_ROOT/models/FireRedASR2-AED-mlx"
+DIARIZATION_MODEL_SOURCE="$REPO_ROOT/models/pyannote-speaker-diarization-community-1"
 
 mkdir -p "$DEST"
 rm -rf "$DEST/.uv-cache"
@@ -33,12 +34,18 @@ cp "$REPO_ROOT/.python-version" "$DEST/.python-version"
 mkdir -p "$DEST/output"
 
 INCLUDE_MODEL="${MSUB_INCLUDE_MODEL:-${HUZ_INCLUDE_MODEL:-0}}"
+INCLUDE_DIARIZATION_MODEL="${MSUB_INCLUDE_DIARIZATION_MODEL:-0}"
 INCLUDE_VENV="${MSUB_INCLUDE_VENV:-1}"
 INCLUDE_PYTHON_RUNTIME="${MSUB_INCLUDE_PYTHON_RUNTIME:-$INCLUDE_VENV}"
 SOURCE_MODEL_JSON="null"
+SOURCE_DIARIZATION_MODEL_JSON="null"
 
 if [ -f "$MODEL_SOURCE/model.safetensors" ] && [ -f "$MODEL_SOURCE/config.json" ]; then
     SOURCE_MODEL_JSON="\"$MODEL_SOURCE\""
+fi
+
+if [ -f "$DIARIZATION_MODEL_SOURCE/config.yaml" ]; then
+    SOURCE_DIARIZATION_MODEL_JSON="\"$DIARIZATION_MODEL_SOURCE\""
 fi
 
 if [ "$INCLUDE_VENV" = "1" ]; then
@@ -92,14 +99,33 @@ else
     echo "Skipping model copy. Set MSUB_INCLUDE_MODEL=1 to embed local weights in the app bundle."
 fi
 
+if [ "$INCLUDE_DIARIZATION_MODEL" = "1" ]; then
+    if [ ! -f "$DIARIZATION_MODEL_SOURCE/config.yaml" ]; then
+        echo "MSUB_INCLUDE_DIARIZATION_MODEL=1 but $DIARIZATION_MODEL_SOURCE/config.yaml was not found." >&2
+        exit 1
+    fi
+    mkdir -p "$DEST/models"
+    rsync -a --delete --delete-excluded \
+        --exclude ".incomplete" \
+        --exclude ".DS_Store" \
+        --exclude "__pycache__" \
+        "$DIARIZATION_MODEL_SOURCE" \
+        "$DEST/models/"
+else
+    echo "Skipping diarization model copy. Set MSUB_INCLUDE_DIARIZATION_MODEL=1 to embed local pyannote weights."
+fi
+
 cat > "$DEST/backend-manifest.json" <<EOF
 {
   "name": "MSub backend",
   "includeModel": "$INCLUDE_MODEL",
+  "includeDiarizationModel": "$INCLUDE_DIARIZATION_MODEL",
   "includeVenv": "$INCLUDE_VENV",
   "includePythonRuntime": "$INCLUDE_PYTHON_RUNTIME",
   "sourceModelPath": $SOURCE_MODEL_JSON,
+  "sourceDiarizationModelPath": $SOURCE_DIARIZATION_MODEL_JSON,
   "modelPath": "models/FireRedASR2-AED-mlx",
+  "diarizationModelPath": "models/pyannote-speaker-diarization-community-1",
   "entrypoint": "msub-web"
 }
 EOF
