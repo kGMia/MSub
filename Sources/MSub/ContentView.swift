@@ -32,6 +32,16 @@ struct ContentView: View {
     @State private var isClippingVideo = false
     @State private var quickLookURL: URL?
     @State private var isBackendStatusPopoverPresented = false
+    @State private var backendStatusBadgeFrame: CGRect = .zero
+    @State private var isStatusDetailHovered = false
+    @State private var statusDetailDismissTask: Task<Void, Never>?
+    @State private var cueListSelection: Set<SubtitleCue.ID> = []
+    @State private var cueListColumnCustomization = TableColumnCustomization<SubtitleCue>()
+    @State private var isCueListTimingAdjustmentPresented = false
+    @State private var cueListTimingMode: TimingAdjustmentMode = .shift
+    @State private var cueListTimingShiftSeconds: Double = 0.0
+    @State private var cueListTimingGapSeconds: Double = 0.0
+    @State private var cueListTimingTargetIDs: Set<SubtitleCue.ID> = []
     @FocusState private var focusedMediaNameSlotID: UUID?
 
     private var language: AppLanguage {
@@ -129,6 +139,15 @@ struct ContentView: View {
                 transcribeButton
             }
         }
+        .onPreferenceChange(BackendStatusBadgeFrameKey.self) { frame in
+            if !frame.isEmpty {
+                backendStatusBadgeFrame = frame
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            backendStatusPopoverOverlay
+        }
+        .animation(.snappy(duration: 0.18), value: isBackendStatusPopoverPresented)
         .task {
             await loadConfig()
         }
@@ -200,7 +219,7 @@ struct ContentView: View {
                             previewView(for: slot)
                         }
                     }
-                    .frame(width: 350, alignment: .topLeading)
+                    .frame(minWidth: 280, idealWidth: 310, maxWidth: 380, alignment: .topLeading)
                     .layoutPriority(1)
 
                     VStack(spacing: 10) {
@@ -208,7 +227,7 @@ struct ContentView: View {
                             mediaInfoCard(slot, fixedHeight: PreviewCardMetrics.height)
                         }
                     }
-                    .frame(minWidth: 135, maxWidth: .infinity, alignment: .top)
+                    .frame(minWidth: 95, maxWidth: .infinity, alignment: .top)
                     .layoutPriority(0)
                 }
 
@@ -228,47 +247,170 @@ struct ContentView: View {
 
     private func mediaInfoCard(_ slot: FileSlot, fixedHeight: CGFloat? = nil) -> some View {
         let terms = slot.frequentTerms
+        let emotions = slot.emotionFrequencies
+        let hasChips = !terms.isEmpty || !emotions.isEmpty
 
-        return VStack(alignment: .leading, spacing: 8) {
+        return VStack(alignment: .leading, spacing: 6) {
             Label(t("media.info"), systemImage: "info.circle")
                 .font(.subheadline.weight(.semibold))
 
             Divider()
 
             editableFileNameRow(slot)
-            compactInfoRow(t("media.duration"), value: mediaDurationText(slot))
-            compactInfoRow(t("media.size"), value: fileSizeText(slot.url))
-            compactInfoRow(t("media.resolution"), value: resolutionText(slot.mediaInfo))
-            compactInfoRow(t("media.frameRate"), value: frameRateText(slot.mediaInfo?.frameRate))
-            compactInfoRow(t("media.videoCodec"), value: slot.mediaInfo?.videoCodec ?? t("media.noVideo"))
-            compactInfoRow(t("media.audio"), value: audioText(slot.mediaInfo))
-            compactInfoRow(t("media.bitRate"), value: bitRateText(slot.mediaInfo?.bitRate))
+            VStack(alignment: .leading, spacing: 3) {
+                compactInfoRow(t("media.duration"), value: mediaDurationText(slot))
+                compactInfoRow(t("media.size"), value: fileSizeText(slot.url))
+                compactInfoRow(t("media.resolution"), value: resolutionText(slot.mediaInfo))
+                compactInfoRow(t("media.frameRate"), value: frameRateText(slot.mediaInfo?.frameRate))
+                compactInfoRow(t("media.videoCodec"), value: slot.mediaInfo?.videoCodec ?? t("media.noVideo"))
+                compactInfoRow(t("media.audio"), value: audioText(slot.mediaInfo))
+                compactInfoRow(t("media.bitRate"), value: bitRateText(slot.mediaInfo?.bitRate))
+            }
 
-            if !terms.isEmpty {
+            if hasChips {
                 Divider()
-                    .padding(.vertical, 2)
-                Text(t("media.frequentTerms"))
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                GeometryReader { proxy in
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 6) {
-                            ForEach(terms) { term in
-                                frequentTermPill(term)
-                            }
-                        }
-                        .padding(.vertical, 1)
-                        .frame(minWidth: proxy.size.width, alignment: .leading)
+                    .padding(.top, 2)
+
+                if !emotions.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(t("media.emotionStats"))
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        emotionStackedBar(emotions)
+                            .frame(minHeight: 28, maxHeight: 36)
                     }
                 }
-                .frame(height: 24)
-                .clipped()
+
+                if !terms.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(t("media.frequentTerms"))
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 6) {
+                                ForEach(terms) { term in
+                                    frequentTermPill(term)
+                                }
+                            }
+                            .padding(.vertical, 1)
+                        }
+                        .frame(height: 26)
+                    }
+                }
             }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: fixedHeight, alignment: .topLeading)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func emotionStackedBar(_ emotions: [SubtitleEmotionFrequency]) -> some View {
+        GeometryReader { proxy in
+            let spacing: CGFloat = 3
+            let available = max(0, proxy.size.width - CGFloat(max(emotions.count - 1, 0)) * spacing)
+            HStack(spacing: spacing) {
+                ForEach(emotions) { emotion in
+                    emotionBarSegment(
+                        emotion,
+                        width: max(28, available * CGFloat(emotion.ratio))
+                    )
+                }
+            }
+        }
+    }
+
+    private func emotionBarSegment(_ emotion: SubtitleEmotionFrequency, width: CGFloat) -> some View {
+        let isSelected = selectedFrequentTerm == emotion.emoji
+        let percent = Int((emotion.ratio * 100).rounded())
+        let color = emotionColor(emotion.emoji)
+        return Button {
+            if isSelected {
+                selectedFrequentTerm = nil
+            } else {
+                selectedFrequentTerm = emotion.emoji
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(emotion.emoji)
+                    .font(.callout)
+                if width > 56 {
+                    Text("\(percent)%")
+                        .font(.caption.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(.white)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(
+                color.opacity(isSelected ? 0.95 : 0.7),
+                in: RoundedRectangle(cornerRadius: 8)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(color, lineWidth: isSelected ? 2 : 0)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .frame(width: width)
+        .help("\(emotion.emoji) \(emotion.count) (\(percent)%)")
+    }
+
+    private func emotionColor(_ emoji: String) -> Color {
+        switch emoji {
+        case "\u{1F60A}": return .yellow      // 😊 happy
+        case "\u{1F622}": return .blue        // 😢 sad
+        case "\u{1F620}": return .red         // 😠 angry
+        case "\u{1F610}": return .gray        // 😐 neutral
+        case "\u{1F628}": return .purple      // 😨 fearful
+        case "\u{1F922}": return .green       // 🤢 disgusted
+        case "\u{1F62E}": return .orange      // 😮 surprised
+        case "\u{1F3AD}": return .pink        // 🎭 other
+        default: return .secondary
+        }
+    }
+
+    private func chipSectionTitle(hasEmotions: Bool, hasTerms: Bool) -> String {
+        switch (hasEmotions, hasTerms) {
+        case (true, true):
+            return t("media.emotionAndTerms")
+        case (true, false):
+            return t("media.emotionStats")
+        default:
+            return t("media.frequentTerms")
+        }
+    }
+
+    private func emotionRatioPill(_ emotion: SubtitleEmotionFrequency) -> some View {
+        let isSelected = selectedFrequentTerm == emotion.emoji
+        let percent = Int((emotion.ratio * 100).rounded())
+        return Button {
+            if isSelected {
+                selectedFrequentTerm = nil
+            } else {
+                selectedFrequentTerm = emotion.emoji
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Text(emotion.emoji)
+                    .font(.caption2)
+                Text("\(percent)%")
+                    .font(.caption2.monospacedDigit())
+            }
+            .lineLimit(1)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(
+                isSelected ? AnyShapeStyle(Color.orange.opacity(0.32)) : AnyShapeStyle(Color.orange.opacity(0.12)),
+                in: Capsule()
+            )
+            .overlay(
+                Capsule().stroke(Color.orange.opacity(isSelected ? 0.6 : 0.18), lineWidth: 1)
+            )
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help("\(emotion.emoji) \(emotion.count) (\(percent)%)")
     }
 
     private func frequentTermPill(_ term: SubtitleTermFrequency) -> some View {
@@ -308,15 +450,15 @@ struct ContentView: View {
     }
 
     private func compactInfoRow(_ title: String, value: String) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             Text(title)
-                .font(.caption)
+                .font(.caption2)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .layoutPriority(1)
-            Spacer(minLength: 8)
+            Spacer(minLength: 6)
             Text(value)
-                .font(.caption.monospacedDigit())
+                .font(.caption2.monospacedDigit())
                 .foregroundStyle(.primary)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -325,11 +467,12 @@ struct ContentView: View {
     }
 
     private func editableFileNameRow(_ slot: FileSlot) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        HStack(spacing: 8) {
             Text(t("media.name"))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+                .layoutPriority(1)
 
             TextField(t("media.name"), text: fileNameBinding(for: slot.id))
                 .font(.caption.monospacedDigit())
@@ -348,6 +491,7 @@ struct ContentView: View {
                         commitFileRename(for: slot.id)
                     }
                 }
+                .frame(maxWidth: .infinity)
         }
     }
 
@@ -426,6 +570,8 @@ struct ContentView: View {
                     segmentsPanel
                 case .output:
                     outputPanel
+                case .cueList:
+                    cueListPanel
                 }
             }
         }
@@ -549,6 +695,35 @@ struct ContentView: View {
 
     // MARK: - Toolbar / status
 
+    private var backendStatusPopoverOverlay: some View {
+        GeometryReader { proxy in
+            if isBackendStatusPopoverPresented {
+                let popoverWidth: CGFloat = 320
+                let margin: CGFloat = 12
+                let rootFrame = proxy.frame(in: .global)
+                let hasAnchor = !backendStatusBadgeFrame.isEmpty
+                let desiredLeft = hasAnchor
+                    ? backendStatusBadgeFrame.minX - rootFrame.minX
+                    : margin
+                let maxLeft = max(margin, proxy.size.width - popoverWidth - margin)
+                let left = min(max(desiredLeft, margin), maxLeft)
+                let desiredTop = hasAnchor
+                    ? backendStatusBadgeFrame.maxY - rootFrame.minY + 8
+                    : margin
+                let top = max(margin, desiredTop)
+
+                backendStatusPopover
+                    .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16))
+                    .shadow(color: .black.opacity(0.16), radius: 18, y: 8)
+                    .frame(width: popoverWidth, alignment: .leading)
+                    .offset(x: left, y: top)
+                    .transition(.scale(scale: 0.98, anchor: .top).combined(with: .opacity))
+                    .zIndex(20)
+            }
+        }
+        .allowsHitTesting(isBackendStatusPopoverPresented)
+    }
+
     private var connectionBadge: some View {
         Button {
             isBackendStatusPopoverPresented.toggle()
@@ -557,7 +732,7 @@ struct ContentView: View {
                 Circle()
                     .fill(connectionState.color)
                     .frame(width: 8, height: 8)
-                Text(connectionState.title(language: language))
+                Text(connectionBadgeTitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -567,10 +742,19 @@ struct ContentView: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .popover(isPresented: $isBackendStatusPopoverPresented, arrowEdge: .top) {
-            backendStatusPopover
-        }
         .help(t("backend.status"))
+        .background(
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: BackendStatusBadgeFrameKey.self,
+                    value: proxy.frame(in: .global)
+                )
+            }
+        )
+    }
+
+    private var connectionBadgeTitle: String {
+        connectionState.title(language: language)
     }
 
     private var backendStatusPopover: some View {
@@ -596,6 +780,16 @@ struct ContentView: View {
             backendDetailRow(t("backend.process"), backend.isRunning ? t("backend.running") : t("backend.stopped"))
             backendDetailRow(t("backend.connection"), connectionState.title(language: language))
             backendDetailRow(t("backend.endpoint"), backend.baseURL.absoluteString)
+            if backend.isRunning {
+                SwiftUI.TimelineView(.periodic(from: .now, by: 1.5)) { _ in
+                    backendDetailRow(t("backend.memory"), formattedMemoryUsage())
+                }
+            }
+            if isProcessing {
+                backendDetailRow(t("backend.progress"), "\(Int((min(max(aggregateProgress, 0), 1) * 100).rounded()))%")
+                ProgressView(value: min(max(aggregateProgress, 0), 1))
+                    .tint(.teal)
+            }
 
             if !backend.message.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
@@ -658,6 +852,14 @@ struct ContentView: View {
                 .lineLimit(2)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    private func formattedMemoryUsage() -> String {
+        guard let bytes = backend.memoryUsageBytes() else { return "—" }
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useMB, .useGB]
+        formatter.countStyle = .memory
+        return formatter.string(fromByteCount: Int64(bytes))
     }
 
     private var statusCard: some View {
@@ -750,6 +952,19 @@ struct ContentView: View {
     private var settingsPanel: some View {
         Form {
             Section(t("input.section")) {
+                stackedField(t("settings.asrEngine"), help: t("help.asrEngine")) {
+                    Picker("", selection: $settings.asrEngine) {
+                        ForEach(ASREngine.allCases) { engine in
+                            Text(asrEngineTitle(engine)).tag(engine)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .onChange(of: settings.asrEngine) { _, _ in
+                        settings.applyDefaultModelForSelectedEngine()
+                    }
+                }
+
                 stackedField(t("settings.model"), help: t("help.model")) {
                     TextField("", text: $settings.model)
                         .textFieldStyle(.roundedBorder)
@@ -793,6 +1008,16 @@ struct ContentView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
+                stackedField(t("settings.vadEngine"), help: t("help.vadEngine")) {
+                    Picker("", selection: $settings.vadEngine) {
+                        ForEach(VADEngine.allCases) { engine in
+                            Text(vadEngineTitle(engine)).tag(engine)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                }
+
                 Button {
                     selectedPreset = .balanced
                     settings.resetRecognitionDefaults()
@@ -802,7 +1027,12 @@ struct ContentView: View {
                 }
                 .controlSize(.small)
 
-                numericField(t("settings.threshold"), value: $settings.vadThreshold, suffix: "dB", help: t("help.threshold"))
+                if settings.isFireRedVADActive {
+                    numericField(t("settings.fireRedVADThreshold"), value: $settings.fireRedVADThreshold, suffix: "", help: t("help.fireRedVADThreshold"))
+                    stepperField(t("settings.fireRedVADSmoothWindow"), value: $settings.fireRedVADSmoothWindow, in: 1...31, help: t("help.fireRedVADSmoothWindow"))
+                } else {
+                    numericField(t("settings.threshold"), value: $settings.vadThreshold, suffix: "dB", help: t("help.threshold"))
+                }
                 numericField(t("settings.maxSegment"), value: $settings.vadMaxSegment, suffix: "s", help: t("help.maxSegment"))
                 numericField(t("settings.silence"), value: $settings.vadSilence, suffix: "s", help: t("help.silence"))
 
@@ -816,27 +1046,82 @@ struct ContentView: View {
             }
 
             Section(t("settings.recognition")) {
-                stepperField(t("settings.beam"), value: $settings.beamSize, in: 1...8, help: t("help.beam"))
+                if settings.isSenseVoiceActive {
+                    stackedField(t("settings.recognitionLanguage"), help: t("help.recognitionLanguage")) {
+                        Picker("", selection: $settings.recognitionLanguage) {
+                            ForEach(RecognitionLanguage.allCases) { option in
+                                Text(recognitionLanguageTitle(option)).tag(option)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                    }
+
+                    Toggle(isOn: $settings.senseVoiceUseITN) {
+                        parameterLabel(t("settings.useITN"), help: t("help.useITN"))
+                    }
+                    .toggleStyle(.switch)
+
+                    Text(t("help.senseVoice"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if settings.isMiMoActive {
+                    stackedField(t("settings.recognitionLanguage"), help: t("help.recognitionLanguage")) {
+                        Picker("", selection: $settings.recognitionLanguage) {
+                            ForEach([RecognitionLanguage.auto, .zh, .en]) { option in
+                                Text(recognitionLanguageTitle(option)).tag(option)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                    }
+
+                    stepperField(t("settings.mimoMaxTokens"), value: $settings.mimoMaxTokens, in: 1...4096, help: t("help.mimoMaxTokens"))
+                    numericField(t("settings.mimoTemperature"), value: $settings.mimoTemperature, suffix: "", help: t("help.mimoTemperature"))
+                    numericField(t("settings.mimoTopP"), value: $settings.mimoTopP, suffix: "", help: t("help.mimoTopP"))
+                    stepperField(t("settings.mimoTopK"), value: $settings.mimoTopK, in: 0...1000, help: t("help.mimoTopK"))
+
+                    Text(t("help.mimo"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    stepperField(t("settings.beam"), value: $settings.beamSize, in: 1...8, help: t("help.beam"))
+                }
+
                 numericField(t("settings.confidence"), value: $settings.minConfidence, suffix: "", help: t("help.confidence"))
                 stepperField(t("settings.lineChars"), value: $settings.lineChars, in: 0...80, help: t("help.lineChars"))
+                Toggle(isOn: $settings.senseVoiceRichInfo) {
+                    parameterLabel(t("settings.senseVoiceRichInfo"), help: t("help.senseVoiceRichInfo"))
+                }
+                .toggleStyle(.switch)
                 Toggle(isOn: $settings.diarizeSpeakers) {
                     parameterLabel(t("settings.diarizeSpeakers"), help: t("help.diarizeSpeakers"))
                 }
                 .toggleStyle(.switch)
+                if settings.isMiMoActive {
+                    Text(t("help.mimoNoNativeSpeaker"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if settings.diarizeSpeakers {
                     stepperField(t("settings.speakerCount"), value: $settings.diarizationSpeakerCount, in: 0...12, help: t("help.speakerCount"))
                 }
 
-                DisclosureGroup(t("settings.decoding")) {
-                    numericField(t("settings.softmaxSmoothing"), value: $settings.softmaxSmoothing, suffix: "", help: t("help.softmaxSmoothing"))
-                    numericField(t("settings.lengthPenalty"), value: $settings.lengthPenalty, suffix: "", help: t("help.lengthPenalty"))
-                    numericField(t("settings.eosPenalty"), value: $settings.eosPenalty, suffix: "", help: t("help.eosPenalty"))
-                    stepperField(t("settings.decodeMaxLen"), value: $settings.decodeMaxLen, in: 0...512, help: t("help.decodeMaxLen"))
+                if !settings.isSenseVoiceActive && !settings.isMiMoActive {
+                    DisclosureGroup(t("settings.decoding")) {
+                        numericField(t("settings.softmaxSmoothing"), value: $settings.softmaxSmoothing, suffix: "", help: t("help.softmaxSmoothing"))
+                        numericField(t("settings.lengthPenalty"), value: $settings.lengthPenalty, suffix: "", help: t("help.lengthPenalty"))
+                        numericField(t("settings.eosPenalty"), value: $settings.eosPenalty, suffix: "", help: t("help.eosPenalty"))
+                        stepperField(t("settings.decodeMaxLen"), value: $settings.decodeMaxLen, in: 0...512, help: t("help.decodeMaxLen"))
 
-                    Text(t("help.unsupportedDecoding"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                        Text(t("help.unsupportedDecoding"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
 
@@ -904,24 +1189,95 @@ struct ContentView: View {
     }
 
     private var statusCapsule: some View {
+        statusCapsuleContent(expanded: false)
+            .onHover { hovering in
+                setStatusDetailHovered(hovering)
+            }
+            .help(statusHelpText)
+            .popover(isPresented: $isStatusDetailHovered, arrowEdge: .top) {
+                statusCapsuleExpandedBody
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 11)
+                    .frame(width: 240, alignment: .leading)
+                    .onHover { hovering in
+                        setStatusDetailHovered(hovering)
+                    }
+            }
+            .animation(.spring(response: 0.55, dampingFraction: 0.82), value: compactStatusText)
+            .animation(.spring(response: 0.55, dampingFraction: 0.82), value: isProcessing)
+            .animation(.spring(response: 0.55, dampingFraction: 0.82), value: statusSystemImage)
+            .animation(.spring(response: 0.55, dampingFraction: 0.82), value: statusTint)
+            .animation(.easeOut(duration: 0.25), value: aggregateProgress)
+    }
+
+    private func setStatusDetailHovered(_ hovering: Bool) {
+        statusDetailDismissTask?.cancel()
+        statusDetailDismissTask = nil
+        if hovering {
+            isStatusDetailHovered = true
+        } else {
+            statusDetailDismissTask = Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(220))
+                guard !Task.isCancelled else { return }
+                isStatusDetailHovered = false
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func statusCapsuleContent(expanded: Bool) -> some View {
+        if expanded {
+            statusCapsuleExpandedBody
+                .padding(.horizontal, 14)
+                .padding(.vertical, 11)
+                .frame(width: 240, alignment: .leading)
+                .background(statusTint.opacity(0.06), in: RoundedRectangle(cornerRadius: 18))
+                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18))
+                .overlay(RoundedRectangle(cornerRadius: 18).stroke(statusTint.opacity(0.35), lineWidth: 1.0))
+                .clipShape(RoundedRectangle(cornerRadius: 18))
+                .geometryGroup()
+        } else {
+            statusCapsuleCompactBody
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(statusTint.opacity(0.12), in: Capsule())
+                .overlay(Capsule().stroke(statusTint.opacity(0.22), lineWidth: 0.8))
+                .clipShape(Capsule())
+                .geometryGroup()
+        }
+    }
+
+    private var statusCapsuleCompactBody: some View {
         HStack(spacing: 6) {
             Image(systemName: statusSystemImage)
-                .font(.caption.weight(.semibold))
+                .font(Font.caption.weight(.semibold))
                 .foregroundStyle(statusTint)
                 .contentTransition(.symbolEffect(.replace))
 
             Text(compactStatusText)
-                .font(.caption.weight(.medium))
+                .font(Font.caption.weight(.medium))
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .contentTransition(.opacity)
 
             if isProcessing {
+                ProgressView(value: min(max(aggregateProgress, 0), 1))
+                    .progressViewStyle(.linear)
+                    .tint(statusTint)
+                    .frame(width: 36)
+                    .transition(.opacity)
+
+                Text(progressPercentText)
+                    .font(Font.caption.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(statusTint)
+                    .contentTransition(.numericText(value: aggregateProgress))
+                    .transition(.opacity)
+
                 Button {
                     cancelProcessing()
                 } label: {
                     Image(systemName: "stop.circle")
-                        .font(.caption.weight(.semibold))
+                        .font(Font.caption.weight(.semibold))
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.red)
@@ -929,37 +1285,119 @@ struct ContentView: View {
                 .transition(.scale.combined(with: .opacity))
             }
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 5)
-        .background(statusTint.opacity(0.12), in: Capsule())
-        .overlay(Capsule().stroke(statusTint.opacity(0.22), lineWidth: 0.8))
-        .clipShape(Capsule())
-        .geometryGroup()
-        .fixedSize(horizontal: true, vertical: true)
-        .animation(.spring(response: 0.55, dampingFraction: 0.82), value: compactStatusText)
-        .animation(.spring(response: 0.55, dampingFraction: 0.82), value: isProcessing)
-        .animation(.spring(response: 0.55, dampingFraction: 0.82), value: statusSystemImage)
-        .animation(.spring(response: 0.55, dampingFraction: 0.82), value: statusTint)
-        .help(statusHelpText)
+    }
+
+    private var statusCapsuleExpandedBody: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
+                Image(systemName: statusSystemImage)
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(statusTint)
+                    .contentTransition(.symbolEffect(.replace))
+
+                Text(compactStatusText)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                Spacer(minLength: 6)
+
+                if isProcessing {
+                    Button {
+                        cancelProcessing()
+                    } label: {
+                        Image(systemName: "stop.circle.fill")
+                            .font(.title3)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.red)
+                    .help(t("action.stop"))
+                }
+            }
+
+            if let slot = activeSlot {
+                Text(slot.url.lastPathComponent)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            if isProcessing {
+                HStack(spacing: 8) {
+                    ProgressView(value: min(max(aggregateProgress, 0), 1))
+                        .progressViewStyle(.linear)
+                        .tint(statusTint)
+
+                    Text(progressPercentText)
+                        .font(.caption.weight(.semibold).monospacedDigit())
+                        .foregroundStyle(statusTint)
+                        .contentTransition(.numericText(value: aggregateProgress))
+                        .frame(minWidth: 34, alignment: .trailing)
+                }
+            }
+
+            if hasAnyStatusBadge {
+                HStack(spacing: 6) {
+                    if let slot = activeSlot, slot.chunkTotal > 0 {
+                        statusCapsuleDetail(
+                            icon: "square.stack.3d.up.fill",
+                            value: "\(slot.chunkCurrent)/\(slot.chunkTotal)",
+                            helpText: t("status.detail.chunks")
+                        )
+                    }
+                    if files.count > 1 {
+                        let done = files.filter { $0.processingState == .done }.count
+                        statusCapsuleDetail(
+                            icon: "doc.on.doc.fill",
+                            value: "\(done)/\(files.count)",
+                            helpText: t("status.detail.files")
+                        )
+                    }
+                    if let slot = activeSlot, !slot.segments.isEmpty {
+                        statusCapsuleDetail(
+                            icon: "text.quote",
+                            value: "\(slot.segments.count)",
+                            helpText: t("status.detail.segments")
+                        )
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+    }
+
+    private var hasAnyStatusBadge: Bool {
+        if let slot = activeSlot, slot.chunkTotal > 0 { return true }
+        if files.count > 1 { return true }
+        if let slot = activeSlot, !slot.segments.isEmpty { return true }
+        return false
+    }
+
+    private func statusCapsuleDetail(icon: String, value: String, helpText: String) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: icon)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption.weight(.semibold).monospacedDigit())
+                .foregroundStyle(.primary)
+        }
+        .padding(.horizontal, 5)
+        .padding(.vertical, 2)
+        .background(statusTint.opacity(0.14), in: Capsule())
+        .help(helpText)
+        .transition(.scale(scale: 0.7).combined(with: .opacity))
+    }
+
+    private var progressPercentText: String {
+        let percent = Int((min(max(aggregateProgress, 0), 1) * 100).rounded())
+        return "\(percent)%"
     }
 
     private var compactStatusText: String {
         guard let slot = activeSlot else { return t("status.ready") }
-        let base = t(slot.statusKey)
-        let detail = slot.statusDetail
-        if detail.isEmpty { return base }
-        if isShortDetail(detail) {
-            return "\(base) · \(detail)"
-        }
-        return base
-    }
-
-    private func isShortDetail(_ detail: String) -> Bool {
-        guard detail.count <= 16 else { return false }
-        if detail.contains("/") && (detail.contains(".") || detail.contains(" ")) {
-            return false
-        }
-        return true
+        return t(slot.statusKey)
     }
 
     private var statusHelpText: String {
@@ -1303,6 +1741,369 @@ struct ContentView: View {
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
     }
 
+    // MARK: - Cue list panel
+
+    private static let cueListNewlineSentinel = "⏎"
+
+    private var cueListPanel: some View {
+        let slot = activeSlot
+        let segments = slot?.segments ?? []
+        let duration = timelineDuration(for: slot)
+        let highlightedRanges: [TimelineHighlightRange] = slot?.cues
+            .filter { cueListSelection.contains($0.id) }
+            .map { TimelineHighlightRange(start: $0.start, end: $0.end) }
+            ?? []
+
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text(t("tab.cueList"))
+                    .font(.headline)
+                Spacer()
+                if let slot, !slot.cues.isEmpty {
+                    Text("\(slot.cues.count)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                Button {
+                    playback.togglePlayPause()
+                } label: {
+                    Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .help(t(playback.isPlaying ? "editor.pause" : "editor.play"))
+                .disabled(slot == nil)
+
+                if !cueListSelection.isEmpty {
+                    Button(role: .destructive) {
+                        deleteCuesFromActiveCueList(cueListSelection)
+                    } label: {
+                        Label(t("cueList.delete"), systemImage: "trash")
+                    }
+                    .controlSize(.small)
+                    .buttonStyle(.borderless)
+                    .help(t("cueList.delete"))
+                }
+            }
+
+            TimelineView(
+                segments: segments,
+                duration: duration,
+                clipRange: activeClipRangeBinding,
+                language: language,
+                isEnabled: !isProcessing,
+                currentTime: playback.currentTime,
+                allowsClipSelection: false,
+                onSeek: { seconds in
+                    playback.seek(to: seconds)
+                },
+                highlightedRanges: highlightedRanges
+            )
+            .frame(height: 42)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            if let slot, !slot.cues.isEmpty {
+                cueListTable(for: slot)
+            } else {
+                ContentUnavailableView(
+                    t("segments.empty"),
+                    systemImage: "captions.bubble",
+                    description: Text(t("action.preview"))
+                )
+                .frame(maxWidth: .infinity, minHeight: 260)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
+        .sheet(isPresented: $isCueListTimingAdjustmentPresented) {
+            TimingAdjustmentSheet(
+                language: language,
+                cueCount: cueListTimingTargetIDs.count,
+                mode: $cueListTimingMode,
+                shiftSeconds: $cueListTimingShiftSeconds,
+                gapSeconds: $cueListTimingGapSeconds,
+                apply: applyCueListTimingAdjustment
+            )
+        }
+    }
+
+    private func cueListTable(for slot: FileSlot) -> some View {
+        let frameRate = slot.mediaInfo?.frameRate ?? 0
+        return Table(slot.cues, selection: $cueListSelection, columnCustomization: $cueListColumnCustomization) {
+            TableColumn(t("cueList.index")) { cue in
+                Text("\(cue.index)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .width(min: 24, ideal: 28, max: 44)
+            .customizationID("index")
+
+            TableColumn(t("cueList.start")) { cue in
+                Text(SubtitleDocument.displayTime(cue.start))
+                    .font(.caption.monospacedDigit())
+            }
+            .width(min: 50, ideal: 58, max: 80)
+            .customizationID("start")
+
+            TableColumn(t("cueList.end")) { cue in
+                Text(SubtitleDocument.displayTime(cue.end))
+                    .font(.caption.monospacedDigit())
+            }
+            .width(min: 50, ideal: 58, max: 80)
+            .customizationID("end")
+
+            TableColumn(t("cueList.duration")) { cue in
+                Text(String(format: "%.2fs", cue.duration))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .width(min: 42, ideal: 50, max: 70)
+            .customizationID("duration")
+
+            TableColumn(t("cueList.rate")) { cue in
+                Text(cueSpeechRate(cue))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .width(min: 46, ideal: 54, max: 80)
+            .customizationID("rate")
+
+            TableColumn(t("cueList.speaker")) { cue in
+                TextField("", text: cueSpeakerBinding(for: cue.id))
+                    .textFieldStyle(.plain)
+                    .font(.caption)
+                    .lineLimit(1)
+                    .disabled(isProcessing || isSaving || isClippingVideo)
+            }
+            .width(min: 60, ideal: 80, max: 140)
+            .customizationID("speaker")
+
+            TableColumn(t("cueList.content")) { cue in
+                TextField("", text: cueTextDisplayBinding(for: cue.id))
+                    .textFieldStyle(.plain)
+                    .font(.caption)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .disabled(isProcessing || isSaving || isClippingVideo)
+            }
+            .customizationID("content")
+
+            TableColumn("\(t("cueList.start"))F") { cue in
+                Text(cueFrameNumber(cue.start, frameRate: frameRate))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .width(min: 40, ideal: 50, max: 72)
+            .customizationID("startFrame")
+            .defaultVisibility(.hidden)
+
+            TableColumn("\(t("cueList.end"))F") { cue in
+                Text(cueFrameNumber(cue.end, frameRate: frameRate))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .width(min: 40, ideal: 50, max: 72)
+            .customizationID("endFrame")
+            .defaultVisibility(.hidden)
+        }
+        .frame(minHeight: 480, maxHeight: 820)
+        .contextMenu(forSelectionType: SubtitleCue.ID.self) { ids in
+            cueListContextMenu(for: ids)
+        }
+    }
+
+    @ViewBuilder
+    private func cueListContextMenu(for ids: Set<SubtitleCue.ID>) -> some View {
+        if ids.isEmpty {
+            Text(t("cueList.emptySelection"))
+        } else {
+            let anchorID = anchorCueID(in: ids)
+
+            Button {
+                insertCueRelativeToAnchor(anchorID, position: .before)
+            } label: {
+                Label(t("editor.addBefore"), systemImage: "arrow.up.to.line.compact")
+            }
+            .disabled(anchorID == nil)
+
+            Button {
+                insertCueRelativeToAnchor(anchorID, position: .after)
+            } label: {
+                Label(t("editor.addAfter"), systemImage: "arrow.down.to.line.compact")
+            }
+            .disabled(anchorID == nil)
+
+            Divider()
+
+            Button {
+                presentCueListTimingAdjustment(for: ids)
+            } label: {
+                Label(
+                    ids.count > 1 ? "\(t("menu.adjustTiming")) (\(ids.count))" : t("menu.adjustTiming"),
+                    systemImage: "clock.arrow.2.circlepath"
+                )
+            }
+
+            Divider()
+
+            Button(role: .destructive) {
+                deleteCuesFromActiveCueList(ids)
+            } label: {
+                Label(
+                    ids.count > 1 ? "\(t("cueList.delete")) (\(ids.count))" : t("cueList.delete"),
+                    systemImage: "trash"
+                )
+            }
+        }
+    }
+
+    private enum CueInsertPosition { case before, after }
+
+    private func anchorCueID(in ids: Set<SubtitleCue.ID>) -> SubtitleCue.ID? {
+        guard files.indices.contains(activeIndex) else { return nil }
+        let cues = files[activeIndex].cues
+        let firstIndex = cues.indices.first { ids.contains(cues[$0].id) }
+        return firstIndex.map { cues[$0].id }
+    }
+
+    private func insertCueRelativeToAnchor(_ anchorID: SubtitleCue.ID?, position: CueInsertPosition) {
+        guard files.indices.contains(activeIndex), let anchorID,
+              let anchorIdx = files[activeIndex].cues.firstIndex(where: { $0.id == anchorID })
+        else { return }
+        let anchorCue = files[activeIndex].cues[anchorIdx]
+        let defaultDuration = max(anchorCue.duration, 1.0)
+        let newStart: Double
+        let newEnd: Double
+        let insertIdx: Int
+        switch position {
+        case .before:
+            newStart = max(0, anchorCue.start - defaultDuration)
+            newEnd = anchorCue.start
+            insertIdx = anchorIdx
+        case .after:
+            newStart = anchorCue.end
+            newEnd = anchorCue.end + defaultDuration
+            insertIdx = anchorIdx + 1
+        }
+        let newCue = SubtitleCue(
+            index: 0,
+            start: newStart,
+            end: newEnd,
+            text: "",
+            confidence: nil,
+            speaker: anchorCue.speaker
+        )
+        files[activeIndex].cues.insert(newCue, at: insertIdx)
+        for offset in files[activeIndex].cues.indices {
+            files[activeIndex].cues[offset].index = offset + 1
+        }
+        cueListSelection = [newCue.id]
+    }
+
+    private func presentCueListTimingAdjustment(for ids: Set<SubtitleCue.ID>) {
+        cueListTimingTargetIDs = ids
+        cueListTimingMode = .shift
+        cueListTimingShiftSeconds = 0
+        cueListTimingGapSeconds = 0
+        isCueListTimingAdjustmentPresented = true
+    }
+
+    private func applyCueListTimingAdjustment() {
+        guard files.indices.contains(activeIndex), !cueListTimingTargetIDs.isEmpty else { return }
+        switch cueListTimingMode {
+        case .shift:
+            shiftSelectedCues(by: cueListTimingShiftSeconds, ids: cueListTimingTargetIDs)
+        case .closeGaps:
+            closeGapsAmongSelectedCues(targetGap: cueListTimingGapSeconds, ids: cueListTimingTargetIDs)
+        }
+    }
+
+    private func shiftSelectedCues(by seconds: Double, ids: Set<SubtitleCue.ID>) {
+        guard seconds.isFinite, abs(seconds) > 0.0001, files.indices.contains(activeIndex) else { return }
+        let targets = files[activeIndex].cues.filter { ids.contains($0.id) }
+        let earliestStart = targets.map(\.start).min() ?? 0
+        let safeOffset = max(seconds, -earliestStart)
+        guard abs(safeOffset) > 0.0001 else { return }
+        for offset in files[activeIndex].cues.indices where ids.contains(files[activeIndex].cues[offset].id) {
+            files[activeIndex].cues[offset].start += safeOffset
+            files[activeIndex].cues[offset].end += safeOffset
+        }
+    }
+
+    private func closeGapsAmongSelectedCues(targetGap rawGap: Double, ids: Set<SubtitleCue.ID>) {
+        guard files.indices.contains(activeIndex) else { return }
+        let targetGap = max(0, rawGap.isFinite ? rawGap : 0)
+        var previousEnd: Double?
+        for offset in files[activeIndex].cues.indices where ids.contains(files[activeIndex].cues[offset].id) {
+            let cueDuration = max(0.05, files[activeIndex].cues[offset].end - files[activeIndex].cues[offset].start)
+            if let previousEnd {
+                let desiredStart = previousEnd + targetGap
+                if files[activeIndex].cues[offset].start > desiredStart {
+                    files[activeIndex].cues[offset].start = desiredStart
+                    files[activeIndex].cues[offset].end = desiredStart + cueDuration
+                }
+            }
+            files[activeIndex].cues[offset].end = max(files[activeIndex].cues[offset].start + 0.05, files[activeIndex].cues[offset].end)
+            previousEnd = files[activeIndex].cues[offset].end
+        }
+    }
+
+    private func cueFrameNumber(_ seconds: Double, frameRate: Double) -> String {
+        let rate = frameRate > 0 ? frameRate : 30.0
+        return "\(Int((seconds * rate).rounded()))"
+    }
+
+    private func cueSpeechRate(_ cue: SubtitleCue) -> String {
+        guard cue.duration > 0.05 else { return "-" }
+        let chars = cue.text.trimmingCharacters(in: .whitespacesAndNewlines).count
+        guard chars > 0 else { return "-" }
+        let rate = Double(chars) / cue.duration
+        return String(format: "%.1f", rate)
+    }
+
+    private func cueSpeakerBinding(for cueID: SubtitleCue.ID) -> Binding<String> {
+        Binding {
+            guard files.indices.contains(activeIndex),
+                  let cue = files[activeIndex].cues.first(where: { $0.id == cueID }) else {
+                return ""
+            }
+            return cue.speaker ?? ""
+        } set: { newValue in
+            guard files.indices.contains(activeIndex),
+                  let idx = files[activeIndex].cues.firstIndex(where: { $0.id == cueID }) else { return }
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            files[activeIndex].cues[idx].speaker = trimmed.isEmpty ? nil : newValue
+        }
+    }
+
+    private func cueTextDisplayBinding(for cueID: SubtitleCue.ID) -> Binding<String> {
+        Binding {
+            guard files.indices.contains(activeIndex),
+                  let cue = files[activeIndex].cues.first(where: { $0.id == cueID }) else {
+                return ""
+            }
+            return cue.text.replacingOccurrences(of: "\n", with: Self.cueListNewlineSentinel)
+        } set: { newValue in
+            guard files.indices.contains(activeIndex),
+                  let idx = files[activeIndex].cues.firstIndex(where: { $0.id == cueID }) else { return }
+            files[activeIndex].cues[idx].text = newValue.replacingOccurrences(of: Self.cueListNewlineSentinel, with: "\n")
+        }
+    }
+
+    private func deleteCuesFromActiveCueList(_ ids: Set<SubtitleCue.ID>) {
+        guard files.indices.contains(activeIndex) else { return }
+        files[activeIndex].cues.removeAll { ids.contains($0.id) }
+        for offset in files[activeIndex].cues.indices {
+            files[activeIndex].cues[offset].index = offset + 1
+        }
+        cueListSelection.subtract(ids)
+        if let selectedID = files[activeIndex].selectedCueID, ids.contains(selectedID) {
+            files[activeIndex].selectedCueID = nil
+        }
+    }
+
     private func fileSlotBinding(for id: FileSlot.ID) -> Binding<FileSlot> {
         Binding(
             get: {
@@ -1325,10 +2126,23 @@ struct ContentView: View {
         t("preset.\(preset.rawValue).help")
     }
 
+    private func asrEngineTitle(_ engine: ASREngine) -> String {
+        t("settings.asrEngine.\(engine.rawValue)")
+    }
+
+    private func recognitionLanguageTitle(_ option: RecognitionLanguage) -> String {
+        t("settings.recognitionLanguage.\(option.rawValue)")
+    }
+
+    private func vadEngineTitle(_ engine: VADEngine) -> String {
+        t("settings.vadEngine.\(engine.rawValue)")
+    }
+
     private func tabTitle(_ tab: DetailTab) -> String {
         switch tab {
         case .segments: t("tab.segments")
         case .output: t("tab.output")
+        case .cueList: t("tab.cueList")
         }
     }
 
@@ -1964,12 +2778,15 @@ struct ContentView: View {
 
             update(at: fileIndex) {
                 $0.progress = progress
+                $0.chunkCurrent = current
+                $0.chunkTotal = total
                 if job.status == "running", total > 0 {
                     $0.statusKey = "status.transcribing"
                     $0.statusDetail = "\(current) / \(total)"
                 } else if job.status == "running" {
-                    $0.statusKey = "status.loading"
-                    $0.statusDetail = ""
+                    let progressText = job.progressText ?? ""
+                    $0.statusKey = progressText == "Loading model" ? "status.loading" : "status.transcribing"
+                    $0.statusDetail = progressText
                 } else {
                     $0.statusKey = "status.starting"
                     $0.statusDetail = job.progressText ?? job.status
@@ -2132,12 +2949,14 @@ struct ContentView: View {
         let cues = offsetCues(parsed, by: timeOffset)
         let termsSource = cues.isEmpty ? text : cues.map(\.text).joined(separator: " ")
         let frequentTerms = SubtitleTextStats.topTerms(in: termsSource, limit: 8)
+        let emotionFrequencies = SubtitleEmotionStats.frequencies(in: cues)
         update(at: index) {
             $0.outputFormat = format
             $0.previewText = cues.isEmpty ? text : SubtitleDocument.serialize(cues, format: format)
             $0.cues = cues
             $0.originalCues = cues
             $0.frequentTerms = frequentTerms
+            $0.emotionFrequencies = emotionFrequencies
             $0.selectedCueID = cues.first?.id
             if !$0.cues.isEmpty {
                 $0.duration = max($0.duration, $0.cues.map(\.end).max() ?? 0)
@@ -2360,6 +3179,19 @@ struct ContentView: View {
         Copy.text(key, language: language)
     }
 }
+
+private struct BackendStatusBadgeFrameKey: PreferenceKey {
+    static let defaultValue: CGRect = .zero
+
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        let next = nextValue()
+        if !next.isEmpty {
+            value = next
+        }
+    }
+}
+
+
 
 private struct ChipScrollEdges: Equatable {
     var leading: Bool
@@ -2630,6 +3462,7 @@ struct FileSlot: Identifiable {
     var originalCues: [SubtitleCue] = []
     var speakerColors: [String: String] = [:]
     var frequentTerms: [SubtitleTermFrequency] = []
+    var emotionFrequencies: [SubtitleEmotionFrequency] = []
     var selectedCueID: SubtitleCue.ID?
     var mediaInfo: MediaInfo?
     var duration: Double = 0
@@ -2638,6 +3471,8 @@ struct FileSlot: Identifiable {
     var lastOutputPath: String?
     var outputFormat: OutputFormat = .srt
     var progress: Double = 0
+    var chunkCurrent: Int = 0
+    var chunkTotal: Int = 0
     var statusKey: String = "status.ready"
     var statusDetail: String = ""
     var processingState: ProcessingState = .idle
@@ -2655,6 +3490,7 @@ struct FileSlot: Identifiable {
 private enum DetailTab: String, CaseIterable, Identifiable {
     case segments
     case output
+    case cueList
 
     var id: String { rawValue }
 }
@@ -2854,12 +3690,21 @@ private struct SegmentStatsView: View {
     }
 }
 
+struct TimelineHighlightRange: Hashable {
+    let start: Double
+    let end: Double
+}
+
 struct TimelineView: View {
     let segments: [SubtitleSegment]
     let duration: Double
     @Binding var clipRange: MediaClipRange?
     let language: AppLanguage
     let isEnabled: Bool
+    var currentTime: Double? = nil
+    var allowsClipSelection: Bool = true
+    var onSeek: ((Double) -> Void)? = nil
+    var highlightedRanges: [TimelineHighlightRange] = []
 
     @State private var selectionAnchorTime: Double?
     @State private var handleDragBase: MediaClipRange?
@@ -2870,39 +3715,97 @@ struct TimelineView: View {
         GeometryReader { proxy in
             let width = max(proxy.size.width, 1)
             let height = max(proxy.size.height, 1)
-            let selectedRange = clipRange?.normalized(in: duration, minimumDuration: minimumClipDuration)
-
-            ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(.quinary)
-
-                if let selectedRange {
-                    selectionOverlay(selectedRange, width: width, height: height)
-                }
-
-                ForEach(segments) { segment in
-                    let startX = xPosition(segment.start, width: width)
-                    let endX = xPosition(segment.end, width: width)
-                    let barHeight = min(30, max(20, height - 22))
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(.teal.opacity(segmentOpacity(segment, selectedRange: selectedRange)))
-                        .frame(
-                            width: max(2, endX - startX),
-                            height: barHeight
-                        )
-                        .offset(x: startX, y: (height - barHeight) / 2)
-                }
-
-                if let selectedRange {
-                    clipHandle(edge: .start, range: selectedRange, width: width, height: height)
-                    clipHandle(edge: .end, range: selectedRange, width: width, height: height)
-                }
+            if allowsClipSelection {
+                clipSelectionBody(width: width, height: height)
+            } else {
+                seekBody(width: width, height: height)
             }
-            .contentShape(Rectangle())
+        }
+    }
+
+    private func clipSelectionBody(width: CGFloat, height: CGFloat) -> some View {
+        let selectedRange = clipRange?.normalized(in: duration, minimumDuration: minimumClipDuration)
+        return timelineLayer(width: width, height: height, selectedRange: selectedRange)
             .gesture(selectionGesture(width: width))
             .allowsHitTesting(isEnabled && duration > 0)
             .accessibilityLabel(Text(Copy.text("segments.keepRange", language: language)))
+    }
+
+    private func seekBody(width: CGFloat, height: CGFloat) -> some View {
+        timelineLayer(width: width, height: height, selectedRange: nil)
+            .gesture(seekGesture(width: width))
+            .allowsHitTesting(isEnabled && duration > 0)
+    }
+
+    private func timelineLayer(width: CGFloat, height: CGFloat, selectedRange: MediaClipRange?) -> some View {
+        ZStack(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 6)
+                .fill(.quinary)
+
+            if let selectedRange {
+                selectionOverlay(selectedRange, width: width, height: height)
+            }
+
+            ForEach(segments) { segment in
+                let startX = xPosition(segment.start, width: width)
+                let endX = xPosition(segment.end, width: width)
+                let barHeight = min(30, max(20, height - 22))
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(.teal.opacity(segmentOpacity(segment, selectedRange: selectedRange)))
+                    .frame(
+                        width: max(2, endX - startX),
+                        height: barHeight
+                    )
+                    .offset(x: startX, y: (height - barHeight) / 2)
+            }
+
+            ForEach(highlightedRanges, id: \.self) { range in
+                let startX = xPosition(range.start, width: width)
+                let endX = xPosition(range.end, width: width)
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(Color.accentColor.opacity(0.32))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 3)
+                            .stroke(Color.accentColor.opacity(0.85), lineWidth: 1)
+                    )
+                    .frame(width: max(2, endX - startX), height: height)
+                    .offset(x: startX)
+            }
+
+            if let selectedRange {
+                clipHandle(edge: .start, range: selectedRange, width: width, height: height)
+                clipHandle(edge: .end, range: selectedRange, width: width, height: height)
+            }
+
+            if let currentTime, duration > 0, currentTime >= 0, currentTime <= duration {
+                playbackCursor(currentTime: currentTime, width: width, height: height)
+            }
         }
+        .contentShape(Rectangle())
+    }
+
+    private func seekGesture(width: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .local)
+            .onChanged { value in
+                guard isEnabled, duration > 0, let onSeek else { return }
+                let seekTime = time(for: value.location.x, width: width)
+                onSeek(seekTime)
+            }
+    }
+
+    private func playbackCursor(currentTime: Double, width: CGFloat, height: CGFloat) -> some View {
+        let x = xPosition(currentTime, width: width)
+        return ZStack(alignment: .top) {
+            Capsule()
+                .fill(Color.accentColor)
+                .frame(width: 2, height: height)
+                .offset(x: max(-1, min(width - 1, x - 1)))
+            Circle()
+                .fill(Color.accentColor)
+                .frame(width: 6, height: 6)
+                .offset(x: max(-3, min(width - 3, x - 3)), y: -2)
+        }
+        .allowsHitTesting(false)
     }
 
     private func selectionOverlay(_ range: MediaClipRange, width: CGFloat, height: CGFloat) -> some View {
@@ -3027,6 +3930,7 @@ extension Notification.Name {
     static let msubInsertCueBeforeRequested = Notification.Name("MSubInsertCueBeforeRequested")
     static let msubInsertCueAfterRequested = Notification.Name("MSubInsertCueAfterRequested")
     static let msubResetSelectedCueRequested = Notification.Name("MSubResetSelectedCueRequested")
+    static let msubAdjustTimingRequested = Notification.Name("MSubAdjustTimingRequested")
     static let msubZoomTimelineInRequested = Notification.Name("MSubZoomTimelineInRequested")
     static let msubZoomTimelineOutRequested = Notification.Name("MSubZoomTimelineOutRequested")
     static let msubToggleTimelineRequested = Notification.Name("MSubToggleTimelineRequested")

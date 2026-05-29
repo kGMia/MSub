@@ -152,7 +152,6 @@
 		000000000000000000000402 /* Package Backend */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
-			basedOnDependencyAnalysis = 0;
 			inputPaths = (
 				"$(SRCROOT)/../../src",
 				"$(SRCROOT)/../../pyproject.toml",
@@ -324,7 +323,7 @@
 				CODE_SIGN_ENTITLEMENTS = MSub.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 13;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -354,7 +353,7 @@
 				CODE_SIGN_ENTITLEMENTS = MSub.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 13;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;

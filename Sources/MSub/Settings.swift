@@ -3,9 +3,22 @@ import Foundation
 @MainActor
 final class TranscriptionSettings: ObservableObject {
     @Published var model = ""
+    @Published var asrEngine: ASREngine = .auto
+    @Published var modelCatalog: [ASRModelInfo] = []
     @Published var format: OutputFormat = .srt
+    @Published var recognitionLanguage: RecognitionLanguage = .auto
+    @Published var senseVoiceUseITN = true
+    @Published var senseVoiceRichInfo = false
+    @Published var mimoMaxTokens = 256
+    @Published var mimoTemperature = 0.0
+    @Published var mimoTopP = 0.95
+    @Published var mimoTopK = 0
     @Published var segmentMode: SegmentMode = .vad
+    @Published var vadEngine: VADEngine = .firered
+    @Published var vadCatalog: [VADModelInfo] = []
     @Published var vadThreshold = -38.0
+    @Published var fireRedVADThreshold = 0.4
+    @Published var fireRedVADSmoothWindow = 5
     @Published var vadMaxSegment = 5.0
     @Published var vadSilence = 0.28
     @Published var vadSearch = 0.75
@@ -26,11 +39,58 @@ final class TranscriptionSettings: ObservableObject {
     @Published var waveformResolution: WaveformResolution = .high
 
     func apply(config: AppConfig) {
+        modelCatalog = config.models ?? []
+        vadCatalog = config.vadEngines ?? []
+        asrEngine = .auto
+        vadEngine = config.defaultVADEngine ?? .firered
         model = config.defaultModel
     }
 
+    var effectiveASREngine: ASREngine {
+        if asrEngine != .auto {
+            return asrEngine
+        }
+        let lowercasedModel = model.lowercased()
+        if lowercasedModel.contains("sensevoice") {
+            return .sensevoice
+        }
+        if lowercasedModel.contains("mimo") {
+            return .mimo
+        }
+        return .fireredasr2
+    }
+
+    var isSenseVoiceActive: Bool {
+        effectiveASREngine == .sensevoice
+    }
+
+    var isMiMoActive: Bool {
+        effectiveASREngine == .mimo
+    }
+
+    var isFireRedVADActive: Bool {
+        segmentMode == .vad && vadEngine != .energy
+    }
+
+    func applyDefaultModelForSelectedEngine() {
+        guard asrEngine != .auto,
+              let modelInfo = modelCatalog.first(where: { $0.engine == asrEngine }) else {
+            return
+        }
+        model = modelInfo.defaultModel
+    }
+
     func resetRecognitionDefaults() {
+        recognitionLanguage = .auto
+        senseVoiceUseITN = true
+        senseVoiceRichInfo = false
+        mimoMaxTokens = 256
+        mimoTemperature = 0.0
+        mimoTopP = 0.95
+        mimoTopK = 0
         vadThreshold = -38.0
+        fireRedVADThreshold = 0.4
+        fireRedVADSmoothWindow = 5
         vadMaxSegment = 5.0
         vadSilence = 0.28
         vadSearch = 0.75
@@ -53,6 +113,8 @@ final class TranscriptionSettings: ObservableObject {
         switch preset {
         case .balanced:
             resetRecognitionDefaults()
+            applyEnginePreset(.balanced)
+            return
         case .dialogue:
             vadThreshold = -39.0
             vadMaxSegment = 4.2
@@ -107,13 +169,48 @@ final class TranscriptionSettings: ObservableObject {
             vadMinSegment = 0.45
             lineChars = 16
         }
+        applyEnginePreset(preset)
+    }
+
+    private func applyEnginePreset(_ preset: RecognitionPreset) {
+        switch effectiveASREngine {
+        case .mimo:
+            mimoTemperature = 0.0
+            mimoTopP = 0.95
+            mimoTopK = 0
+            switch preset {
+            case .balanced:
+                mimoMaxTokens = 256
+            case .dialogue:
+                mimoMaxTokens = 256
+            case .lowVoice:
+                mimoMaxTokens = 320
+            case .noisy:
+                mimoMaxTokens = 256
+            case .fastCut:
+                mimoMaxTokens = 192
+            case .sensitive:
+                mimoMaxTokens = 320
+            }
+        case .sensevoice:
+            senseVoiceUseITN = true
+        case .fireredasr2, .auto:
+            break
+        }
     }
 
     func formFields(includeOutput: Bool) -> [(String, String)] {
         var fields: [(String, String)] = [
             ("model", model),
+            ("asr_engine", asrEngine.rawValue),
+            ("language", recognitionLanguage.rawValue),
+            ("use_itn", senseVoiceUseITN ? "true" : "false"),
+            ("sensevoice_rich_info", senseVoiceRichInfo ? "true" : "false"),
             ("segment_mode", segmentMode.rawValue),
+            ("vad_engine", vadEngine.rawValue),
             ("vad_threshold_db", "\(vadThreshold)"),
+            ("firered_vad_threshold", "\(fireRedVADThreshold)"),
+            ("firered_vad_smooth_window", "\(fireRedVADSmoothWindow)"),
             ("vad_max_segment_seconds", "\(vadMaxSegment)"),
             ("vad_min_silence_seconds", "\(vadSilence)"),
             ("vad_split_search_seconds", "\(vadSearch)"),
@@ -133,6 +230,10 @@ final class TranscriptionSettings: ObservableObject {
                 ("length_penalty", "\(lengthPenalty)"),
                 ("eos_penalty", "\(eosPenalty)"),
                 ("decode_max_len", "\(decodeMaxLen)"),
+                ("mimo_max_tokens", "\(mimoMaxTokens)"),
+                ("mimo_temperature", "\(mimoTemperature)"),
+                ("mimo_top_p", "\(mimoTopP)"),
+                ("mimo_top_k", "\(mimoTopK)"),
                 ("diarize_speakers", diarizeSpeakers ? "true" : "false"),
                 ("diarization_num_speakers", "\(diarizationSpeakerCount)")
             ])

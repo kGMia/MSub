@@ -114,6 +114,10 @@ struct MSubApp: App {
 
                 Divider()
 
+                Button(Copy.text("menu.adjustTiming", language: language)) {
+                    NotificationCenter.default.post(name: .msubAdjustTimingRequested, object: nil)
+                }
+
                 Button(Copy.text("menu.toggleTimeline", language: language)) {
                     NotificationCenter.default.post(name: .msubToggleTimelineRequested, object: nil)
                 }
@@ -246,6 +250,15 @@ struct PreferencesView: View {
                 .labelsHidden()
                 .pickerStyle(.segmented)
             }
+            stackedRow(t("settings.vadEngine")) {
+                Picker("", selection: $settings.vadEngine) {
+                    ForEach(VADEngine.allCases) { engine in
+                        Text(t("settings.vadEngine.\(engine.rawValue)")).tag(engine)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+            }
             Spacer(minLength: 0)
         }
         .padding(14)
@@ -253,6 +266,19 @@ struct PreferencesView: View {
 
     private var modelTab: some View {
         VStack(alignment: .leading, spacing: 10) {
+            stackedRow(t("settings.asrEngine")) {
+                Picker("", selection: $settings.asrEngine) {
+                    ForEach(ASREngine.allCases) { engine in
+                        Text(t("settings.asrEngine.\(engine.rawValue)")).tag(engine)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .onChange(of: settings.asrEngine) { _, _ in
+                    settings.applyDefaultModelForSelectedEngine()
+                }
+            }
+
             Text(t("prefs.modelPath"))
                 .font(.callout.weight(.medium))
             HStack {

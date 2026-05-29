@@ -20,6 +20,9 @@
         }
       }
     },
+    "%@%%" : {
+
+    },
     "action.copy" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -417,13 +420,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Hugging Face model id or local model directory. Use the local FireRedASR2-AED-mlx path to avoid network downloads."
+            "value" : "Hugging Face model id or local model directory. FireRed defaults to the local FireRedASR2-AED-mlx path; SenseVoice defaults to models/SenseVoiceSmall, or loads from Hugging Face if it is not downloaded."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Hugging Face 模型 ID 或本地模型目录。当前建议使用本地 FireRedASR2-AED-mlx 权重路径，避免联网下载。"
+            "value" : "Hugging Face 模型 ID 或本地模型目录。FireRed 默认使用本地 FireRedASR2-AED-mlx；SenseVoice 默认使用 models/SenseVoiceSmall，未下载时会尝试从 Hugging Face 加载。"
           }
         }
       }
@@ -1056,6 +1059,9 @@
           }
         }
       }
+    },
+    "s" : {
+
     },
     "segments.avg" : {
       "extractionState" : "stale",

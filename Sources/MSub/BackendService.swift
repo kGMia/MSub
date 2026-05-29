@@ -4,6 +4,10 @@ import CryptoKit
 
 private struct BackendManifest: Decodable {
     let sourceModelPath: String?
+    let sourceSenseVoiceModelPath: String?
+    let sourceMiMoModelPath: String?
+    let sourceMiMoTokenizerPath: String?
+    let sourceFireRedVADModelPath: String?
     let sourceDiarizationModelPath: String?
 }
 
@@ -42,8 +46,17 @@ final class BackendService: ObservableObject {
             environment["MSUB_MODEL"] = modelPath.path
             environment["HUZ_MODEL"] = modelPath.path
         }
+        if let senseVoiceModelPath = bundledOrWorkspaceSenseVoiceModel(in: workspace) {
+            environment["MSUB_SENSEVOICE_MODEL"] = senseVoiceModelPath.path
+        }
+        if let mimoModelPath = bundledOrWorkspaceMiMoModel(in: workspace) {
+            environment["MSUB_MIMO_MODEL"] = mimoModelPath.path
+        }
         if let diarizationModelPath = bundledOrWorkspaceDiarizationModel(in: workspace) {
             environment["MSUB_DIARIZATION_MODEL"] = diarizationModelPath.path
+        }
+        if let fireRedVADModelPath = bundledOrWorkspaceFireRedVADModel(in: workspace) {
+            environment["MSUB_FIRERED_VAD_MODEL"] = fireRedVADModelPath.path
         }
         environment["MSUB_HOST"] = "127.0.0.1"
         environment["MSUB_PORT"] = "\(port)"
@@ -118,11 +131,15 @@ final class BackendService: ObservableObject {
     func ensureRunning(timeout: TimeInterval = 25.0) async -> Bool {
         let expectedBackendRootPath = expectedBackendRootPath()
         let expectedModelPath = expectedModelPath()
+        let expectedSenseVoiceModelPath = expectedSenseVoiceModelPath()
+        let expectedMiMoModelPath = expectedMiMoModelPath()
         let expectedBackendFingerprint = expectedBackendSourceFingerprint()
         if await healthCheck(
             url: baseURL,
             expectedBackendRootPath: expectedBackendRootPath,
             expectedModelPath: expectedModelPath,
+            expectedSenseVoiceModelPath: expectedSenseVoiceModelPath,
+            expectedMiMoModelPath: expectedMiMoModelPath,
             expectedBackendFingerprint: expectedBackendFingerprint
         ) {
             isRunning = true
@@ -143,6 +160,8 @@ final class BackendService: ObservableObject {
     func waitUntilHealthy(timeout: TimeInterval = 4.0) async -> Bool {
         let expectedBackendRootPath = expectedBackendRootPath()
         let expectedModelPath = expectedModelPath()
+        let expectedSenseVoiceModelPath = expectedSenseVoiceModelPath()
+        let expectedMiMoModelPath = expectedMiMoModelPath()
         let expectedBackendFingerprint = expectedBackendSourceFingerprint()
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
@@ -150,6 +169,8 @@ final class BackendService: ObservableObject {
                 url: baseURL,
                 expectedBackendRootPath: expectedBackendRootPath,
                 expectedModelPath: expectedModelPath,
+                expectedSenseVoiceModelPath: expectedSenseVoiceModelPath,
+                expectedMiMoModelPath: expectedMiMoModelPath,
                 expectedBackendFingerprint: expectedBackendFingerprint
             ) {
                 return true
@@ -195,6 +216,15 @@ final class BackendService: ObservableObject {
         }
     }
 
+    func memoryUsageBytes() -> UInt64? {
+        guard let pid = process?.processIdentifier, pid > 0 else { return nil }
+        var info = proc_taskinfo()
+        let size = Int32(MemoryLayout<proc_taskinfo>.stride)
+        let result = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &info, size)
+        guard result > 0 else { return nil }
+        return info.pti_resident_size
+    }
+
     private func requestBackendShutdown(waitForResponse: Bool = false) {
         var request = URLRequest(url: baseURL.appending(path: "/api/shutdown"))
         request.httpMethod = "POST"
@@ -215,6 +245,8 @@ final class BackendService: ObservableObject {
         url baseURL: URL,
         expectedBackendRootPath: String?,
         expectedModelPath: String?,
+        expectedSenseVoiceModelPath: String?,
+        expectedMiMoModelPath: String?,
         expectedBackendFingerprint: String?
     ) async -> Bool {
         do {
@@ -239,14 +271,24 @@ final class BackendService: ObservableObject {
                     return false
                 }
             }
-            guard let expectedModelPath else { return true }
-            return await configMatchesExpectedModel(baseURL: baseURL, expectedModelPath: expectedModelPath)
+            return await configMatchesExpectedModels(
+                baseURL: baseURL,
+                expectedModelPath: expectedModelPath,
+                expectedSenseVoiceModelPath: expectedSenseVoiceModelPath,
+                expectedMiMoModelPath: expectedMiMoModelPath
+            )
         } catch {
             return false
         }
     }
 
-    private func configMatchesExpectedModel(baseURL: URL, expectedModelPath: String) async -> Bool {
+    private func configMatchesExpectedModels(
+        baseURL: URL,
+        expectedModelPath: String?,
+        expectedSenseVoiceModelPath: String?,
+        expectedMiMoModelPath: String?
+    ) async -> Bool {
+        guard expectedModelPath != nil || expectedSenseVoiceModelPath != nil || expectedMiMoModelPath != nil else { return true }
         do {
             let url = baseURL.appending(path: "/api/config")
             var request = URLRequest(url: url)
@@ -254,11 +296,32 @@ final class BackendService: ObservableObject {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse,
                   (200..<300).contains(http.statusCode),
-                  let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let defaultModel = object["defaultModel"] as? String else {
+                  let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 return false
             }
-            return pathsReferToSameFile(defaultModel, expectedModelPath)
+            if let expectedModelPath {
+                guard let defaultModel = object["defaultModel"] as? String,
+                      pathsReferToSameFile(defaultModel, expectedModelPath) else {
+                    return false
+                }
+            }
+            if let expectedMiMoModelPath {
+                guard let models = object["models"] as? [[String: Any]],
+                      let mimo = models.first(where: { ($0["engine"] as? String) == "mimo" }),
+                      let defaultModel = mimo["defaultModel"] as? String,
+                      pathsReferToSameFile(defaultModel, expectedMiMoModelPath) else {
+                    return false
+                }
+            }
+            if let expectedSenseVoiceModelPath {
+                guard let models = object["models"] as? [[String: Any]],
+                      let senseVoice = models.first(where: { ($0["engine"] as? String) == "sensevoice" }),
+                      let defaultModel = senseVoice["defaultModel"] as? String,
+                      pathsReferToSameFile(defaultModel, expectedSenseVoiceModelPath) else {
+                    return false
+                }
+            }
+            return true
         } catch {
             return false
         }
@@ -273,6 +336,22 @@ final class BackendService: ObservableObject {
     private func expectedModelPath() -> String? {
         guard let workspace = findWorkspaceRoot(),
               let modelURL = bundledOrWorkspaceModel(in: workspace) else {
+            return nil
+        }
+        return modelURL.standardizedFileURL.path
+    }
+
+    private func expectedMiMoModelPath() -> String? {
+        guard let workspace = findWorkspaceRoot(),
+              let modelURL = bundledOrWorkspaceMiMoModel(in: workspace) else {
+            return nil
+        }
+        return modelURL.standardizedFileURL.path
+    }
+
+    private func expectedSenseVoiceModelPath() -> String? {
+        guard let workspace = findWorkspaceRoot(),
+              let modelURL = bundledOrWorkspaceSenseVoiceModel(in: workspace) else {
             return nil
         }
         return modelURL.standardizedFileURL.path
@@ -497,6 +576,51 @@ final class BackendService: ObservableObject {
         return nil
     }
 
+    private func bundledOrWorkspaceMiMoModel(in workspace: URL) -> URL? {
+        if let value = ProcessInfo.processInfo.environment["MSUB_MIMO_MODEL"], !value.isEmpty {
+            let modelURL = URL(fileURLWithPath: value).standardizedFileURL
+            if isValidModelDirectory(modelURL) {
+                return modelURL
+            }
+        }
+
+        let modelPath = workspace.appending(path: "models/MiMo-V2.5-ASR-MLX-4bit")
+        if isValidModelDirectory(modelPath), isValidMiMoTokenizerBeside(modelPath) {
+            return modelPath
+        }
+
+        if isBundledBackend(workspace),
+           let sourceModelPath = sourceMiMoModelPathFromManifest(in: workspace),
+           isValidModelDirectory(sourceModelPath),
+           isValidMiMoTokenizerPathFromManifest(in: workspace, modelURL: sourceModelPath) {
+            return sourceModelPath
+        }
+
+        return nil
+    }
+
+    private func bundledOrWorkspaceSenseVoiceModel(in workspace: URL) -> URL? {
+        if let value = ProcessInfo.processInfo.environment["MSUB_SENSEVOICE_MODEL"], !value.isEmpty {
+            let modelURL = URL(fileURLWithPath: value).standardizedFileURL
+            if isValidModelDirectory(modelURL) {
+                return modelURL
+            }
+        }
+
+        let modelPath = workspace.appending(path: "models/SenseVoiceSmall")
+        if isValidModelDirectory(modelPath) {
+            return modelPath
+        }
+
+        if isBundledBackend(workspace),
+           let sourceModelPath = sourceSenseVoiceModelPathFromManifest(in: workspace),
+           isValidModelDirectory(sourceModelPath) {
+            return sourceModelPath
+        }
+
+        return nil
+    }
+
     private func bundledOrWorkspaceDiarizationModel(in workspace: URL) -> URL? {
         for key in ["MSUB_DIARIZATION_MODEL", "PYANNOTE_MODEL"] {
             if let value = ProcessInfo.processInfo.environment[key], !value.isEmpty {
@@ -521,6 +645,28 @@ final class BackendService: ObservableObject {
         return nil
     }
 
+    private func bundledOrWorkspaceFireRedVADModel(in workspace: URL) -> URL? {
+        if let value = ProcessInfo.processInfo.environment["MSUB_FIRERED_VAD_MODEL"], !value.isEmpty {
+            let modelURL = URL(fileURLWithPath: value).standardizedFileURL
+            if isValidFireRedVADModelDirectory(modelURL) {
+                return modelURL
+            }
+        }
+
+        let modelPath = workspace.appending(path: "models/FireRedVAD")
+        if isValidFireRedVADModelDirectory(modelPath) {
+            return modelPath
+        }
+
+        if isBundledBackend(workspace),
+           let sourceModelPath = sourceFireRedVADModelPathFromManifest(in: workspace),
+           isValidFireRedVADModelDirectory(sourceModelPath) {
+            return sourceModelPath
+        }
+
+        return nil
+    }
+
     private func sourceModelPathFromManifest(in workspace: URL) -> URL? {
         let manifestURL = workspace.appending(path: "backend-manifest.json")
         guard let data = try? Data(contentsOf: manifestURL),
@@ -530,6 +676,43 @@ final class BackendService: ObservableObject {
             return nil
         }
         return URL(fileURLWithPath: path).standardizedFileURL
+    }
+
+    private func sourceMiMoModelPathFromManifest(in workspace: URL) -> URL? {
+        let manifestURL = workspace.appending(path: "backend-manifest.json")
+        guard let data = try? Data(contentsOf: manifestURL),
+              let manifest = try? JSONDecoder().decode(BackendManifest.self, from: data),
+              let path = manifest.sourceMiMoModelPath,
+              !path.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: path).standardizedFileURL
+    }
+
+    private func sourceSenseVoiceModelPathFromManifest(in workspace: URL) -> URL? {
+        let manifestURL = workspace.appending(path: "backend-manifest.json")
+        guard let data = try? Data(contentsOf: manifestURL),
+              let manifest = try? JSONDecoder().decode(BackendManifest.self, from: data),
+              let path = manifest.sourceSenseVoiceModelPath,
+              !path.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: path).standardizedFileURL
+    }
+
+    private func isValidMiMoTokenizerPathFromManifest(in workspace: URL, modelURL: URL) -> Bool {
+        let manifestURL = workspace.appending(path: "backend-manifest.json")
+        guard let data = try? Data(contentsOf: manifestURL),
+              let manifest = try? JSONDecoder().decode(BackendManifest.self, from: data),
+              let path = manifest.sourceMiMoTokenizerPath,
+              !path.isEmpty else {
+            return isValidModelDirectory(modelURL.deletingLastPathComponent().appending(path: "MiMo-Audio-Tokenizer"))
+        }
+        return isValidModelDirectory(URL(fileURLWithPath: path).standardizedFileURL)
+    }
+
+    private func isValidMiMoTokenizerBeside(_ modelURL: URL) -> Bool {
+        isValidModelDirectory(modelURL.deletingLastPathComponent().appending(path: "MiMo-Audio-Tokenizer"))
     }
 
     private func sourceDiarizationModelPathFromManifest(in workspace: URL) -> URL? {
@@ -543,19 +726,38 @@ final class BackendService: ObservableObject {
         return URL(fileURLWithPath: path).standardizedFileURL
     }
 
+    private func sourceFireRedVADModelPathFromManifest(in workspace: URL) -> URL? {
+        let manifestURL = workspace.appending(path: "backend-manifest.json")
+        guard let data = try? Data(contentsOf: manifestURL),
+              let manifest = try? JSONDecoder().decode(BackendManifest.self, from: data),
+              let path = manifest.sourceFireRedVADModelPath,
+              !path.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: path).standardizedFileURL
+    }
+
     private func isValidModelDirectory(_ url: URL) -> Bool {
-        let requiredFiles = [
-            "model.safetensors",
-            "config.json",
-            "train_bpe1000.model",
-        ]
-        return requiredFiles.allSatisfy {
-            FileManager.default.fileExists(atPath: url.appending(path: $0).path)
+        guard FileManager.default.fileExists(atPath: url.appending(path: "config.json").path),
+              let files = try? FileManager.default.contentsOfDirectory(
+                  at: url,
+                  includingPropertiesForKeys: nil
+              ) else {
+            return false
+        }
+        return files.contains { file in
+            let ext = file.pathExtension.lowercased()
+            return ext == "safetensors" || ext == "npz"
         }
     }
 
     private func isValidDiarizationModelDirectory(_ url: URL) -> Bool {
         FileManager.default.fileExists(atPath: url.appending(path: "config.yaml").path)
+    }
+
+    private func isValidFireRedVADModelDirectory(_ url: URL) -> Bool {
+        FileManager.default.fileExists(atPath: url.appending(path: "VAD/model.pth.tar").path)
+            && FileManager.default.fileExists(atPath: url.appending(path: "VAD/cmvn.ark").path)
     }
 
     private func appendLog(_ text: String) {

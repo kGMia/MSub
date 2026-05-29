@@ -1,8 +1,73 @@
 import Foundation
 
+enum ASREngine: String, CaseIterable, Codable, Identifiable {
+    case auto
+    case fireredasr2
+    case sensevoice
+    case mimo
+
+    var id: String { rawValue }
+
+    init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = ASREngine(rawValue: value) ?? .auto
+    }
+}
+
+enum RecognitionLanguage: String, CaseIterable, Codable, Identifiable {
+    case auto
+    case zh
+    case en
+    case yue
+    case ja
+    case ko
+    case nospeech
+
+    var id: String { rawValue }
+}
+
+enum VADEngine: String, CaseIterable, Codable, Identifiable {
+    case auto
+    case firered
+    case energy
+
+    var id: String { rawValue }
+
+    init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = VADEngine(rawValue: value) ?? .auto
+    }
+}
+
 struct AppConfig: Decodable {
     let defaultModel: String
     let defaultOutputDir: String
+    let defaultASREngine: ASREngine?
+    let models: [ASRModelInfo]?
+    let defaultVADEngine: VADEngine?
+    let vadEngines: [VADModelInfo]?
+}
+
+struct ASRModelInfo: Decodable, Identifiable {
+    let engine: ASREngine
+    let title: String
+    let defaultModel: String
+    let localModel: String
+    let localModelAvailable: Bool
+    let supports: [String]
+
+    var id: ASREngine { engine }
+}
+
+struct VADModelInfo: Decodable, Identifiable {
+    let engine: VADEngine
+    let title: String
+    let defaultModel: String?
+    let localModel: String?
+    let localModelAvailable: Bool
+    let supports: [String]
+
+    var id: VADEngine { engine }
 }
 
 struct SegmentPreview: Decodable {

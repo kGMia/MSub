@@ -18,6 +18,32 @@ struct SubtitleCue: Identifiable, Codable, Equatable {
     }
 }
 
+private struct TimelineCenterRequest: Equatable {
+    let cueID: SubtitleCue.ID
+    let token = UUID()
+}
+
+enum TimingAdjustmentMode: String, CaseIterable, Identifiable {
+    case shift
+    case closeGaps
+
+    var id: String { rawValue }
+}
+
+private struct SubtitleUndoSnapshot: Equatable {
+    let cues: [SubtitleCue]
+    let selectedCueID: SubtitleCue.ID?
+    let speakerColors: [String: String]
+}
+
+private final class SubtitleUndoController: ObservableObject {
+    var restoreHandler: ((SubtitleUndoSnapshot, String) -> Void)?
+
+    func restore(_ snapshot: SubtitleUndoSnapshot, actionName: String) {
+        restoreHandler?(snapshot, actionName)
+    }
+}
+
 enum SubtitleDocument {
     static func parse(_ text: String, format: OutputFormat) -> [SubtitleCue] {
         switch format {
@@ -263,6 +289,7 @@ enum SubtitleDocument {
         guard let closeIndex = text.firstIndex(of: closing) else { return nil }
         let candidate = String(text[text.index(after: text.startIndex)..<closeIndex])
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !isKnownAudioEventLabel(candidate) else { return nil }
         guard isPlausibleSpeakerLabel(candidate) else { return nil }
         let body = String(text[text.index(after: closeIndex)...])
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -274,6 +301,7 @@ enum SubtitleDocument {
         guard (1...40).contains(label.count) else { return false }
         let lowered = label.lowercased()
         guard lowered != "http", lowered != "https" else { return false }
+        guard !isKnownAudioEventLabel(label) else { return false }
         let allowed = CharacterSet.letters
             .union(.decimalDigits)
             .union(CharacterSet(charactersIn: " _.-"))
@@ -296,6 +324,35 @@ enum SubtitleDocument {
             || lower.contains("说话人")
             || lower.contains("讲话人")
             || lower.contains("話者")
+    }
+
+    private static func isKnownAudioEventLabel(_ label: String) -> Bool {
+        let normalized = label
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: "_", with: " ")
+        let compact = normalized
+            .split(separator: " ")
+            .joined()
+        return [
+            "speech",
+            "applause",
+            "clapping",
+            "bgm",
+            "music",
+            "laughter",
+            "laugh",
+            "cry",
+            "crying",
+            "sneeze",
+            "sneezing",
+            "breath",
+            "breathing",
+            "cough",
+            "coughing",
+            "noise"
+        ].contains(compact)
     }
 
     private static func parseTime(_ raw: String) -> Double? {
@@ -357,6 +414,54 @@ struct SubtitleTermFrequency: Identifiable, Equatable, Sendable {
     let count: Int
 
     var id: String { term }
+}
+
+struct SubtitleEmotionFrequency: Identifiable, Equatable, Sendable {
+    let emoji: String
+    let count: Int
+    let ratio: Double
+
+    var id: String { emoji }
+}
+
+enum SubtitleEmotionStats {
+    static let emojiSet: Set<String> = [
+        "\u{1F60A}", // 😊 happy
+        "\u{1F622}", // 😢 sad
+        "\u{1F620}", // 😠 angry
+        "\u{1F610}", // 😐 neutral
+        "\u{1F628}", // 😨 fearful
+        "\u{1F922}", // 🤢 disgusted
+        "\u{1F62E}", // 😮 surprised
+        "\u{1F3AD}"  // 🎭 other
+    ]
+
+    static func leadingEmotionEmoji(in text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = trimmed.first else { return nil }
+        let candidate = String(first)
+        return emojiSet.contains(candidate) ? candidate : nil
+    }
+
+    static func frequencies(in cues: [SubtitleCue]) -> [SubtitleEmotionFrequency] {
+        var counts: [String: Int] = [:]
+        var matched = 0
+        for cue in cues {
+            guard let emoji = leadingEmotionEmoji(in: cue.text) else { continue }
+            counts[emoji, default: 0] += 1
+            matched += 1
+        }
+        guard matched > 0 else { return [] }
+        let total = Double(matched)
+        return counts
+            .map { SubtitleEmotionFrequency(emoji: $0.key, count: $0.value, ratio: Double($0.value) / total) }
+            .sorted {
+                if $0.count == $1.count {
+                    return $0.emoji < $1.emoji
+                }
+                return $0.count > $1.count
+            }
+    }
 }
 
 enum SubtitleTextStats {
@@ -733,11 +838,19 @@ struct SubtitleEditorPanel: View {
     @EnvironmentObject private var api: APIClient
     @EnvironmentObject private var backend: BackendService
     @EnvironmentObject private var settings: TranscriptionSettings
+    @Environment(\.undoManager) private var undoManager
 
+    @StateObject private var undoController = SubtitleUndoController()
     @State private var waveform = WaveformSamples([])
     @State private var isLoadingWaveform = false
     @State private var timelineZoom = 1.0
-    @State private var timelineZoomAnchorFraction: Double?
+    @State private var isTimelineZoomSliderDragging = false
+    @State private var timelineCenterRequest: TimelineCenterRequest?
+    @State private var timelineCueDragUndoSnapshot: SubtitleUndoSnapshot?
+    @State private var isTimingAdjustmentPresented = false
+    @State private var timingAdjustmentMode: TimingAdjustmentMode = .shift
+    @State private var timingShiftSeconds = 0.0
+    @State private var timingGapSeconds = 0.0
     @State private var findText = ""
     @State private var replacementText = ""
     @State private var matchCase = false
@@ -862,6 +975,9 @@ struct SubtitleEditorPanel: View {
         .task(id: slot.url) {
             await loadWaveformIfNeeded()
         }
+        .onAppear {
+            configureUndoController()
+        }
         .onChange(of: isTimelineExpanded) { _, newValue in
             guard newValue else { return }
             scheduleWaveformReload(debounce: false)
@@ -915,6 +1031,10 @@ struct SubtitleEditorPanel: View {
             guard let cueID = slot.selectedCueID, canResetCue(cueID) else { return }
             resetCue(cueID)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .msubAdjustTimingRequested)) { _ in
+            guard !slot.cues.isEmpty else { return }
+            isTimingAdjustmentPresented = true
+        }
         .onReceive(NotificationCenter.default.publisher(for: .msubToggleTimelineRequested)) { _ in
             withAnimation(.easeInOut(duration: 0.18)) {
                 isTimelineExpanded.toggle()
@@ -937,6 +1057,81 @@ struct SubtitleEditorPanel: View {
             waveformReloadTask?.cancel()
             syncPreviewText(for: slot.cues)
         }
+        .sheet(isPresented: $isTimingAdjustmentPresented) {
+            TimingAdjustmentSheet(
+                language: language,
+                cueCount: slot.cues.count,
+                mode: $timingAdjustmentMode,
+                shiftSeconds: $timingShiftSeconds,
+                gapSeconds: $timingGapSeconds,
+                apply: applyTimingAdjustment
+            )
+        }
+    }
+
+    private func configureUndoController() {
+        undoController.restoreHandler = { snapshot, actionName in
+            restoreUndoSnapshot(snapshot, actionName: actionName)
+        }
+    }
+
+    private func makeUndoSnapshot() -> SubtitleUndoSnapshot {
+        SubtitleUndoSnapshot(
+            cues: slot.cues,
+            selectedCueID: slot.selectedCueID,
+            speakerColors: slot.speakerColors
+        )
+    }
+
+    private func registerUndo(_ actionNameKey: String, before snapshot: SubtitleUndoSnapshot? = nil) {
+        guard let undoManager else { return }
+        let snapshot = snapshot ?? makeUndoSnapshot()
+        undoManager.registerUndo(withTarget: undoController) { controller in
+            controller.restore(snapshot, actionName: actionNameKey)
+        }
+        undoManager.setActionName(Copy.text(actionNameKey, language: language))
+    }
+
+    private func restoreUndoSnapshot(_ snapshot: SubtitleUndoSnapshot, actionName: String) {
+        let redoSnapshot = makeUndoSnapshot()
+        applyUndoSnapshot(snapshot)
+        guard let undoManager else { return }
+        undoManager.registerUndo(withTarget: undoController) { controller in
+            controller.restore(redoSnapshot, actionName: actionName)
+        }
+        undoManager.setActionName(Copy.text(actionName, language: language))
+    }
+
+    private func applyUndoSnapshot(_ snapshot: SubtitleUndoSnapshot) {
+        previewSyncTask?.cancel()
+        termStatsTask?.cancel()
+        timelineCueDragUndoSnapshot = nil
+        slot.cues = snapshot.cues
+        slot.speakerColors = snapshot.speakerColors
+        if let selectedCueID = snapshot.selectedCueID,
+           snapshot.cues.contains(where: { $0.id == selectedCueID }) {
+            slot.selectedCueID = selectedCueID
+        } else {
+            slot.selectedCueID = snapshot.cues.first?.id
+        }
+        selectedTextRange = nil
+        syncPreviewText(for: slot.cues)
+        scheduleTermStatsSync(for: slot.cues)
+    }
+
+    private func registerTimelineCueDragUndoIfNeeded() {
+        if timelineCueDragUndoSnapshot == nil {
+            timelineCueDragUndoSnapshot = makeUndoSnapshot()
+        }
+    }
+
+    private func finishTimelineCueDragUndo() {
+        guard let snapshot = timelineCueDragUndoSnapshot else { return }
+        timelineCueDragUndoSnapshot = nil
+        if snapshot != makeUndoSnapshot() {
+            registerUndo("undo.adjustTiming", before: snapshot)
+        }
+        scheduleCueTimingSync(for: slot.cues)
     }
 
     private var timecodeLabel: String {
@@ -987,8 +1182,12 @@ struct SubtitleEditorPanel: View {
             let terms = await Task.detached(priority: .utility) {
                 SubtitleTextStats.topTerms(in: text, limit: 8)
             }.value
+            let emotions = await Task.detached(priority: .utility) { [cues] in
+                SubtitleEmotionStats.frequencies(in: cues)
+            }.value
             guard !Task.isCancelled else { return }
             slot.frequentTerms = terms
+            slot.emotionFrequencies = emotions
         }
     }
 
@@ -1037,9 +1236,9 @@ struct SubtitleEditorPanel: View {
 
                     TimelineZoomSlider(
                         value: $timelineZoom,
-                        anchorFraction: $timelineZoomAnchorFraction,
+                        isDragging: $isTimelineZoomSliderDragging,
                         range: 1...maxTimelineZoom,
-                        step: 0.5
+                        step: 0
                     )
                     .frame(maxWidth: 210)
                     .accessibilityLabel(Copy.text("editor.zoom", language: language))
@@ -1070,6 +1269,15 @@ struct SubtitleEditorPanel: View {
                     .help(Copy.text("editor.playCurrent.help", language: language))
 
                     Button {
+                        insertCueAtPlayhead()
+                    } label: {
+                        Image(systemName: "plus.rectangle")
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel(Copy.text("editor.addAtPlayhead", language: language))
+                    .help(Copy.text("editor.addAtPlayhead.help", language: language))
+
+                    Button {
                         playback.togglePlayPause()
                     } label: {
                         Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
@@ -1088,7 +1296,8 @@ struct SubtitleEditorPanel: View {
                     zoom: $timelineZoom,
                     zoomRange: 1...maxTimelineZoom,
                     currentTime: playback.currentTime,
-                    sliderAnchorFraction: $timelineZoomAnchorFraction,
+                    centerRequest: timelineCenterRequest,
+                    isSliderZooming: $isTimelineZoomSliderDragging,
                     activeSpeakerName: activeTimelineSpeakerName,
                     speakerColors: settings.timelineSpeakerMarkersEnabled ? slot.speakerColors : [:],
                     language: language,
@@ -1098,6 +1307,8 @@ struct SubtitleEditorPanel: View {
                     onScrub: { time in
                         playback.scrub(to: time)
                     },
+                    onCueTimingEditBegan: registerTimelineCueDragUndoIfNeeded,
+                    onCueTimingEditEnded: finishTimelineCueDragUndo,
                     cueActions: timelineCueActions
                 )
                 .frame(height: 128)
@@ -1136,7 +1347,7 @@ struct SubtitleEditorPanel: View {
                             cue: $cue,
                             isSelected: cue.id == slot.selectedCueID,
                             canReset: canResetCue(cue.id),
-                            select: { slot.selectedCueID = cue.id },
+                            select: { selectCueFromBlock(cue.id) },
                             reset: { resetCue(cue.id) },
                             duplicate: { duplicateCue(cue.id) },
                             insertBefore: { insertCue(before: cue.id) },
@@ -1686,7 +1897,11 @@ struct SubtitleEditorPanel: View {
             },
             set: { newValue in
                 guard let index = cueIndex(for: cueID) else { return }
-                slot.cues[index].start = max(0, min(newValue, slot.cues[index].end - 0.05))
+                let bounded = max(0, min(newValue, slot.cues[index].end - 0.05))
+                guard bounded != slot.cues[index].start else { return }
+                let snapshot = makeUndoSnapshot()
+                slot.cues[index].start = bounded
+                registerUndo("undo.adjustTiming", before: snapshot)
                 scheduleCueTimingSync(for: slot.cues)
             }
         )
@@ -1700,15 +1915,19 @@ struct SubtitleEditorPanel: View {
             },
             set: { newValue in
                 guard let index = cueIndex(for: cueID) else { return }
+                guard newValue != slot.cues[index].text else { return }
+                let snapshot = makeUndoSnapshot()
                 slot.cues[index].text = newValue
+                registerUndo("undo.editSubtitle", before: snapshot)
                 schedulePreviewTextSync(for: slot.cues)
                 scheduleTermStatsSync(for: slot.cues)
             }
         )
     }
 
-    private func assignSpeaker(_ speaker: String?, to cueID: SubtitleCue.ID) {
+    private func assignSpeaker(_ speaker: String?, to cueID: SubtitleCue.ID, shouldRegisterUndo: Bool = true) {
         guard let index = cueIndex(for: cueID) else { return }
+        let snapshot = makeUndoSnapshot()
         let normalized = SubtitleDocument.normalizedSpeakerName(speaker)
         var didChange = false
         if SubtitleDocument.normalizedSpeakerName(slot.cues[index].speaker) != normalized {
@@ -1719,6 +1938,9 @@ struct SubtitleEditorPanel: View {
             didChange = true
         }
         if didChange {
+            if shouldRegisterUndo {
+                registerUndo("undo.editSpeaker", before: snapshot)
+            }
             schedulePreviewTextSync(for: slot.cues)
             scheduleTermStatsSync(for: slot.cues)
         }
@@ -1726,6 +1948,7 @@ struct SubtitleEditorPanel: View {
 
     private func renameSpeaker(_ oldSpeaker: String, to newSpeaker: String?) {
         guard let old = SubtitleDocument.normalizedSpeakerName(oldSpeaker) else { return }
+        let snapshot = makeUndoSnapshot()
         let normalizedNew = SubtitleDocument.normalizedSpeakerName(newSpeaker)
         let oldColor = slot.speakerColors[old]
         let targetColor: String?
@@ -1752,6 +1975,9 @@ struct SubtitleEditorPanel: View {
                 slot.cues[index].text = fontColoredText(slot.cues[index].text, hex: targetColor)
             }
             didChange = true
+        }
+        if snapshot != makeUndoSnapshot() {
+            registerUndo("undo.editSpeaker", before: snapshot)
         }
         if didChange {
             schedulePreviewTextSync(for: slot.cues)
@@ -1787,11 +2013,12 @@ struct SubtitleEditorPanel: View {
     }
 
     private func applySpeakerColor(_ color: Color, for cueID: SubtitleCue.ID) {
+        let snapshot = makeUndoSnapshot()
         var targetSpeaker = activeSpeakerNameForColor(cueID)
         if speakerEditOriginalName == nil,
            let typedSpeaker = SubtitleDocument.normalizedSpeakerName(speakerEditText),
            cueIndex(for: cueID) != nil {
-            assignSpeaker(typedSpeaker, to: cueID)
+            assignSpeaker(typedSpeaker, to: cueID, shouldRegisterUndo: false)
             speakerEditOriginalName = typedSpeaker
             targetSpeaker = typedSpeaker
         }
@@ -1806,6 +2033,9 @@ struct SubtitleEditorPanel: View {
             guard updated != slot.cues[index].text else { continue }
             slot.cues[index].text = updated
             didChange = true
+        }
+        if snapshot != makeUndoSnapshot() {
+            registerUndo("undo.editSpeaker", before: snapshot)
         }
         if didChange {
             schedulePreviewTextSync(for: slot.cues)
@@ -1877,7 +2107,11 @@ struct SubtitleEditorPanel: View {
             set: { newValue in
                 guard let index = cueIndex(for: cueID) else { return }
                 let upper = duration > 0 ? duration : newValue
-                slot.cues[index].end = max(slot.cues[index].start + 0.05, min(upper, newValue))
+                let bounded = max(slot.cues[index].start + 0.05, min(upper, newValue))
+                guard bounded != slot.cues[index].end else { return }
+                let snapshot = makeUndoSnapshot()
+                slot.cues[index].end = bounded
+                registerUndo("undo.adjustTiming", before: snapshot)
                 scheduleCueTimingSync(for: slot.cues)
             }
         )
@@ -1936,12 +2170,29 @@ struct SubtitleEditorPanel: View {
         slot.selectedCueID = slot.cues[selectedCueIndex + 1].id
     }
 
+    private func selectCueFromBlock(_ cueID: SubtitleCue.ID) {
+        slot.selectedCueID = cueID
+        timelineCenterRequest = TimelineCenterRequest(cueID: cueID)
+    }
+
     private func insertCueAfterSelection() {
         if let selectedCueID = slot.selectedCueID {
             insertCue(after: selectedCueID)
         } else {
             insertCue(at: slot.cues.count, start: 0, end: 2, text: "")
         }
+    }
+
+    private func insertCueAtPlayhead() {
+        let timelineDuration = max(duration, 0.05)
+        let start = min(max(0, playback.currentTime), max(0, timelineDuration - 0.05))
+        let insertionIndex = slot.cues.firstIndex { $0.start > start } ?? slot.cues.count
+        let next = insertionIndex < slot.cues.count ? slot.cues[insertionIndex] : nil
+        var end = min(start + 2.0, max(start + 0.05, timelineDuration))
+        if let next, next.start > start + 0.2 {
+            end = min(end, next.start - 0.05)
+        }
+        insertCue(at: insertionIndex, start: start, end: max(start + 0.05, end), text: "")
     }
 
     private var canResetSelectedCue: Bool {
@@ -1965,6 +2216,60 @@ struct SubtitleEditorPanel: View {
             closeGap: { closeGap(around: $0) },
             delete: { deleteCue($0) }
         )
+    }
+
+    private func applyTimingAdjustment() {
+        switch timingAdjustmentMode {
+        case .shift:
+            shiftAllCues(by: timingShiftSeconds)
+        case .closeGaps:
+            closeAllGaps(targetGap: timingGapSeconds)
+        }
+    }
+
+    private func shiftAllCues(by seconds: Double) {
+        guard !slot.cues.isEmpty, seconds.isFinite else { return }
+        let earliestStart = slot.cues.map(\.start).min() ?? 0
+        let safeOffset = max(seconds, -earliestStart)
+        guard abs(safeOffset) > 0.0001 else { return }
+        let snapshot = makeUndoSnapshot()
+        previewSyncTask?.cancel()
+        slot.cues = SubtitleDocument.normalize(slot.cues.map { cue in
+            var copy = cue
+            copy.start += safeOffset
+            copy.end += safeOffset
+            return copy
+        })
+        registerUndo("undo.adjustTiming", before: snapshot)
+        syncPreviewText(for: slot.cues)
+    }
+
+    private func closeAllGaps(targetGap rawGap: Double) {
+        guard !slot.cues.isEmpty else { return }
+        let targetGap = max(0, rawGap.isFinite ? rawGap : 0)
+        let snapshot = makeUndoSnapshot()
+        previewSyncTask?.cancel()
+        let normalized = SubtitleDocument.normalize(slot.cues)
+        var adjusted: [SubtitleCue] = []
+        var previousEnd: Double?
+        for var cue in normalized {
+            let cueDuration = max(0.05, cue.end - cue.start)
+            if let previousEnd {
+                let desiredStart = previousEnd + targetGap
+                if cue.start > desiredStart {
+                    cue.start = desiredStart
+                    cue.end = desiredStart + cueDuration
+                }
+            }
+            cue.end = max(cue.start + 0.05, cue.end)
+            adjusted.append(cue)
+            previousEnd = cue.end
+        }
+        slot.cues = SubtitleDocument.normalize(adjusted)
+        if snapshot != makeUndoSnapshot() {
+            registerUndo("undo.adjustTiming", before: snapshot)
+        }
+        syncPreviewText(for: slot.cues)
     }
 
     private func canResetCue(_ cueID: SubtitleCue.ID) -> Bool {
@@ -2050,10 +2355,14 @@ struct SubtitleEditorPanel: View {
                     .joined(separator: "\n")
             }
             guard let updatedIndex = slot.cues.firstIndex(where: { $0.id == cueID }) else { return }
+            let snapshot = makeUndoSnapshot()
             slot.cues[updatedIndex].text = combined
             if uniqueParsedSpeakers.count == 1 {
                 slot.cues[updatedIndex].speaker = uniqueParsedSpeakers.first
                 _ = applyStoredSpeakerColor(toCueAt: updatedIndex)
+            }
+            if snapshot != makeUndoSnapshot() {
+                registerUndo("undo.editSubtitle", before: snapshot)
             }
             schedulePreviewTextSync(for: slot.cues)
             scheduleTermStatsSync(for: slot.cues)
@@ -2142,6 +2451,7 @@ struct SubtitleEditorPanel: View {
     private func resetCue(_ cueID: SubtitleCue.ID) {
         guard let selectedCueIndex = cueIndex(for: cueID),
               let original = originalCue(for: cueID) else { return }
+        let snapshot = makeUndoSnapshot()
         previewSyncTask?.cancel()
         slot.cues[selectedCueIndex].start = original.start
         slot.cues[selectedCueIndex].end = original.end
@@ -2150,6 +2460,9 @@ struct SubtitleEditorPanel: View {
         slot.cues[selectedCueIndex].speaker = original.speaker
         slot.cues = SubtitleDocument.normalize(slot.cues)
         slot.selectedCueID = original.id
+        if snapshot != makeUndoSnapshot() {
+            registerUndo("undo.resetCue", before: snapshot)
+        }
         scheduleCueTimingSync(for: slot.cues)
         scheduleTermStatsSync(for: slot.cues)
     }
@@ -2195,6 +2508,7 @@ struct SubtitleEditorPanel: View {
         confidence: Double? = nil,
         speaker: String? = nil
     ) {
+        let snapshot = makeUndoSnapshot()
         previewSyncTask?.cancel()
         var cue = SubtitleCue(
             index: insertionIndex + 1,
@@ -2212,12 +2526,14 @@ struct SubtitleEditorPanel: View {
         slot.cues.insert(cue, at: safeIndex)
         slot.cues = SubtitleDocument.normalize(slot.cues)
         slot.selectedCueID = cue.id
+        registerUndo("undo.insertCue", before: snapshot)
         scheduleCueTimingSync(for: slot.cues)
         scheduleTermStatsSync(for: slot.cues)
     }
 
     private func closeGap(around cueID: SubtitleCue.ID) {
         guard let index = cueIndex(for: cueID) else { return }
+        let snapshot = makeUndoSnapshot()
         previewSyncTask?.cancel()
         if index > 0 {
             slot.cues[index].start = slot.cues[index - 1].end
@@ -2230,11 +2546,15 @@ struct SubtitleEditorPanel: View {
         }
         slot.cues = SubtitleDocument.normalize(slot.cues)
         slot.selectedCueID = cueID
+        if snapshot != makeUndoSnapshot() {
+            registerUndo("undo.adjustTiming", before: snapshot)
+        }
         scheduleCueTimingSync(for: slot.cues)
     }
 
     private func deleteCue(_ cueID: SubtitleCue.ID) {
         guard let index = cueIndex(for: cueID) else { return }
+        let snapshot = makeUndoSnapshot()
         previewSyncTask?.cancel()
         slot.cues.remove(at: index)
         slot.cues = SubtitleDocument.normalize(slot.cues)
@@ -2244,6 +2564,7 @@ struct SubtitleEditorPanel: View {
             let nextIndex = min(index, slot.cues.count - 1)
             slot.selectedCueID = slot.cues[nextIndex].id
         }
+        registerUndo("undo.deleteCue", before: snapshot)
         scheduleCueTimingSync(for: slot.cues)
         scheduleTermStatsSync(for: slot.cues)
     }
@@ -2269,7 +2590,9 @@ struct SubtitleEditorPanel: View {
             findNext()
             return
         }
+        let snapshot = makeUndoSnapshot()
         if replaceFirst(in: &slot.cues[selectedCueIndex].text) {
+            registerUndo("undo.replaceText", before: snapshot)
             schedulePreviewTextSync(for: slot.cues)
             scheduleTermStatsSync(for: slot.cues)
             findStatus = String(format: Copy.text("editor.replaceOneCount", language: language), 1)
@@ -2280,11 +2603,13 @@ struct SubtitleEditorPanel: View {
 
     private func replaceAll() {
         guard !findText.isEmpty else { return }
+        let snapshot = makeUndoSnapshot()
         var total = 0
         for index in slot.cues.indices {
             total += replaceAllMatches(in: &slot.cues[index].text)
         }
         if total > 0 {
+            registerUndo("undo.replaceText", before: snapshot)
             schedulePreviewTextSync(for: slot.cues)
             scheduleTermStatsSync(for: slot.cues)
         }
@@ -2418,8 +2743,11 @@ struct SubtitleEditorPanel: View {
 
     private func commitStyleText(_ text: String, selection: NSRange?) {
         guard let selectedCueIndex else { return }
+        guard text != slot.cues[selectedCueIndex].text else { return }
+        let snapshot = makeUndoSnapshot()
         slot.cues[selectedCueIndex].text = text
         selectedTextRange = selection
+        registerUndo("undo.styleSubtitle", before: snapshot)
         schedulePreviewTextSync(for: slot.cues)
         scheduleTermStatsSync(for: slot.cues)
     }
@@ -2656,16 +2984,27 @@ struct SubtitleEditorPanel: View {
 
 private struct TimelineZoomSlider: NSViewRepresentable {
     @Binding var value: Double
-    @Binding var anchorFraction: Double?
+    @Binding var isDragging: Bool
     let range: ClosedRange<Double>
     let step: Double
+
+    private final class TrackingSlider: NSSlider {
+        var onTrackingBegan: (() -> Void)?
+        var onTrackingEnded: (() -> Void)?
+
+        override func mouseDown(with event: NSEvent) {
+            onTrackingBegan?()
+            super.mouseDown(with: event)
+            onTrackingEnded?()
+        }
+    }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
     }
 
     func makeNSView(context: Context) -> NSSlider {
-        let slider = NSSlider(
+        let slider = TrackingSlider(
             value: normalizedValue(for: value),
             minValue: 0,
             maxValue: 1,
@@ -2676,11 +3015,25 @@ private struct TimelineZoomSlider: NSViewRepresentable {
         slider.numberOfTickMarks = 0
         slider.allowsTickMarkValuesOnly = false
         slider.controlSize = .small
+        slider.onTrackingBegan = {
+            context.coordinator.parent.isDragging = true
+        }
+        slider.onTrackingEnded = {
+            context.coordinator.parent.isDragging = false
+        }
         return slider
     }
 
     func updateNSView(_ slider: NSSlider, context: Context) {
         context.coordinator.parent = self
+        if let slider = slider as? TrackingSlider {
+            slider.onTrackingBegan = {
+                context.coordinator.parent.isDragging = true
+            }
+            slider.onTrackingEnded = {
+                context.coordinator.parent.isDragging = false
+            }
+        }
         let normalized = normalizedValue(for: value)
         if abs(slider.doubleValue - normalized) > 0.0001 {
             slider.doubleValue = normalized
@@ -2698,7 +3051,8 @@ private struct TimelineZoomSlider: NSViewRepresentable {
         let bounds = sanitizedBounds
         guard bounds.upper > bounds.lower else { return bounds.lower }
         let rawValue = bounds.lower * pow(bounds.upper / bounds.lower, clamp(normalized, 0, 1))
-        let steppedValue = (rawValue / max(step, 0.0001)).rounded() * max(step, 0.0001)
+        guard step > 0 else { return clamp(rawValue, bounds.lower, bounds.upper) }
+        let steppedValue = (rawValue / step).rounded() * step
         return clamp(steppedValue, bounds.lower, bounds.upper)
     }
 
@@ -2721,11 +3075,6 @@ private struct TimelineZoomSlider: NSViewRepresentable {
         }
 
         @objc func valueChanged(_ sender: NSSlider) {
-            if let window = sender.window {
-                let mouse = sender.convert(window.mouseLocationOutsideOfEventStream, from: nil)
-                let fraction = Double(mouse.x / max(sender.bounds.width, 1))
-                parent.anchorFraction = min(max(fraction, 0), 1)
-            }
             parent.value = parent.value(for: sender.doubleValue)
         }
     }
@@ -2742,20 +3091,26 @@ private struct ZoomableTimeline: View {
     @Binding var zoom: Double
     let zoomRange: ClosedRange<Double>
     let currentTime: Double
-    @Binding var sliderAnchorFraction: Double?
+    let centerRequest: TimelineCenterRequest?
+    @Binding var isSliderZooming: Bool
     let activeSpeakerName: String?
     let speakerColors: [String: String]
     let language: AppLanguage
     let onSeek: (Double) -> Void
     let onScrub: (Double) -> Void
+    let onCueTimingEditBegan: () -> Void
+    let onCueTimingEditEnded: () -> Void
     let cueActions: TimelineCueActions
 
     @State private var isHandleDragging = false
     @State private var scrollPosition = ScrollPosition()
+    @State private var visibleContentOffsetX: CGFloat = 0
     @State private var visibleFractionRange: ClosedRange<Double> = 0...1
-    @State private var magnifySession: MagnifySession?
+    @State private var magnifySession: ZoomAnchorSession?
+    @State private var sliderZoomSession: ZoomAnchorSession?
+    @State private var sliderZoomCleanupTask: Task<Void, Never>?
 
-    private struct MagnifySession: Equatable {
+    private struct ZoomAnchorSession: Equatable {
         let baselineZoom: Double
         let anchorFraction: Double
         let anchorScreenX: CGFloat
@@ -2786,11 +3141,13 @@ private struct ZoomableTimeline: View {
                     visibleFractionRange: effectiveVisibleRange,
                     onSeek: onSeek,
                     onScrub: onScrub,
+                    onCueTimingEditBegan: onCueTimingEditBegan,
+                    onCueTimingEditEnded: onCueTimingEditEnded,
                     cueActions: cueActions
                 )
                 .frame(width: contentWidth, height: proxy.size.height)
             }
-            .scrollDisabled(isHandleDragging || magnifySession != nil)
+            .scrollDisabled(isHandleDragging || magnifySession != nil || sliderZoomSession != nil)
             .scrollPosition($scrollPosition)
             .gesture(makeMagnifyGesture(viewport: viewportWidth))
             .onScrollGeometryChange(for: ClosedRange<Double>.self) { geometry in
@@ -2804,26 +3161,31 @@ private struct ZoomableTimeline: View {
                     || abs(newValue.upperBound - oldValue.upperBound) > 0.0002 else { return }
                 visibleFractionRange = newValue
             }
-            .onChange(of: selectedCueID) { _, newValue in
-                guard magnifySession == nil else { return }
-                centerOnSelectedCue(viewport: viewportWidth, content: contentWidth, animated: true, cueID: newValue)
+            .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                max(0, geometry.visibleRect.minX)
+            } action: { _, newValue in
+                visibleContentOffsetX = newValue
             }
-            .onChange(of: zoom) { _, newZoom in
+            .onChange(of: centerRequest) { _, request in
+                guard magnifySession == nil,
+                      sliderZoomSession == nil else { return }
+                centerOnSelectedCue(viewport: viewportWidth, content: contentWidth, animated: true, cueID: request?.cueID)
+            }
+            .onChange(of: zoom) { oldZoom, newZoom in
                 guard magnifySession == nil else { return }
-                if sliderAnchorFraction != nil {
-                    anchorOnTime(currentTime, viewport: viewportWidth, newZoom: newZoom)
-                    self.sliderAnchorFraction = nil
-                } else {
-                    // Keyboard / button zoom keeps the old center; slider zoom
-                    // centers on the red playback cursor.
-                    anchorOnVisibleCenter(viewport: viewportWidth, newZoom: newZoom)
+                if isSliderZooming || sliderZoomSession != nil {
+                    let session = sliderZoomSession ?? makePlayheadZoomSession(viewport: viewportWidth, baselineZoom: oldZoom)
+                    sliderZoomSession = session
+                    anchorZoomSession(session, newZoom: newZoom)
                 }
             }
-            .onAppear {
-                centerOnSelectedCue(viewport: viewportWidth, content: contentWidth, animated: false, cueID: selectedCueID)
-            }
-            .onChange(of: viewportWidth) { _, _ in
-                centerOnSelectedCue(viewport: viewportWidth, content: contentWidth, animated: false, cueID: selectedCueID)
+            .onChange(of: isSliderZooming) { _, newValue in
+                if newValue {
+                    sliderZoomCleanupTask?.cancel()
+                    sliderZoomSession = makePlayheadZoomSession(viewport: viewportWidth, baselineZoom: zoom)
+                } else {
+                    scheduleSliderZoomSessionCleanup()
+                }
             }
         }
     }
@@ -2834,6 +3196,7 @@ private struct ZoomableTimeline: View {
         let cueCenterX = xPosition((cue.start + cue.end) / 2, width: content)
         let target = max(0, min(content - viewport, cueCenterX - viewport / 2))
         let scroll = {
+            visibleContentOffsetX = target
             scrollPosition.scrollTo(x: target)
         }
         if animated {
@@ -2843,30 +3206,37 @@ private struct ZoomableTimeline: View {
         }
     }
 
-    /// Adjusts `scrollPosition` so the timeline coordinate currently at the
-    /// viewport's midpoint stays at the viewport's midpoint after `newZoom`
-    /// takes effect. Skips re-centering on the selected cue, which would have
-    /// looked like a jump immediately after the slider finished dragging.
-    private func anchorOnVisibleCenter(viewport: CGFloat, newZoom: Double) {
-        let centerFraction = (visibleFractionRange.lowerBound + visibleFractionRange.upperBound) / 2
-        let newContentWidth = max(viewport, viewport * newZoom)
-        let target = centerFraction * newContentWidth - viewport / 2
-        let maxOffset = max(0, newContentWidth - viewport)
-        let clamped = min(max(0, target), maxOffset)
-        DispatchQueue.main.async {
-            scrollPosition.scrollTo(x: clamped)
-        }
+    private func makePlayheadZoomSession(viewport: CGFloat, baselineZoom: Double) -> ZoomAnchorSession {
+        let safeViewport = max(viewport, 1)
+        let anchorFraction = min(max(currentTime / max(duration, 0.001), 0), 1)
+        let contentWidth = max(safeViewport, safeViewport * baselineZoom)
+        let playheadScreenX = CGFloat(anchorFraction) * contentWidth - visibleContentOffsetX
+        return ZoomAnchorSession(
+            baselineZoom: baselineZoom,
+            anchorFraction: anchorFraction,
+            anchorScreenX: min(max(0, playheadScreenX), safeViewport),
+            viewportWidth: safeViewport
+        )
     }
 
-    private func anchorOnTime(_ seconds: Double, viewport: CGFloat, newZoom: Double) {
-        let safeViewport = max(viewport, 1)
-        let anchorFraction = min(max(seconds / max(duration, 0.001), 0), 1)
-        let newContentWidth = max(safeViewport, safeViewport * newZoom)
-        let target = anchorFraction * newContentWidth - safeViewport / 2
-        let maxOffset = max(0, newContentWidth - safeViewport)
+    private func anchorZoomSession(_ session: ZoomAnchorSession, newZoom: Double) {
+        let newContentWidth = max(session.viewportWidth, session.viewportWidth * newZoom)
+        let target = CGFloat(session.anchorFraction) * newContentWidth - session.anchorScreenX
+        let maxOffset = max(0, newContentWidth - session.viewportWidth)
         let clamped = min(max(0, target), maxOffset)
-        DispatchQueue.main.async {
-            scrollPosition.scrollTo(x: clamped)
+        visibleContentOffsetX = clamped
+        scrollPosition.scrollTo(x: clamped)
+    }
+
+    private func scheduleSliderZoomSessionCleanup() {
+        let session = sliderZoomSession
+        sliderZoomCleanupTask?.cancel()
+        sliderZoomCleanupTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(120))
+            guard !Task.isCancelled,
+                  !isSliderZooming,
+                  sliderZoomSession == session else { return }
+            sliderZoomSession = nil
         }
     }
 
@@ -2874,14 +3244,14 @@ private struct ZoomableTimeline: View {
         MagnifyGesture(minimumScaleDelta: 0.01)
             .onChanged { value in
                 let safeViewport = max(viewport, 1)
-                let session: MagnifySession
+                let session: ZoomAnchorSession
                 if let existing = magnifySession {
                     session = existing
                 } else {
                     let startX = max(0, min(safeViewport, value.startLocation.x))
                     let visibleSpan = max(0, visibleFractionRange.upperBound - visibleFractionRange.lowerBound)
                     let anchor = visibleFractionRange.lowerBound + (startX / safeViewport) * visibleSpan
-                    let created = MagnifySession(
+                    let created = ZoomAnchorSession(
                         baselineZoom: zoom,
                         anchorFraction: min(1, max(0, anchor)),
                         anchorScreenX: startX,
@@ -2894,11 +3264,7 @@ private struct ZoomableTimeline: View {
                 let proposed = session.baselineZoom * Double(value.magnification)
                 let newZoom = min(zoomRange.upperBound, max(zoomRange.lowerBound, proposed))
                 zoom = newZoom
-
-                let newContentWidth = max(session.viewportWidth, session.viewportWidth * newZoom)
-                let target = session.anchorFraction * newContentWidth - session.anchorScreenX
-                let maxOffset = max(0, newContentWidth - session.viewportWidth)
-                scrollPosition.scrollTo(x: min(max(0, target), maxOffset))
+                anchorZoomSession(session, newZoom: newZoom)
             }
             .onEnded { _ in
                 magnifySession = nil
@@ -3282,6 +3648,8 @@ private struct WaveformTimelineEditor: View {
     let visibleFractionRange: ClosedRange<Double>
     let onSeek: (Double) -> Void
     let onScrub: (Double) -> Void
+    let onCueTimingEditBegan: () -> Void
+    let onCueTimingEditEnded: () -> Void
     let cueActions: TimelineCueActions
 
     @State private var dragSession: HandleDragSession?
@@ -3731,6 +4099,7 @@ private struct WaveformTimelineEditor: View {
             .onChanged { value in
                 isHandleDragging = true
                 if dragSession?.cueID != cue.wrappedValue.id || dragSession?.edge != edge {
+                    onCueTimingEditBegan()
                     selectedCueID = cue.wrappedValue.id
                     dragSession = HandleDragSession(
                         cueID: cue.wrappedValue.id,
@@ -3757,6 +4126,7 @@ private struct WaveformTimelineEditor: View {
                 dragSession = nil
                 isHandleDragging = false
                 cues = SubtitleDocument.normalize(cues)
+                onCueTimingEditEnded()
             }
     }
 
@@ -4201,6 +4571,98 @@ private struct SpeakerBadge: View {
     }
 }
 
+struct TimingAdjustmentSheet: View {
+    let language: AppLanguage
+    let cueCount: Int
+    @Binding var mode: TimingAdjustmentMode
+    @Binding var shiftSeconds: Double
+    @Binding var gapSeconds: Double
+    let apply: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(Copy.text("timing.title", language: language))
+                    .font(.headline)
+                Text(String(format: Copy.text("timing.cueCount", language: language), cueCount))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Picker("", selection: $mode) {
+                Text(Copy.text("timing.mode.shift", language: language)).tag(TimingAdjustmentMode.shift)
+                Text(Copy.text("timing.mode.closeGaps", language: language)).tag(TimingAdjustmentMode.closeGaps)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            GroupBox {
+                VStack(alignment: .leading, spacing: 10) {
+                    switch mode {
+                    case .shift:
+                        secondsControl(
+                            titleKey: "timing.shift.seconds",
+                            helpKey: "timing.shift.help",
+                            value: $shiftSeconds,
+                            range: -86_400...86_400
+                        )
+                    case .closeGaps:
+                        secondsControl(
+                            titleKey: "timing.gap.seconds",
+                            helpKey: "timing.gap.help",
+                            value: $gapSeconds,
+                            range: 0...60
+                        )
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+
+            HStack {
+                Spacer()
+                Button(Copy.text("button.cancel", language: language)) {
+                    dismiss()
+                }
+                Button(Copy.text("button.apply", language: language)) {
+                    apply()
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(cueCount == 0)
+            }
+        }
+        .padding(20)
+        .frame(width: 380)
+    }
+
+    private func secondsControl(
+        titleKey: String,
+        helpKey: String,
+        value: Binding<Double>,
+        range: ClosedRange<Double>
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(Copy.text(titleKey, language: language))
+                .font(.subheadline.weight(.semibold))
+            HStack(spacing: 8) {
+                TextField("", value: value, format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 96)
+                Stepper("", value: value, in: range, step: 0.1)
+                    .labelsHidden()
+                Text("s")
+                    .foregroundStyle(.secondary)
+            }
+            Text(Copy.text(helpKey, language: language))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
 private struct SubtitleCueBlockRow: View {
     @Binding var cue: SubtitleCue
     let isSelected: Bool
@@ -4229,10 +4691,10 @@ private struct SubtitleCueBlockRow: View {
                     .foregroundStyle(.tertiary)
             }
 
-            StyledSubtitleText(SubtitleDocument.displayText(for: cue), font: .body, lineLimit: 3)
+            StyledSubtitleText(SubtitleDocument.displayText(for: cue), font: .body, lineLimit: 2)
                 .equatable()
                 .textSelection(.enabled)
-                .frame(minHeight: 48, maxHeight: 84, alignment: .topLeading)
+                .frame(height: 36, alignment: .topLeading)
                 .padding(6)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
                 .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
@@ -4339,6 +4801,7 @@ private struct SelectableTextEditor: NSViewRepresentable {
         textView.delegate = context.coordinator
         textView.string = text
         textView.font = .preferredFont(forTextStyle: .body)
+        textView.allowsUndo = false
         textView.drawsBackground = false
         textView.isRichText = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
@@ -4468,6 +4931,22 @@ private struct SelectableTextEditor: NSViewRepresentable {
         override func becomeFirstResponder() -> Bool {
             onActivate?()
             return super.becomeFirstResponder()
+        }
+
+        @objc func undo(_ sender: Any?) {
+            guard let undoManager = window?.undoManager, undoManager.canUndo else {
+                NSSound.beep()
+                return
+            }
+            undoManager.undo()
+        }
+
+        @objc func redo(_ sender: Any?) {
+            guard let undoManager = window?.undoManager, undoManager.canRedo else {
+                NSSound.beep()
+                return
+            }
+            undoManager.redo()
         }
     }
 }
