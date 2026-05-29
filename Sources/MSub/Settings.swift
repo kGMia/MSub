@@ -1,42 +1,44 @@
 import Foundation
+import Observation
 
 @MainActor
-final class TranscriptionSettings: ObservableObject {
-    @Published var model = ""
-    @Published var asrEngine: ASREngine = .auto
-    @Published var modelCatalog: [ASRModelInfo] = []
-    @Published var format: OutputFormat = .srt
-    @Published var recognitionLanguage: RecognitionLanguage = .auto
-    @Published var senseVoiceUseITN = true
-    @Published var senseVoiceRichInfo = false
-    @Published var mimoMaxTokens = 256
-    @Published var mimoTemperature = 0.0
-    @Published var mimoTopP = 0.95
-    @Published var mimoTopK = 0
-    @Published var segmentMode: SegmentMode = .vad
-    @Published var vadEngine: VADEngine = .firered
-    @Published var vadCatalog: [VADModelInfo] = []
-    @Published var vadThreshold = -38.0
-    @Published var fireRedVADThreshold = 0.4
-    @Published var fireRedVADSmoothWindow = 5
-    @Published var vadMaxSegment = 5.0
-    @Published var vadSilence = 0.28
-    @Published var vadSearch = 0.75
-    @Published var vadMinSpeech = 0.2
-    @Published var vadPadding = 0.12
-    @Published var vadMinSegment = 0.8
-    @Published var chunkSeconds = 20.0
-    @Published var beamSize = 3
-    @Published var minConfidence = 0.0
-    @Published var lineChars = 18
-    @Published var softmaxSmoothing = 1.25
-    @Published var lengthPenalty = 0.6
-    @Published var eosPenalty = 1.0
-    @Published var decodeMaxLen = 0
-    @Published var diarizeSpeakers = false
-    @Published var diarizationSpeakerCount = 0
-    @Published var timelineSpeakerMarkersEnabled = true
-    @Published var waveformResolution: WaveformResolution = .high
+@Observable
+final class TranscriptionSettings {
+    var model = ""
+    var asrEngine: ASREngine = .auto
+    var modelCatalog: [ASRModelInfo] = []
+    var format: OutputFormat = .srt
+    var recognitionLanguage: RecognitionLanguage = .auto
+    var senseVoiceUseITN = true
+    var senseVoiceRichInfo = false
+    var mimoMaxTokens = 256
+    var mimoTemperature = 0.0
+    var mimoTopP = 0.95
+    var mimoTopK = 0
+    var segmentMode: SegmentMode = .vad
+    var vadEngine: VADEngine = .firered
+    var vadCatalog: [VADModelInfo] = []
+    var vadThreshold = -38.0
+    var fireRedVADThreshold = 0.4
+    var fireRedVADSmoothWindow = 5
+    var vadMaxSegment = 5.0
+    var vadSilence = 0.28
+    var vadSearch = 0.75
+    var vadMinSpeech = 0.2
+    var vadPadding = 0.12
+    var vadMinSegment = 0.8
+    var chunkSeconds = 20.0
+    var beamSize = 3
+    var minConfidence = 0.0
+    var lineChars = 18
+    var softmaxSmoothing = 1.25
+    var lengthPenalty = 0.6
+    var eosPenalty = 1.0
+    var decodeMaxLen = 0
+    var diarizeSpeakers = false
+    var diarizationSpeakerCount = 0
+    var timelineSpeakerMarkersEnabled = true
+    var waveformResolution: WaveformResolution = .high
 
     func apply(config: AppConfig) {
         modelCatalog = config.models ?? []

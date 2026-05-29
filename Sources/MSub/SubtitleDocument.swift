@@ -36,7 +36,8 @@ private struct SubtitleUndoSnapshot: Equatable {
     let speakerColors: [String: String]
 }
 
-private final class SubtitleUndoController: ObservableObject {
+@Observable
+private final class SubtitleUndoController {
     var restoreHandler: ((SubtitleUndoSnapshot, String) -> Void)?
 
     func restore(_ snapshot: SubtitleUndoSnapshot, actionName: String) {
@@ -704,11 +705,12 @@ extension FileSlot {
 // MARK: - Shared playback controller
 
 @MainActor
-final class PlaybackController: ObservableObject {
-    @Published private(set) var currentTime: Double = 0
-    @Published private(set) var duration: Double = 0
-    @Published private(set) var isPlaying: Bool = false
-    @Published private(set) var hasVideo: Bool = false
+@Observable
+final class PlaybackController {
+    private(set) var currentTime: Double = 0
+    private(set) var duration: Double = 0
+    private(set) var isPlaying: Bool = false
+    private(set) var hasVideo: Bool = false
 
     nonisolated let player = AVPlayer()
 
@@ -833,14 +835,14 @@ struct SubtitleEditorPanel: View {
     @Binding var slot: FileSlot
     @Binding var selectedFrequentTerm: String?
     let language: AppLanguage
-    @ObservedObject var playback: PlaybackController
+    let playback: PlaybackController
 
-    @EnvironmentObject private var api: APIClient
-    @EnvironmentObject private var backend: BackendService
-    @EnvironmentObject private var settings: TranscriptionSettings
+    @Environment(APIClient.self) private var api
+    @Environment(BackendService.self) private var backend
+    @Environment(TranscriptionSettings.self) private var settings
     @Environment(\.undoManager) private var undoManager
 
-    @StateObject private var undoController = SubtitleUndoController()
+    @State private var undoController = SubtitleUndoController()
     @State private var waveform = WaveformSamples([])
     @State private var isLoadingWaveform = false
     @State private var timelineZoom = 1.0

@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import CryptoKit
+import Observation
 
 private struct BackendManifest: Decodable {
     let sourceModelPath: String?
@@ -12,11 +13,12 @@ private struct BackendManifest: Decodable {
 }
 
 @MainActor
-final class BackendService: ObservableObject {
-    @Published var isRunning = false
-    @Published var message = "Backend stopped"
-    @Published var lastLog = ""
-    @Published var baseURL = URL(string: "http://127.0.0.1:7860")!
+@Observable
+final class BackendService {
+    var isRunning = false
+    var message = "Backend stopped"
+    var lastLog = ""
+    var baseURL = URL(string: "http://127.0.0.1:7860")!
 
     private var process: Process?
     private var pipe: Pipe?

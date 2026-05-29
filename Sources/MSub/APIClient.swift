@@ -1,8 +1,10 @@
 import Foundation
+import Observation
 
 @MainActor
-final class APIClient: ObservableObject {
-    @Published var baseURL = URL(string: "http://127.0.0.1:7860")!
+@Observable
+final class APIClient {
+    var baseURL = URL(string: "http://127.0.0.1:7860")!
 
     func fetchConfig() async throws -> AppConfig {
         let url = baseURL.appending(path: "/api/config")

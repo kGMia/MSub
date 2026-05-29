@@ -7,14 +7,14 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct ContentView: View {
-    @EnvironmentObject private var api: APIClient
-    @EnvironmentObject private var backend: BackendService
-    @EnvironmentObject private var settings: TranscriptionSettings
-    @EnvironmentObject private var recentFiles: RecentFilesStore
+    @Environment(APIClient.self) private var api
+    @Environment(BackendService.self) private var backend
+    @Environment(TranscriptionSettings.self) private var settings
+    @Environment(RecentFilesStore.self) private var recentFiles
 
     @AppStorage("huz.uiLanguage") private var languageRaw = AppLanguage.zh.rawValue
 
-    @StateObject private var playback = PlaybackController()
+    @State private var playback = PlaybackController()
 
     @State private var files: [FileSlot] = []
     @State private var activeIndex: Int = 0
@@ -137,11 +137,6 @@ struct ContentView: View {
             ToolbarSpacer(.fixed, placement: .primaryAction)
             ToolbarItem(placement: .confirmationAction) {
                 transcribeButton
-            }
-        }
-        .onPreferenceChange(BackendStatusBadgeFrameKey.self) { frame in
-            if !frame.isEmpty {
-                backendStatusBadgeFrame = frame
             }
         }
         .overlay(alignment: .topLeading) {
@@ -309,12 +304,13 @@ struct ContentView: View {
         GeometryReader { proxy in
             let spacing: CGFloat = 3
             let available = max(0, proxy.size.width - CGFloat(max(emotions.count - 1, 0)) * spacing)
+            let minWidth: CGFloat = 28
+            let raw = emotions.map { max(minWidth, available * CGFloat($0.ratio)) }
+            let total = raw.reduce(0, +)
+            let scale: CGFloat = (total > available && total > 0) ? available / total : 1
             HStack(spacing: spacing) {
-                ForEach(emotions) { emotion in
-                    emotionBarSegment(
-                        emotion,
-                        width: max(28, available * CGFloat(emotion.ratio))
-                    )
+                ForEach(Array(emotions.enumerated()), id: \.element.id) { index, emotion in
+                    emotionBarSegment(emotion, width: raw[index] * scale)
                 }
             }
         }
@@ -743,14 +739,13 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .help(t("backend.status"))
-        .background(
-            GeometryReader { proxy in
-                Color.clear.preference(
-                    key: BackendStatusBadgeFrameKey.self,
-                    value: proxy.frame(in: .global)
-                )
+        .onGeometryChange(for: CGRect.self) { proxy in
+            proxy.frame(in: .global)
+        } action: { newFrame in
+            if !newFrame.isEmpty {
+                backendStatusBadgeFrame = newFrame
             }
-        )
+        }
     }
 
     private var connectionBadgeTitle: String {
@@ -950,7 +945,8 @@ struct ContentView: View {
     // MARK: - Settings sidebar
 
     private var settingsPanel: some View {
-        Form {
+        @Bindable var settings = settings
+        return Form {
             Section(t("input.section")) {
                 stackedField(t("settings.asrEngine"), help: t("help.asrEngine")) {
                     Picker("", selection: $settings.asrEngine) {
@@ -1470,7 +1466,12 @@ struct ContentView: View {
         .onTapGesture {
             if !hasFile { chooseFiles() }
         }
-        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted, perform: handleDrop)
+        .dropDestination(for: URL.self) { urls, _ in
+            addFiles(urls)
+            return true
+        } isTargeted: { hovering in
+            isDropTargeted = hovering
+        }
         .animation(.easeInOut(duration: 0.15), value: isDropTargeted)
     }
 
@@ -2240,33 +2241,6 @@ struct ContentView: View {
         panel.allowedContentTypes = [.movie, .audio, .mpeg4Movie, .quickTimeMovie]
         if panel.runModal() == .OK {
             addFiles(panel.urls)
-        }
-    }
-
-    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
-        Task { @MainActor in
-            var urls: [URL] = []
-            for provider in providers {
-                if let url = await loadURL(from: provider) {
-                    urls.append(url)
-                }
-            }
-            if !urls.isEmpty {
-                addFiles(urls)
-            }
-        }
-        return true
-    }
-
-    private func loadURL(from provider: NSItemProvider) async -> URL? {
-        await withCheckedContinuation { continuation in
-            provider.loadDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier) { data, _ in
-                if let data, let url = URL(dataRepresentation: data, relativeTo: nil) {
-                    continuation.resume(returning: url)
-                } else {
-                    continuation.resume(returning: nil)
-                }
-            }
         }
     }
 
@@ -3180,19 +3154,6 @@ struct ContentView: View {
     }
 }
 
-private struct BackendStatusBadgeFrameKey: PreferenceKey {
-    static let defaultValue: CGRect = .zero
-
-    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
-        let next = nextValue()
-        if !next.isEmpty {
-            value = next
-        }
-    }
-}
-
-
-
 private struct ChipScrollEdges: Equatable {
     var leading: Bool
     var trailing: Bool
@@ -3241,6 +3202,7 @@ private struct FileChipView: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.6)))
             }
         }
+        .frame(minHeight: 16)
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(
@@ -3937,8 +3899,9 @@ extension Notification.Name {
 }
 
 @MainActor
-final class RecentFilesStore: ObservableObject {
-    @Published private(set) var urls: [URL] = []
+@Observable
+final class RecentFilesStore {
+    private(set) var urls: [URL] = []
 
     private let key = "msub.recentFiles"
     private let limit = 12
@@ -4382,7 +4345,7 @@ private struct MediaPreviewCard: View {
     let isCapturingFrame: Bool
     let captureHelp: String
     let nativePreviewHelp: String
-    @ObservedObject var playback: PlaybackController
+    let playback: PlaybackController
     let onCaptureFrame: () -> Void
     let onNativePreview: () -> Void
 

@@ -2,14 +2,31 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+enum AppearanceTheme: String, CaseIterable, Identifiable {
+    case system
+    case light
+    case dark
+
+    var id: String { rawValue }
+
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .system: nil
+        case .light: .light
+        case .dark: .dark
+        }
+    }
+}
+
 @main
 struct MSubApp: App {
-    @StateObject private var api = APIClient()
-    @StateObject private var backend = BackendService()
-    @StateObject private var settings = TranscriptionSettings()
-    @StateObject private var recentFiles = RecentFilesStore()
+    @State private var api = APIClient()
+    @State private var backend = BackendService()
+    @State private var settings = TranscriptionSettings()
+    @State private var recentFiles = RecentFilesStore()
 
     @AppStorage("huz.uiLanguage") private var languageRaw = AppLanguage.zh.rawValue
+    @AppStorage("huz.appearanceTheme") private var appearanceRaw = AppearanceTheme.system.rawValue
 
     init() {
         AppLanguageBootstrap.applyStoredLanguageIfNeeded()
@@ -19,14 +36,19 @@ struct MSubApp: App {
         AppLanguage(rawValue: languageRaw) ?? .zh
     }
 
+    private var appearance: AppearanceTheme {
+        AppearanceTheme(rawValue: appearanceRaw) ?? .system
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .environmentObject(api)
-                .environmentObject(backend)
-                .environmentObject(settings)
-                .environmentObject(recentFiles)
+                .environment(api)
+                .environment(backend)
+                .environment(settings)
+                .environment(recentFiles)
                 .environment(\.locale, language.locale)
+                .preferredColorScheme(appearance.colorScheme)
                 .frame(minWidth: 820, minHeight: 640)
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
                     backend.stop(waitForExit: true)
@@ -137,8 +159,9 @@ struct MSubApp: App {
 
         Settings {
             PreferencesView()
-                .environmentObject(settings)
+                .environment(settings)
                 .environment(\.locale, language.locale)
+                .preferredColorScheme(appearance.colorScheme)
                 .frame(width: 420, height: 280)
         }
         .windowResizability(.contentSize)
@@ -186,8 +209,9 @@ enum AppLanguageBootstrap {
 // MARK: - Preferences Window
 
 struct PreferencesView: View {
-    @EnvironmentObject private var settings: TranscriptionSettings
+    @Environment(TranscriptionSettings.self) private var settings
     @AppStorage("huz.uiLanguage") private var languageRaw = AppLanguage.zh.rawValue
+    @AppStorage("huz.appearanceTheme") private var appearanceRaw = AppearanceTheme.system.rawValue
     @State private var pendingRelaunchLanguage: AppLanguage?
 
     private var language: AppLanguage {
@@ -231,7 +255,8 @@ struct PreferencesView: View {
     }
 
     private var generalTab: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        @Bindable var settings = settings
+        return VStack(alignment: .leading, spacing: 14) {
             stackedRow(t("prefs.defaultFormat")) {
                 Picker("", selection: $settings.format) {
                     ForEach(OutputFormat.allCases) { format in
@@ -265,7 +290,8 @@ struct PreferencesView: View {
     }
 
     private var modelTab: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        @Bindable var settings = settings
+        return VStack(alignment: .leading, spacing: 10) {
             stackedRow(t("settings.asrEngine")) {
                 Picker("", selection: $settings.asrEngine) {
                     ForEach(ASREngine.allCases) { engine in
@@ -299,11 +325,21 @@ struct PreferencesView: View {
     }
 
     private var appearanceTab: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        @Bindable var settings = settings
+        return VStack(alignment: .leading, spacing: 14) {
             stackedRow(t("prefs.uiLanguage")) {
                 Picker("", selection: languageBinding) {
                     ForEach(AppLanguage.allCases) { lang in
                         Text(lang.title).tag(lang)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+            }
+            stackedRow(t("prefs.theme")) {
+                Picker("", selection: themeBinding) {
+                    ForEach(AppearanceTheme.allCases) { theme in
+                        Text(t("prefs.theme.\(theme.rawValue)")).tag(theme)
                     }
                 }
                 .labelsHidden()
@@ -342,6 +378,14 @@ struct PreferencesView: View {
             if needsRelaunch {
                 pendingRelaunchLanguage = newValue
             }
+        }
+    }
+
+    private var themeBinding: Binding<AppearanceTheme> {
+        Binding {
+            AppearanceTheme(rawValue: appearanceRaw) ?? .system
+        } set: { newValue in
+            appearanceRaw = newValue.rawValue
         }
     }
 
