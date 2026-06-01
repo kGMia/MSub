@@ -21,8 +21,17 @@ final class APIClient {
         return try JSONDecoder().decode(SegmentPreview.self, from: data)
     }
 
-    func createJob(fileURL: URL, settings: TranscriptionSettings) async throws -> JobCreated {
-        let (request, bodyURL) = try multipartRequest(path: "/api/jobs", fileURL: fileURL, settings: settings, includeOutput: true)
+    func createJob(fileURL: URL, settings: TranscriptionSettings, previewID: String? = nil) async throws -> JobCreated {
+        let extraFields = previewID.map { [("preview_id", $0)] } ?? []
+        let (request, bodyURL) = try multipartRequest(path: "/api/jobs", fileURL: fileURL, settings: settings, includeOutput: true, extraFields: extraFields)
+        defer { try? FileManager.default.removeItem(at: bodyURL) }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validate(response: response, data: data)
+        return try JSONDecoder().decode(JobCreated.self, from: data)
+    }
+
+    func createJobFromPreview(previewID: String, settings: TranscriptionSettings) async throws -> JobCreated {
+        let (request, bodyURL) = try multipartRequest(path: "/api/jobs", fileURL: nil, settings: settings, includeOutput: true, extraFields: [("preview_id", previewID)])
         defer { try? FileManager.default.removeItem(at: bodyURL) }
         let (data, response) = try await URLSession.shared.data(for: request)
         try validate(response: response, data: data)
@@ -57,9 +66,10 @@ final class APIClient {
 
     private func multipartRequest(
         path: String,
-        fileURL: URL,
+        fileURL: URL?,
         settings: TranscriptionSettings,
-        includeOutput: Bool
+        includeOutput: Bool,
+        extraFields: [(String, String)] = []
     ) throws -> (URLRequest, URL) {
         let boundary = "Boundary-\(UUID().uuidString)"
         var request = URLRequest(url: baseURL.appending(path: path))
@@ -72,25 +82,28 @@ final class APIClient {
         let output = try FileHandle(forWritingTo: bodyURL)
         defer { try? output.close() }
 
-        let fields = settings.formFields(includeOutput: includeOutput)
+        let fields = settings.formFields(includeOutput: includeOutput) + extraFields
         for (name, value) in fields {
             try output.writeString("--\(boundary)\r\n")
             try output.writeString("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n")
             try output.writeString("\(value)\r\n")
         }
 
-        let filename = fileURL.lastPathComponent
-        try output.writeString("--\(boundary)\r\n")
-        try output.writeString("Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n")
-        try output.writeString("Content-Type: application/octet-stream\r\n\r\n")
+        if let fileURL {
+            let filename = fileURL.lastPathComponent
+            try output.writeString("--\(boundary)\r\n")
+            try output.writeString("Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n")
+            try output.writeString("Content-Type: application/octet-stream\r\n\r\n")
 
-        let input = try FileHandle(forReadingFrom: fileURL)
-        defer { try? input.close() }
-        while let chunk = try input.read(upToCount: 1_048_576), !chunk.isEmpty {
-            try output.write(contentsOf: chunk)
+            let input = try FileHandle(forReadingFrom: fileURL)
+            defer { try? input.close() }
+            while let chunk = try input.read(upToCount: 1_048_576), !chunk.isEmpty {
+                try output.write(contentsOf: chunk)
+            }
+            try output.writeString("\r\n")
         }
 
-        try output.writeString("\r\n--\(boundary)--\r\n")
+        try output.writeString("--\(boundary)--\r\n")
         let size = try FileManager.default.attributesOfItem(atPath: bodyURL.path)[.size] as? NSNumber
         request.setValue("\(size?.int64Value ?? 0)", forHTTPHeaderField: "Content-Length")
         request.httpBodyStream = InputStream(url: bodyURL)

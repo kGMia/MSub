@@ -4,6 +4,7 @@ import AVKit
 import QuickLook
 import QuickLookThumbnailing
 import SwiftUI
+import Translation
 import UniformTypeIdentifiers
 
 struct ContentView: View {
@@ -23,8 +24,8 @@ struct ContentView: View {
     @State private var isDropTargeted = false
     @State private var errorMessage: String?
     @State private var connectionState: ConnectionState = .unknown
-    @State private var selectedPreset: RecognitionPreset = .balanced
-    @State private var detailTab: DetailTab = .segments
+    @AppStorage("msub.selectedPreset") private var selectedPreset: RecognitionPreset = .balanced
+    @SceneStorage("ui.detailTab") private var detailTab: DetailTab = .segments
     @State private var processingTask: Task<Void, Never>?
     @State private var selectedFrequentTerm: String?
     @State private var chipScrollEdges = ChipScrollEdges(leading: false, trailing: false)
@@ -42,6 +43,18 @@ struct ContentView: View {
     @State private var cueListTimingShiftSeconds: Double = 0.0
     @State private var cueListTimingGapSeconds: Double = 0.0
     @State private var cueListTimingTargetIDs: Set<SubtitleCue.ID> = []
+    @State private var translationJob: TranslationJob?
+    @State private var translationConfiguration: TranslationSession.Configuration?
+    @State private var isTranslationSheetPresented = false
+    @State private var translationSheetSlotID: FileSlot.ID?
+    @State private var translationSheetCueIDs: Set<SubtitleCue.ID> = []
+    @State private var translationTargetLanguage: TranslationLanguageChoice = .common[2]
+    @State private var translationMode: TranslationOutputMode = .replace
+    @State private var translationErrorMessage: String?
+    @State private var isTranslating = false
+    @State private var translationUndo = TranslationUndoCoordinator()
+    @State private var pendingSidecarAuthorizationURL: URL?
+    @Environment(\.undoManager) private var undoManager
     @FocusState private var focusedMediaNameSlotID: UUID?
 
     private var language: AppLanguage {
@@ -108,6 +121,9 @@ struct ContentView: View {
     }
 
     private static let subtitleExtensions = ["srt", "vtt", "json", "txt"]
+    private let visibleASREngines: [ASREngine] = [.fireredasr2, .sensevoice, .mimo, .apple]
+    private let visibleVADEngines: [VADEngine] = [.firered, .energy]
+    private let visibleSpeakerClusteringMethods: [SpeakerClusteringMethod] = [.spectral, .incremental]
 
     var body: some View {
         content
@@ -143,6 +159,9 @@ struct ContentView: View {
             backendStatusPopoverOverlay
         }
         .animation(.snappy(duration: 0.18), value: isBackendStatusPopoverPresented)
+        .onAppear {
+            configureTranslationUndo()
+        }
         .task {
             await loadConfig()
         }
@@ -153,6 +172,35 @@ struct ContentView: View {
             Button(t("button.ok"), role: .cancel) {}
         } message: {
             Text(errorMessage ?? "")
+        }
+        .alert(t("translation.errorTitle"), isPresented: Binding(get: { translationErrorMessage != nil }, set: { if !$0 { translationErrorMessage = nil } })) {
+            Button(t("button.ok"), role: .cancel) {}
+        } message: {
+            Text(translationErrorMessage ?? "")
+        }
+        .alert(
+            t("sandbox.sidecarPrompt.title"),
+            isPresented: sidecarPromptBinding,
+            presenting: pendingSidecarAuthorizationURL,
+            actions: sidecarPromptActions,
+            message: sidecarPromptMessage
+        )
+
+        .translationTask(translationConfiguration) { session in
+            await runTranslation(session: session)
+        }
+        .sheet(isPresented: $isTranslationSheetPresented) {
+            TranslationSheet(
+                language: language,
+                targetLanguage: $translationTargetLanguage,
+                mode: $translationMode,
+                isWholeSlot: translationSheetCueIDs.isEmpty,
+                onCancel: { isTranslationSheetPresented = false },
+                onConfirm: {
+                    isTranslationSheetPresented = false
+                    startTranslationFromSheet()
+                }
+            )
         }
         .onReceive(NotificationCenter.default.publisher(for: .msubOpenFilesRequested)) { _ in
             chooseFiles()
@@ -174,6 +222,12 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .msubStopRequested)) { _ in
             if isProcessing { cancelProcessing() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .msubTranslateRequested)) { _ in
+            translateActiveSubtitle()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .msubAuthorizeSidecarFolderRequested)) { _ in
+            authorizeSidecarFolderForActive()
         }
         .onReceive(NotificationCenter.default.publisher(for: .msubSaveAllRequested)) { _ in
             Task { await saveAllOutputs() }
@@ -254,7 +308,7 @@ struct ContentView: View {
             editableFileNameRow(slot)
             VStack(alignment: .leading, spacing: 3) {
                 compactInfoRow(t("media.duration"), value: mediaDurationText(slot))
-                compactInfoRow(t("media.size"), value: fileSizeText(slot.url))
+                compactInfoRow(t("media.size"), value: fileSizeText(for: slot))
                 compactInfoRow(t("media.resolution"), value: resolutionText(slot.mediaInfo))
                 compactInfoRow(t("media.frameRate"), value: frameRateText(slot.mediaInfo?.frameRate))
                 compactInfoRow(t("media.videoCodec"), value: slot.mediaInfo?.videoCodec ?? t("media.noVideo"))
@@ -309,8 +363,8 @@ struct ContentView: View {
             let total = raw.reduce(0, +)
             let scale: CGFloat = (total > available && total > 0) ? available / total : 1
             HStack(spacing: spacing) {
-                ForEach(Array(emotions.enumerated()), id: \.element.id) { index, emotion in
-                    emotionBarSegment(emotion, width: raw[index] * scale)
+                ForEach(emotions.indices, id: \.self) { index in
+                    emotionBarSegment(emotions[index], width: raw[index] * scale)
                 }
             }
         }
@@ -501,11 +555,9 @@ struct ContentView: View {
         }
     }
 
-    private func fileSizeText(_ url: URL) -> String {
-        guard let size = try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber else {
-            return "-"
-        }
-        return ByteCountFormatter.string(fromByteCount: size.int64Value, countStyle: .file)
+    private func fileSizeText(for slot: FileSlot) -> String {
+        guard let bytes = slot.fileSizeBytes else { return "-" }
+        return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 
     private func mediaDurationText(_ slot: FileSlot) -> String {
@@ -950,20 +1002,38 @@ struct ContentView: View {
             Section(t("input.section")) {
                 stackedField(t("settings.asrEngine"), help: t("help.asrEngine")) {
                     Picker("", selection: $settings.asrEngine) {
-                        ForEach(ASREngine.allCases) { engine in
+                        ForEach(visibleASREngines) { engine in
                             Text(asrEngineTitle(engine)).tag(engine)
                         }
                     }
                     .labelsHidden()
                     .pickerStyle(.menu)
-                    .onChange(of: settings.asrEngine) { _, _ in
-                        settings.applyDefaultModelForSelectedEngine()
+                    .onChange(of: settings.asrEngine) { _, newValue in
+                        settings.selectASREngine(newValue)
                     }
                 }
 
-                stackedField(t("settings.model"), help: t("help.model")) {
-                    TextField("", text: $settings.model)
-                        .textFieldStyle(.roundedBorder)
+                if settings.effectiveASREngine == .apple {
+                    Text(modelHelpText())
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    stackedField(t("settings.model"), help: modelHelpText()) {
+                        TextField("", text: $settings.model)
+                            .textFieldStyle(.roundedBorder)
+                            .onChange(of: settings.model) { _, _ in
+                                settings.modelPathDidChange()
+                            }
+                    }
+                    if let status = modelStatusText() {
+                        Text(status)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
 
                 stackedField(t("settings.format"), help: t("help.format")) {
@@ -1004,14 +1074,21 @@ struct ContentView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
-                stackedField(t("settings.vadEngine"), help: t("help.vadEngine")) {
+                stackedField(t("settings.vadEngine"), help: vadEngineHelpText()) {
                     Picker("", selection: $settings.vadEngine) {
-                        ForEach(VADEngine.allCases) { engine in
+                        ForEach(visibleVADEngines) { engine in
                             Text(vadEngineTitle(engine)).tag(engine)
                         }
                     }
                     .labelsHidden()
                     .pickerStyle(.menu)
+                }
+                if let status = vadStatusText() {
+                    Text(status)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 Button {
@@ -1045,7 +1122,7 @@ struct ContentView: View {
                 if settings.isSenseVoiceActive {
                     stackedField(t("settings.recognitionLanguage"), help: t("help.recognitionLanguage")) {
                         Picker("", selection: $settings.recognitionLanguage) {
-                            ForEach(RecognitionLanguage.allCases) { option in
+                            ForEach(settings.supportedRecognitionLanguages) { option in
                                 Text(recognitionLanguageTitle(option)).tag(option)
                             }
                         }
@@ -1065,7 +1142,7 @@ struct ContentView: View {
                 } else if settings.isMiMoActive {
                     stackedField(t("settings.recognitionLanguage"), help: t("help.recognitionLanguage")) {
                         Picker("", selection: $settings.recognitionLanguage) {
-                            ForEach([RecognitionLanguage.auto, .zh, .en]) { option in
+                            ForEach(settings.supportedRecognitionLanguages) { option in
                                 Text(recognitionLanguageTitle(option)).tag(option)
                             }
                         }
@@ -1082,20 +1159,78 @@ struct ContentView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                } else if settings.effectiveASREngine == .apple {
+                    stackedField(t("settings.recognitionLanguage"), help: t("help.recognitionLanguage")) {
+                        Picker("", selection: $settings.recognitionLanguage) {
+                            ForEach(settings.supportedRecognitionLanguages) { option in
+                                Text(recognitionLanguageTitle(option)).tag(option)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                    }
+
+                    Toggle(isOn: $settings.appleSpeechFastResults) {
+                        parameterLabel(t("settings.appleSpeechFast"), help: t("help.appleSpeechFast"))
+                    }
+                    .toggleStyle(.switch)
+
+                    Toggle(isOn: $settings.appleSpeechEtiquetteFilter) {
+                        parameterLabel(t("settings.appleSpeechEtiquette"), help: t("help.appleSpeechEtiquette"))
+                    }
+                    .toggleStyle(.switch)
+
+                    Text(t("help.appleSpeech"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 } else {
                     stepperField(t("settings.beam"), value: $settings.beamSize, in: 1...8, help: t("help.beam"))
                 }
 
-                numericField(t("settings.confidence"), value: $settings.minConfidence, suffix: "", help: t("help.confidence"))
-                stepperField(t("settings.lineChars"), value: $settings.lineChars, in: 0...80, help: t("help.lineChars"))
-                Toggle(isOn: $settings.senseVoiceRichInfo) {
-                    parameterLabel(t("settings.senseVoiceRichInfo"), help: t("help.senseVoiceRichInfo"))
+                if settings.usesBackendRecognition {
+                    numericField(t("settings.confidence"), value: $settings.minConfidence, suffix: "", help: t("help.confidence"))
+                    stepperField(t("settings.lineChars"), value: $settings.lineChars, in: 0...80, help: t("help.lineChars"))
                 }
-                .toggleStyle(.switch)
-                Toggle(isOn: $settings.diarizeSpeakers) {
-                    parameterLabel(t("settings.diarizeSpeakers"), help: t("help.diarizeSpeakers"))
+                if settings.usesSenseVoiceRichInfo {
+                    Toggle(isOn: $settings.senseVoiceRichInfo) {
+                        parameterLabel(t("settings.senseVoiceRichInfo"), help: t("help.senseVoiceRichInfo"))
+                    }
+                    .toggleStyle(.switch)
+                    if settings.senseVoiceRichInfo && !settings.isSenseVoiceActive {
+                        stackedField(t("settings.emotionModel"), help: t("help.emotionModel")) {
+                            HStack(spacing: 8) {
+                                TextField("", text: $settings.emotionModel)
+                                    .textFieldStyle(.roundedBorder)
+                                Button {
+                                    chooseEmotionModelDirectory()
+                                } label: {
+                                    Image(systemName: "folder")
+                                }
+                                .buttonStyle(.bordered)
+                                .help(t("action.chooseModelFolder"))
+                                Button {
+                                    useRemoteEmotionModel()
+                                } label: {
+                                    Image(systemName: "icloud.and.arrow.down")
+                                }
+                                .buttonStyle(.bordered)
+                                .help(t("action.useRemoteModel"))
+                            }
+                        }
+                        Text(settings.emotionModelAvailable ? t("model.localAvailable") : t("emotion.remote"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
-                .toggleStyle(.switch)
+                if settings.usesBackendRecognition {
+                    Toggle(isOn: $settings.diarizeSpeakers) {
+                        parameterLabel(t("settings.diarizeSpeakers"), help: t("help.diarizeSpeakers"))
+                    }
+                    .toggleStyle(.switch)
+                }
                 if settings.isMiMoActive {
                     Text(t("help.mimoNoNativeSpeaker"))
                         .font(.caption)
@@ -1103,20 +1238,69 @@ struct ContentView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 if settings.diarizeSpeakers {
+                    stackedField(t("settings.speakerLabelingEngine"), help: t("help.speakerLabelingEngine")) {
+                        Picker("", selection: $settings.speakerLabelingEngine) {
+                            ForEach(SpeakerLabelingEngine.allCases) { engine in
+                                Text(speakerLabelingEngineTitle(engine)).tag(engine)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                    }
+                    if settings.speakerLabelingEngine == .eres2netv2 {
+                        stackedField(t("settings.speakerRecognitionModel"), help: t("help.speakerRecognitionModel")) {
+                            HStack(alignment: .center, spacing: 8) {
+                                TextField("", text: $settings.speakerRecognitionModel)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(height: 22)
+                                Button {
+                                    chooseSpeakerRecognitionModelDirectory()
+                                } label: {
+                                    Image(systemName: "folder")
+                                        .frame(width: 14, height: 14)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.regular)
+                                .frame(height: 22)
+                                .help(t("action.chooseModelFolder"))
+                                Button {
+                                    useRemoteSpeakerRecognitionModel()
+                                } label: {
+                                    Image(systemName: "icloud.and.arrow.down")
+                                        .frame(width: 14, height: 14)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.regular)
+                                .frame(height: 22)
+                                .help(t("action.useRemoteModel"))
+                            }
+                        }
+                        Text(settings.speakerRecognitionModelAvailable ? t("model.localAvailable") : t("speakerRecognition.remote"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        stackedField(t("settings.speakerClusteringMethod"), help: t("help.speakerClusteringMethod")) {
+                            Picker("", selection: $settings.speakerClusteringMethod) {
+                                ForEach(visibleSpeakerClusteringMethods) { method in
+                                    Text(speakerClusteringMethodTitle(method)).tag(method)
+                                }
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.menu)
+                        }
+                        numericField(t("settings.speakerClusterThreshold"), value: $settings.speakerClusterThreshold, suffix: "", help: t("help.speakerClusterThreshold"))
+                    }
                     stepperField(t("settings.speakerCount"), value: $settings.diarizationSpeakerCount, in: 0...12, help: t("help.speakerCount"))
                 }
 
-                if !settings.isSenseVoiceActive && !settings.isMiMoActive {
+                if settings.usesFireRedDecodingControls {
                     DisclosureGroup(t("settings.decoding")) {
                         numericField(t("settings.softmaxSmoothing"), value: $settings.softmaxSmoothing, suffix: "", help: t("help.softmaxSmoothing"))
                         numericField(t("settings.lengthPenalty"), value: $settings.lengthPenalty, suffix: "", help: t("help.lengthPenalty"))
                         numericField(t("settings.eosPenalty"), value: $settings.eosPenalty, suffix: "", help: t("help.eosPenalty"))
                         stepperField(t("settings.decodeMaxLen"), value: $settings.decodeMaxLen, in: 0...512, help: t("help.decodeMaxLen"))
 
-                        Text(t("help.unsupportedDecoding"))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
@@ -1682,6 +1866,15 @@ struct ContentView: View {
                     .font(.headline)
                 Spacer()
                 Button {
+                    translateActiveSubtitle()
+                } label: {
+                    Label(t("translation.translate"), systemImage: "character.bubble")
+                }
+                .labelStyle(.iconOnly)
+                .disabled(activeSlot?.hasEditableSubtitle != true || isTranslating || isProcessing)
+                .help(t("translation.translateAllHelp"))
+
+                Button {
                     importSubtitleForActiveFile()
                 } label: {
                     Label(t("action.importSubtitle"), systemImage: "text.badge.plus")
@@ -1725,9 +1918,19 @@ struct ContentView: View {
                     slot: fileSlotBinding(for: slotID),
                     selectedFrequentTerm: $selectedFrequentTerm,
                     language: language,
-                    playback: playback
+                    playback: playback,
+                    onTranslateCue: { cueID, choice in
+                        translateCues(in: slotID, cueIDs: [cueID], to: choice)
+                    }
                 )
                 .id(slotID)
+            } else if let slot = activeSlot,
+                      !slot.previewText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                TextEditor(text: .constant(slot.previewText))
+                    .font(.system(.body, design: .monospaced))
+                    .scrollContentBackground(.hidden)
+                    .frame(maxWidth: .infinity, minHeight: 300)
+                    .accessibilityLabel(t("output.title"))
             } else {
                 ContentUnavailableView(
                     t("output.placeholder"),
@@ -1765,6 +1968,18 @@ struct ContentView: View {
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
+
+                Button {
+                    if let slot { presentTranslationSheet(forSlot: slot.id) }
+                } label: {
+                    Image(systemName: "character.bubble")
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .disabled(slot?.hasEditableSubtitle != true || isTranslating)
+                .help(t("translation.translateAllHelp"))
+
                 Button {
                     playback.togglePlayPause()
                 } label: {
@@ -1922,6 +2137,16 @@ struct ContentView: View {
         } else {
             let anchorID = anchorCueID(in: ids)
 
+            if ids.count == 1, let onlyID = ids.first {
+                Button {
+                    jumpToCueInOutputTab(onlyID)
+                } label: {
+                    Label(t("cueList.jumpTo"), systemImage: "arrow.right.circle")
+                }
+
+                Divider()
+            }
+
             Button {
                 insertCueRelativeToAnchor(anchorID, position: .before)
             } label: {
@@ -1947,6 +2172,21 @@ struct ContentView: View {
                 )
             }
 
+            Menu {
+                ForEach(TranslationLanguageChoice.common) { choice in
+                    Button(choice.localizedTitle) {
+                        if let slot = activeSlot {
+                            translateCues(in: slot.id, cueIDs: ids, to: choice)
+                        }
+                    }
+                }
+            } label: {
+                Label(
+                    ids.count > 1 ? "\(t("translation.translate")) (\(ids.count))" : t("translation.translate"),
+                    systemImage: "character.bubble"
+                )
+            }
+
             Divider()
 
             Button(role: .destructive) {
@@ -1961,6 +2201,13 @@ struct ContentView: View {
     }
 
     private enum CueInsertPosition { case before, after }
+
+    private func jumpToCueInOutputTab(_ cueID: SubtitleCue.ID) {
+        guard files.indices.contains(activeIndex),
+              files[activeIndex].cues.contains(where: { $0.id == cueID }) else { return }
+        files[activeIndex].selectedCueID = cueID
+        detailTab = .output
+    }
 
     private func anchorCueID(in ids: Set<SubtitleCue.ID>) -> SubtitleCue.ID? {
         guard files.indices.contains(activeIndex) else { return nil }
@@ -2131,12 +2378,64 @@ struct ContentView: View {
         t("settings.asrEngine.\(engine.rawValue)")
     }
 
+    private func modelHelpText() -> String {
+        let key = "help.model.\(settings.effectiveASREngine.rawValue)"
+        let localized = t(key)
+        return localized == key ? t("help.model") : localized
+    }
+
+    private func modelStatusText() -> String? {
+        guard let info = settings.currentModelInfo else { return nil }
+        let availability = info.localModelAvailable ? t("model.localAvailable") : t("model.localMissing")
+        let supports = info.supports.map(supportTitle).joined(separator: t("list.separator"))
+        return String(format: t("model.status"), info.title, availability, supports)
+    }
+
+    private func supportTitle(_ support: String) -> String {
+        let key = "model.support.\(support)"
+        let localized = t(key)
+        if localized != key {
+            return localized
+        }
+        return support.replacingOccurrences(of: "_", with: " ")
+    }
+
     private func recognitionLanguageTitle(_ option: RecognitionLanguage) -> String {
         t("settings.recognitionLanguage.\(option.rawValue)")
     }
 
     private func vadEngineTitle(_ engine: VADEngine) -> String {
         t("settings.vadEngine.\(engine.rawValue)")
+    }
+
+    private func speakerLabelingEngineTitle(_ engine: SpeakerLabelingEngine) -> String {
+        t("settings.speakerLabelingEngine.\(engine.rawValue)")
+    }
+
+    private func speakerClusteringMethodTitle(_ method: SpeakerClusteringMethod) -> String {
+        t("settings.speakerClusteringMethod.\(method.rawValue)")
+    }
+
+    private func vadEngineHelpText() -> String {
+        let key = "help.vadEngine.\(settings.effectiveVADEngine.rawValue)"
+        let localized = t(key)
+        return localized == key ? t("help.vadEngine") : localized
+    }
+
+    private func vadStatusText() -> String? {
+        guard settings.segmentMode == .vad else {
+            return t("vad.status.fixed")
+        }
+        if settings.effectiveVADEngine == .firered,
+           let info = settings.currentVADInfo,
+           !info.localModelAvailable {
+            return t("vad.status.fireredMissing")
+        }
+        if let info = settings.currentVADInfo {
+            let availability = info.localModelAvailable ? t("model.localAvailable") : t("model.localMissing")
+            return String(format: t("vad.status"), info.title, availability)
+        }
+        return nil
     }
 
     private func tabTitle(_ tab: DetailTab) -> String {
@@ -2244,26 +2543,196 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - Translation
+
+    func presentTranslationSheet(forSlot slotID: FileSlot.ID, cueIDs: Set<SubtitleCue.ID> = []) {
+        translationSheetSlotID = slotID
+        translationSheetCueIDs = cueIDs
+        isTranslationSheetPresented = true
+    }
+
+    func translateActiveSubtitle() {
+        guard let slot = activeSlot, slot.hasEditableSubtitle else { return }
+        presentTranslationSheet(forSlot: slot.id)
+    }
+
+    func translateCues(in slotID: FileSlot.ID, cueIDs: Set<SubtitleCue.ID>, to target: TranslationLanguageChoice, mode: TranslationOutputMode = .replace) {
+        guard !cueIDs.isEmpty else { return }
+        translationTargetLanguage = target
+        startTranslation(
+            job: TranslationJob(
+                scope: .cues(slotID: slotID, cueIDs: cueIDs, mode: mode),
+                source: nil,
+                target: target.language
+            )
+        )
+    }
+
+    private func startTranslationFromSheet() {
+        guard let slotID = translationSheetSlotID else { return }
+        let scope: TranslationJob.Scope
+        if translationSheetCueIDs.isEmpty {
+            scope = .wholeSlot(slotID: slotID, mode: translationMode)
+        } else {
+            scope = .cues(slotID: slotID, cueIDs: translationSheetCueIDs, mode: translationMode)
+        }
+        startTranslation(
+            job: TranslationJob(
+                scope: scope,
+                source: nil,
+                target: translationTargetLanguage.language
+            )
+        )
+    }
+
+    private func startTranslation(job: TranslationJob) {
+        translationJob = job
+        let newConfig = TranslationSession.Configuration(source: job.source, target: job.target)
+        if translationConfiguration == newConfig {
+            translationConfiguration?.invalidate()
+        } else {
+            translationConfiguration = newConfig
+        }
+    }
+
+    @MainActor
+    private func runTranslation(session: TranslationSession) async {
+        guard let job = translationJob else { return }
+        translationJob = nil
+        isTranslating = true
+        defer { isTranslating = false }
+        do {
+            switch job.scope {
+            case .wholeSlot(let slotID, let mode):
+                try await translateWholeSlot(slotID: slotID, mode: mode, session: session)
+            case .cues(let slotID, let cueIDs, let mode):
+                try await translateCues(slotID: slotID, cueIDs: cueIDs, mode: mode, session: session)
+            }
+        } catch {
+            translationErrorMessage = error.localizedDescription
+        }
+    }
+
+    private func translateWholeSlot(slotID: FileSlot.ID, mode: TranslationOutputMode, session: TranslationSession) async throws {
+        guard let index = files.firstIndex(where: { $0.id == slotID }) else { return }
+        let originals = files[index].cues.map(\.text)
+        let translated = try await TranslationUtility.translateBatch(originals, using: session)
+        guard files.indices.contains(index), files[index].id == slotID else { return }
+        applyTranslation(originals: originals, translated: translated, to: index, mode: mode, restrictTo: nil)
+    }
+
+    private func translateCues(slotID: FileSlot.ID, cueIDs: Set<SubtitleCue.ID>, mode: TranslationOutputMode, session: TranslationSession) async throws {
+        guard let index = files.firstIndex(where: { $0.id == slotID }) else { return }
+        let allCues = files[index].cues
+        let targetIndices = allCues.enumerated().compactMap { offset, cue in
+            cueIDs.contains(cue.id) ? offset : nil
+        }
+        guard !targetIndices.isEmpty else { return }
+        let originals = targetIndices.map { allCues[$0].text }
+        let translated = try await TranslationUtility.translateBatch(originals, using: session)
+        guard files.indices.contains(index), files[index].id == slotID else { return }
+        applyTranslation(originals: originals, translated: translated, to: index, mode: mode, restrictTo: targetIndices)
+    }
+
+    private func applyTranslation(
+        originals: [String],
+        translated: [String],
+        to fileIndex: Int,
+        mode: TranslationOutputMode,
+        restrictTo cueIndices: [Int]?
+    ) {
+        let slotID = files[fileIndex].id
+        let beforeCues = files[fileIndex].cues
+        update(at: fileIndex) { slot in
+            if let cueIndices {
+                for (offset, cueIndex) in cueIndices.enumerated() {
+                    guard slot.cues.indices.contains(cueIndex), offset < translated.count else { continue }
+                    slot.cues[cueIndex].text = TranslationUtility.combine(
+                        original: originals[offset],
+                        translated: translated[offset],
+                        mode: mode
+                    )
+                }
+            } else {
+                for index in slot.cues.indices where index < translated.count {
+                    slot.cues[index].text = TranslationUtility.combine(
+                        original: originals[index],
+                        translated: translated[index],
+                        mode: mode
+                    )
+                }
+            }
+            slot.previewText = SubtitleDocument.serialize(slot.cues, format: slot.outputFormat)
+        }
+        registerTranslationUndoStep(slotID: slotID, cues: beforeCues)
+    }
+
+    private func configureTranslationUndo() {
+        translationUndo.restoreHandler = { slotID, restoredCues in
+            self.applyTranslationSnapshot(slotID: slotID, cues: restoredCues)
+        }
+    }
+
+    private func applyTranslationSnapshot(slotID: UUID, cues: [SubtitleCue]) {
+        guard let index = files.firstIndex(where: { $0.id == slotID }) else { return }
+        let currentCues = files[index].cues
+        update(at: index) { slot in
+            slot.cues = cues
+            slot.previewText = SubtitleDocument.serialize(cues, format: slot.outputFormat)
+        }
+        registerTranslationUndoStep(slotID: slotID, cues: currentCues)
+    }
+
+    private func registerTranslationUndoStep(slotID: UUID, cues: [SubtitleCue]) {
+        guard let undoManager else { return }
+        undoManager.registerUndo(withTarget: translationUndo) { coordinator in
+            coordinator.restore(slotID: slotID, cues: cues)
+        }
+        undoManager.setActionName(t("undo.translate"))
+    }
+
+    // MARK: - Sandbox folder authorization
+
+    private func authorizeSidecarFolderForActive() {
+        let initialURL = activeSlot?.url
+        let granted = FolderAuthorizationStore.shared.promptForFolderAuthorization(
+            initialURL: initialURL,
+            message: t("sandbox.authorizeFolder.message"),
+            prompt: t("sandbox.authorizeFolder.prompt")
+        )
+        guard granted, let slot = activeSlot, !slot.hasEditableSubtitle else { return }
+        importSidecarSubtitle(for: slot.url, slotID: slot.id)
+    }
+
     private func addFiles(_ urls: [URL]) {
         var selectedIndex: Int?
         for url in urls {
             let normalized = url.standardizedFileURL
-            recentFiles.add(normalized)
-            if let existingIndex = files.firstIndex(where: { $0.url.standardizedFileURL == normalized }) {
+            // Under App Sandbox, access granted by Powerbox doesn't persist across
+            // launches. If a stored security-scoped bookmark exists for this URL,
+            // resolve it to re-establish read access for the rest of the session.
+            let usableURL = FolderAuthorizationStore.shared.resolveFileForAccess(path: normalized.path) ?? normalized
+            recentFiles.add(usableURL)
+            let bytes = (try? FileManager.default.attributesOfItem(atPath: usableURL.path)[.size] as? NSNumber)?.int64Value
+            if let existingIndex = files.firstIndex(where: { $0.url.standardizedFileURL == usableURL.standardizedFileURL }) {
                 selectedIndex = existingIndex
+                if files[existingIndex].fileSizeBytes == nil {
+                    files[existingIndex].fileSizeBytes = bytes
+                }
                 if files[existingIndex].mediaInfo == nil {
-                    loadMediaInfo(for: normalized, slotID: files[existingIndex].id)
+                    loadMediaInfo(for: usableURL, slotID: files[existingIndex].id)
                 }
                 if files[existingIndex].hasEditableSubtitle == false {
-                    importSidecarSubtitle(for: normalized, slotID: files[existingIndex].id)
+                    importSidecarSubtitle(for: usableURL, slotID: files[existingIndex].id)
                 }
                 continue
             }
-            let slot = FileSlot(url: normalized)
+            var slot = FileSlot(url: usableURL)
+            slot.fileSizeBytes = bytes
             files.append(slot)
             selectedIndex = files.count - 1
-            loadMediaInfo(for: normalized, slotID: slot.id)
-            importSidecarSubtitle(for: normalized, slotID: slot.id)
+            loadMediaInfo(for: usableURL, slotID: slot.id)
+            importSidecarSubtitle(for: usableURL, slotID: slot.id)
         }
         if let selectedIndex {
             activeIndex = selectedIndex
@@ -2352,10 +2821,64 @@ struct ContentView: View {
     }
 
     private func importSidecarSubtitle(for mediaURL: URL, slotID: UUID) {
-        guard let subtitleURL = sidecarSubtitleURL(for: mediaURL) else { return }
-        Task {
-            await importSubtitle(from: subtitleURL, slotID: slotID, automatic: true)
+        if let subtitleURL = sidecarSubtitleURL(for: mediaURL) {
+            Task {
+                await importSubtitle(from: subtitleURL, slotID: slotID, automatic: true)
+            }
+            return
         }
+        maybePromptSidecarAuthorization(for: mediaURL)
+    }
+
+    private func maybePromptSidecarAuthorization(for mediaURL: URL) {
+        let folderURL = mediaURL.deletingLastPathComponent()
+        let store = FolderAuthorizationStore.shared
+        guard !store.isFolderAuthorized(folderURL) else { return }
+        guard !store.wasDeclined(folderPath: folderURL.standardizedFileURL.path) else { return }
+        guard pendingSidecarAuthorizationURL == nil else { return }
+        pendingSidecarAuthorizationURL = mediaURL
+    }
+
+    private var sidecarPromptBinding: Binding<Bool> {
+        Binding(
+            get: { pendingSidecarAuthorizationURL != nil },
+            set: { if !$0 { pendingSidecarAuthorizationURL = nil } }
+        )
+    }
+
+    @ViewBuilder
+    private func sidecarPromptActions(for url: URL) -> some View {
+        Button(t("sandbox.sidecarPrompt.authorize")) {
+            handleSidecarAuthorizationAccept(for: url)
+        }
+        Button(t("sandbox.sidecarPrompt.skip"), role: .cancel) {
+            handleSidecarAuthorizationDecline(for: url)
+        }
+    }
+
+    private func sidecarPromptMessage(for url: URL) -> Text {
+        let folderName = url.deletingLastPathComponent().lastPathComponent
+        let template = t("sandbox.sidecarPrompt.message")
+        return Text(String(format: template, folderName))
+    }
+
+    private func handleSidecarAuthorizationAccept(for url: URL) {
+        let folderPath = url.deletingLastPathComponent().standardizedFileURL.path
+        FolderAuthorizationStore.shared.clearDecline(folderPath: folderPath)
+        pendingSidecarAuthorizationURL = nil
+        let granted = FolderAuthorizationStore.shared.promptForFolderAuthorization(
+            initialURL: url,
+            message: t("sandbox.authorizeFolder.message"),
+            prompt: t("sandbox.authorizeFolder.prompt")
+        )
+        guard granted, let slot = files.first(where: { $0.url == url }) else { return }
+        importSidecarSubtitle(for: url, slotID: slot.id)
+    }
+
+    private func handleSidecarAuthorizationDecline(for url: URL) {
+        let folderPath = url.deletingLastPathComponent().standardizedFileURL.path
+        FolderAuthorizationStore.shared.recordDecline(folderPath: folderPath)
+        pendingSidecarAuthorizationURL = nil
     }
 
     private func sidecarSubtitleURL(for mediaURL: URL) -> URL? {
@@ -2562,6 +3085,87 @@ struct ContentView: View {
         return isReady
     }
 
+    private func chooseEmotionModelDirectory() {
+        guard let modelURL = chooseAuxiliaryModelDirectory(
+            expectedDirectoryName: "emotion2vec_plus_base",
+            message: t("model.chooseEmotion.message")
+        ) else {
+            return
+        }
+        settings.emotionModel = modelURL.path
+        settings.emotionModelAvailable = isNonEmptyDirectory(modelURL)
+        backend.rememberEmotionModelDirectory(modelURL)
+        restartBackendAfterAuxiliaryModelChange()
+    }
+
+    private func useRemoteEmotionModel() {
+        settings.emotionModel = "emotion2vec/emotion2vec_plus_base"
+        settings.emotionModelAvailable = false
+        backend.useRemoteEmotionModelDownload()
+        restartBackendAfterAuxiliaryModelChange()
+    }
+
+    private func chooseSpeakerRecognitionModelDirectory() {
+        guard let modelURL = chooseAuxiliaryModelDirectory(
+            expectedDirectoryName: "speech_eres2netv2_sv_zh-cn_16k-common",
+            message: t("model.chooseSpeaker.message")
+        ) else {
+            return
+        }
+        settings.speakerRecognitionModel = modelURL.path
+        settings.speakerRecognitionModelAvailable = isNonEmptyDirectory(modelURL)
+        backend.rememberSpeakerRecognitionModelDirectory(modelURL)
+        restartBackendAfterAuxiliaryModelChange()
+    }
+
+    private func useRemoteSpeakerRecognitionModel() {
+        settings.speakerRecognitionModel = "iic/speech_eres2netv2_sv_zh-cn_16k-common"
+        settings.speakerRecognitionModelAvailable = false
+        backend.useRemoteSpeakerRecognitionModelDownload()
+        restartBackendAfterAuxiliaryModelChange()
+    }
+
+    private func chooseAuxiliaryModelDirectory(
+        expectedDirectoryName: String,
+        message: String
+    ) -> URL? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.message = message
+        panel.prompt = t("action.chooseModelFolder")
+
+        guard panel.runModal() == .OK, let selectedURL = panel.url else {
+            return nil
+        }
+
+        let selectedDirectory = selectedURL.standardizedFileURL
+        FolderAuthorizationStore.shared.authorizeFolder(selectedDirectory)
+        let direct = selectedDirectory
+        let nested = selectedDirectory.appending(path: expectedDirectoryName)
+        return isNonEmptyDirectory(nested) ? nested.standardizedFileURL : direct
+    }
+
+    private func restartBackendAfterAuxiliaryModelChange() {
+        guard backend.isRunning else { return }
+        backend.stop(waitForExit: true)
+        connectionState = .disconnected
+    }
+
+    private func isNonEmptyDirectory(_ url: URL) -> Bool {
+        var isDirectory = ObjCBool(false)
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              isDirectory.boolValue,
+              let contents = try? FileManager.default.contentsOfDirectory(
+                  at: url,
+                  includingPropertiesForKeys: nil
+              ) else {
+            return false
+        }
+        return !contents.isEmpty
+    }
+
     // MARK: - Sequential processing
 
     private func previewAll() async {
@@ -2594,17 +3198,21 @@ struct ContentView: View {
     private func transcribeAll() async {
         guard hasFiles, !isProcessing else { return }
         isProcessing = true
-        guard await ensureBackendReady() else {
-            if isProcessing {
-                errorMessage = backend.message
-                isProcessing = false
+        if !settings.effectiveASREngine.isLocal {
+            guard await ensureBackendReady() else {
+                if isProcessing {
+                    errorMessage = backend.message
+                    isProcessing = false
+                }
+                return
             }
-            return
         }
         guard isProcessing else {
             return
         }
         detailTab = .output
+        let totalCount = files.count
+        let language = self.language
         let task = Task { @MainActor in
             defer {
                 isProcessing = false
@@ -2613,6 +3221,17 @@ struct ContentView: View {
             for index in files.indices {
                 if Task.isCancelled { break }
                 await transcribe(at: index)
+            }
+            if !Task.isCancelled {
+                let failures = files.reduce(0) { acc, slot in
+                    if case .failed = slot.processingState { return acc + 1 }
+                    return acc
+                }
+                NotificationsService.postTranscriptionComplete(
+                    language: language,
+                    fileCount: totalCount,
+                    failureCount: failures
+                )
             }
         }
         processingTask = task
@@ -2648,12 +3267,37 @@ struct ContentView: View {
         )
     }
 
+    private func previewReuseKey(for slot: FileSlot, clipRange: MediaClipRange?) -> String {
+        let fields = settings.formFields(includeOutput: false)
+            .map { "\($0.0)=\($0.1)" }
+            .joined(separator: "\u{1f}")
+        let clip = clipRange.map { "\($0.start)-\($0.end)" } ?? "full"
+        let attributes = try? FileManager.default.attributesOfItem(atPath: slot.url.path)
+        let modified = (attributes?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        return [
+            slot.url.standardizedFileURL.path,
+            "\(modified)",
+            clip,
+            fields
+        ].joined(separator: "\u{1e}")
+    }
+
+    private func reusablePreviewID(for slot: FileSlot, clipRange: MediaClipRange?) -> String? {
+        guard !settings.effectiveASREngine.isLocal,
+              let previewID = slot.previewID,
+              slot.previewSettingsKey == previewReuseKey(for: slot, clipRange: clipRange) else {
+            return nil
+        }
+        return previewID
+    }
+
     private func preview(at index: Int) async {
         guard files.indices.contains(index) else { return }
         activeIndex = index
         let slot = files[index]
         let url = slot.url
         let clipRange = processingClipRange(for: slot)
+        let reuseKey = previewReuseKey(for: slot, clipRange: clipRange)
         let displayDuration = timelineDuration(for: slot)
         update(at: index) {
             $0.processingState = .previewing
@@ -2680,6 +3324,9 @@ struct ContentView: View {
                     $0.mediaInfo = payload.mediaInfo ?? $0.mediaInfo
                 }
                 $0.segments = segments
+                $0.previewID = payload.previewId ?? payload.id
+                $0.previewSettingsKey = reuseKey
+                $0.previewTimeOffset = preparedInput.timeOffset
                 $0.statusKey = "status.previewReady"
                 $0.statusDetail = "\(payload.count) \(t("segments.count"))"
                 $0.processingState = .done
@@ -2691,6 +3338,8 @@ struct ContentView: View {
                 $0.statusDetail = error.localizedDescription
                 $0.processingState = .failed
                 $0.progress = 0
+                $0.previewID = nil
+                $0.previewSettingsKey = nil
             }
         }
     }
@@ -2701,6 +3350,8 @@ struct ContentView: View {
         let slot = files[index]
         let url = slot.url
         let clipRange = processingClipRange(for: slot)
+        let reusablePreviewID = reusablePreviewID(for: slot, clipRange: clipRange)
+        let reusablePreviewTimeOffset = slot.previewTimeOffset
         update(at: index) {
             $0.processingState = .transcribing
             $0.previewText = ""
@@ -2715,6 +3366,24 @@ struct ContentView: View {
             $0.statusDetail = clipRange.map { clipRangeSummary($0) } ?? url.lastPathComponent
         }
         do {
+            if let reusablePreviewID, !settings.effectiveASREngine.isLocal {
+                update(at: index) {
+                    $0.statusKey = "status.starting"
+                    $0.statusDetail = t("status.reusingPreview")
+                }
+                do {
+                    let created = try await api.createJobFromPreview(previewID: reusablePreviewID, settings: settings)
+                    update(at: index) { $0.jobID = created.id }
+                    try await poll(jobID: created.id, fileIndex: index, timeOffset: reusablePreviewTimeOffset)
+                    return
+                } catch {
+                    update(at: index) {
+                        $0.previewID = nil
+                        $0.previewSettingsKey = nil
+                        $0.statusDetail = url.lastPathComponent
+                    }
+                }
+            }
             let preparedInput = try await preparedMediaInput(for: slot, clipRange: clipRange)
             defer { preparedInput.cleanup() }
             if clipRange != nil {
@@ -2722,6 +3391,14 @@ struct ContentView: View {
                     $0.statusKey = "status.starting"
                     $0.statusDetail = clipRange.map { clipRangeSummary($0) } ?? url.lastPathComponent
                 }
+            }
+            if settings.effectiveASREngine.isLocal {
+                try await transcribeWithAppleSpeech(
+                    fileIndex: index,
+                    audioURL: preparedInput.uploadURL,
+                    timeOffset: preparedInput.timeOffset
+                )
+                return
             }
             let created = try await api.createJob(fileURL: preparedInput.uploadURL, settings: settings)
             update(at: index) { $0.jobID = created.id }
@@ -2740,6 +3417,61 @@ struct ContentView: View {
                     $0.statusDetail = error.localizedDescription
                 }
             }
+        }
+    }
+
+    private func transcribeWithAppleSpeech(
+        fileIndex: Int,
+        audioURL: URL,
+        timeOffset: Double
+    ) async throws {
+        let preferredLocale = appleSpeechLocale(for: settings.recognitionLanguage)
+        update(at: fileIndex) {
+            $0.statusKey = "status.transcribing"
+            $0.statusDetail = ""
+            $0.progress = 0
+        }
+        let cues = try await AppleSpeechService.transcribe(
+            url: audioURL,
+            locale: preferredLocale,
+            timeOffset: timeOffset,
+            fastResults: settings.appleSpeechFastResults,
+            etiquetteFilter: settings.appleSpeechEtiquetteFilter
+        ) { progress in
+            Task { @MainActor in
+                self.update(at: fileIndex) {
+                    $0.progress = progress
+                }
+            }
+        }
+        if Task.isCancelled {
+            update(at: fileIndex) {
+                $0.processingState = .cancelled
+                $0.statusKey = "status.cancelled"
+                $0.statusDetail = ""
+            }
+            return
+        }
+        guard files.indices.contains(fileIndex) else { return }
+        let format = files[fileIndex].outputFormat
+        let serialized = SubtitleDocument.serialize(cues, format: format)
+        installSubtitleText(serialized, at: fileIndex, format: format, parsedCues: cues, timeOffset: 0)
+        update(at: fileIndex) {
+            $0.progress = 1
+            $0.statusKey = "status.done"
+            $0.statusDetail = "\(cues.count) cues"
+            $0.processingState = .done
+        }
+    }
+
+    private func appleSpeechLocale(for language: RecognitionLanguage) -> Locale {
+        switch language {
+        case .auto, .nospeech: return Locale.current
+        case .zh: return Locale(identifier: "zh-CN")
+        case .en: return Locale(identifier: "en-US")
+        case .yue: return Locale(identifier: "zh-HK")
+        case .ja: return Locale(identifier: "ja-JP")
+        case .ko: return Locale(identifier: "ko-KR")
         }
     }
 
@@ -2774,17 +3506,27 @@ struct ContentView: View {
             }
 
             if job.status == "done" {
+                var installedCueCount: Int?
                 if files.indices.contains(fileIndex) {
                     let format = files[fileIndex].outputFormat
-                    if let output = try? await api.fetchOutput(jobID: jobID),
-                       let text = String(data: output.data, encoding: .utf8) {
+                    let downloadedText: String?
+                    do {
+                        let output = try await api.fetchOutput(jobID: jobID)
+                        downloadedText = String(data: output.data, encoding: .utf8)
+                    } catch {
+                        downloadedText = nil
+                    }
+                    if let text = downloadedText ?? job.preview, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         installSubtitleText(text, at: fileIndex, format: format, timeOffset: timeOffset)
+                        if files.indices.contains(fileIndex) {
+                            installedCueCount = files[fileIndex].cues.count
+                        }
                     }
                 }
                 update(at: fileIndex) {
                     $0.progress = 1
                     $0.statusKey = "status.done"
-                    $0.statusDetail = "\(job.cueCount ?? 0) cues"
+                    $0.statusDetail = "\(installedCueCount ?? job.cueCount ?? 0) cues"
                     $0.processingState = .done
                 }
                 return
@@ -3428,6 +4170,9 @@ struct FileSlot: Identifiable {
     var selectedCueID: SubtitleCue.ID?
     var mediaInfo: MediaInfo?
     var duration: Double = 0
+    var previewID: String?
+    var previewSettingsKey: String?
+    var previewTimeOffset: Double = 0
     var previewText: String = ""
     var jobID: String?
     var lastOutputPath: String?
@@ -3438,6 +4183,7 @@ struct FileSlot: Identifiable {
     var statusKey: String = "status.ready"
     var statusDetail: String = ""
     var processingState: ProcessingState = .idle
+    var fileSizeBytes: Int64?
 
     enum ProcessingState: Equatable {
         case idle
@@ -3886,6 +4632,8 @@ extension Notification.Name {
     static let msubTranscribeRequested = Notification.Name("MSubTranscribeRequested")
     static let msubPreviewRequested = Notification.Name("MSubPreviewRequested")
     static let msubStopRequested = Notification.Name("MSubStopRequested")
+    static let msubTranslateRequested = Notification.Name("MSubTranslateRequested")
+    static let msubAuthorizeSidecarFolderRequested = Notification.Name("MSubAuthorizeSidecarFolderRequested")
     static let msubSaveAllRequested = Notification.Name("MSubSaveAllRequested")
     static let msubDeleteSelectedCueRequested = Notification.Name("MSubDeleteSelectedCueRequested")
     static let msubDuplicateSelectedCueRequested = Notification.Name("MSubDuplicateSelectedCueRequested")
@@ -3918,6 +4666,8 @@ final class RecentFilesStore {
             urls = Array(urls.prefix(limit))
         }
         save()
+        FolderAuthorizationStore.shared.storeFileBookmark(for: normalized)
+        NSDocumentController.shared.noteNewRecentDocumentURL(normalized)
     }
 
     func replace(_ oldURL: URL, with newURL: URL) {
@@ -3931,11 +4681,18 @@ final class RecentFilesStore {
             urls = Array(urls.prefix(limit))
         }
         save()
+        FolderAuthorizationStore.shared.removeFileBookmark(path: oldNormalized.path)
+        FolderAuthorizationStore.shared.storeFileBookmark(for: newNormalized)
+        NSDocumentController.shared.noteNewRecentDocumentURL(newNormalized)
     }
 
     func clear() {
+        for url in urls {
+            FolderAuthorizationStore.shared.removeFileBookmark(path: url.path)
+        }
         urls = []
         save()
+        NSDocumentController.shared.clearRecentDocuments(nil)
     }
 
     private func load() {

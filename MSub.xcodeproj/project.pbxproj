@@ -16,6 +16,12 @@
 		000000000000000000000107 /* Settings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000207 /* Settings.swift */; };
 		000000000000000000000108 /* SubtitleDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000209 /* SubtitleDocument.swift */; };
 		973399062FBE32A400FDA459 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 973399052FBE32A400FDA459 /* AppIcon.icon */; };
+		974075122FCAE5890019F9A1 /* NotificationsService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 974075112FCAE5890019F9A1 /* NotificationsService.swift */; };
+		974075142FCAE5EE0019F9A1 /* AppIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 974075132FCAE5EE0019F9A1 /* AppIntents.swift */; };
+		974075162FCAE6480019F9A1 /* AppleSpeechService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 974075152FCAE6480019F9A1 /* AppleSpeechService.swift */; };
+		974075182FCAEA950019F9A1 /* TranslationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 974075172FCAEA950019F9A1 /* TranslationService.swift */; };
+		9740751A2FCAEB210019F9A1 /* TranslationSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 974075192FCAEB210019F9A1 /* TranslationSheet.swift */; };
+		9740751C2FCB43230019F9A1 /* FolderAuthorizationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9740751B2FCB43230019F9A1 /* FolderAuthorizationStore.swift */; };
 		974192942FBD973900E74858 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 974192942FBD973900E74857 /* Localizable.xcstrings */; };
 		978E671F2FC1B89C0054DBBA /* ffmpeg in Resources */ = {isa = PBXBuildFile; fileRef = 978E671E2FC1B89C0054DBBA /* ffmpeg */; };
 /* End PBXBuildFile section */
@@ -33,6 +39,12 @@
 		00000000000000000000020A /* MSub.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = MSub.entitlements; sourceTree = "<group>"; };
 		000000000000000000000301 /* MSub.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MSub.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		973399052FBE32A400FDA459 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
+		974075112FCAE5890019F9A1 /* NotificationsService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationsService.swift; sourceTree = "<group>"; };
+		974075132FCAE5EE0019F9A1 /* AppIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppIntents.swift; sourceTree = "<group>"; };
+		974075152FCAE6480019F9A1 /* AppleSpeechService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleSpeechService.swift; sourceTree = "<group>"; };
+		974075172FCAEA950019F9A1 /* TranslationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranslationService.swift; sourceTree = "<group>"; };
+		974075192FCAEB210019F9A1 /* TranslationSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranslationSheet.swift; sourceTree = "<group>"; };
+		9740751B2FCB43230019F9A1 /* FolderAuthorizationStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderAuthorizationStore.swift; sourceTree = "<group>"; };
 		974192942FBD973900E74857 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; name = Localizable.xcstrings; path = Sources/MSub/Localizable.xcstrings; sourceTree = "<group>"; };
 		978E671E2FC1B89C0054DBBA /* ffmpeg */ = {isa = PBXFileReference; lastKnownFileType = text; path = ffmpeg; sourceTree = "<group>"; };
 		979A48422FBF74DD00FEF70A /* MSub-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "MSub-Info.plist"; sourceTree = SOURCE_ROOT; };
@@ -64,6 +76,12 @@
 				000000000000000000000206 /* Models.swift */,
 				000000000000000000000207 /* Settings.swift */,
 				000000000000000000000209 /* SubtitleDocument.swift */,
+				974075112FCAE5890019F9A1 /* NotificationsService.swift */,
+				974075132FCAE5EE0019F9A1 /* AppIntents.swift */,
+				974075152FCAE6480019F9A1 /* AppleSpeechService.swift */,
+				974075172FCAEA950019F9A1 /* TranslationService.swift */,
+				974075192FCAEB210019F9A1 /* TranslationSheet.swift */,
+				9740751B2FCB43230019F9A1 /* FolderAuthorizationStore.swift */,
 			);
 			name = MSub;
 			path = Sources/MSub;
@@ -181,13 +199,19 @@
 			isa = PBXSourcesBuildPhase;
 			files = (
 				000000000000000000000101 /* APIClient.swift in Sources */,
+				974075142FCAE5EE0019F9A1 /* AppIntents.swift in Sources */,
 				000000000000000000000102 /* BackendService.swift in Sources */,
+				9740751A2FCAEB210019F9A1 /* TranslationSheet.swift in Sources */,
 				000000000000000000000103 /* ContentView.swift in Sources */,
+				9740751C2FCB43230019F9A1 /* FolderAuthorizationStore.swift in Sources */,
+				974075122FCAE5890019F9A1 /* NotificationsService.swift in Sources */,
 				000000000000000000000104 /* HuzSubtitleMacApp.swift in Sources */,
 				000000000000000000000105 /* Localization.swift in Sources */,
 				000000000000000000000106 /* Models.swift in Sources */,
+				974075162FCAE6480019F9A1 /* AppleSpeechService.swift in Sources */,
 				000000000000000000000107 /* Settings.swift in Sources */,
 				000000000000000000000108 /* SubtitleDocument.swift in Sources */,
+				974075182FCAEA950019F9A1 /* TranslationService.swift in Sources */,
 			);
 		};
 /* End PBXSourcesBuildPhase section */

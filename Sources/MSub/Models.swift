@@ -5,8 +5,11 @@ enum ASREngine: String, CaseIterable, Codable, Identifiable {
     case fireredasr2
     case sensevoice
     case mimo
+    case apple
 
     var id: String { rawValue }
+
+    var isLocal: Bool { self == .apple }
 
     init(from decoder: Decoder) throws {
         let value = try decoder.singleValueContainer().decode(String.self)
@@ -39,6 +42,31 @@ enum VADEngine: String, CaseIterable, Codable, Identifiable {
     }
 }
 
+enum SpeakerLabelingEngine: String, CaseIterable, Codable, Identifiable {
+    case pyannote
+    case eres2netv2
+
+    var id: String { rawValue }
+
+    init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = SpeakerLabelingEngine(rawValue: value) ?? .pyannote
+    }
+}
+
+enum SpeakerClusteringMethod: String, CaseIterable, Codable, Identifiable {
+    case auto
+    case spectral
+    case incremental
+
+    var id: String { rawValue }
+
+    init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = SpeakerClusteringMethod(rawValue: value) ?? .auto
+    }
+}
+
 struct AppConfig: Decodable {
     let defaultModel: String
     let defaultOutputDir: String
@@ -46,6 +74,14 @@ struct AppConfig: Decodable {
     let models: [ASRModelInfo]?
     let defaultVADEngine: VADEngine?
     let vadEngines: [VADModelInfo]?
+    let defaultEmotionModel: String?
+    let localEmotionModel: String?
+    let emotionModelAvailable: Bool?
+    let defaultSpeakerLabelingEngine: SpeakerLabelingEngine?
+    let defaultSpeakerClusteringMethod: SpeakerClusteringMethod?
+    let defaultSpeakerRecognitionModel: String?
+    let localSpeakerRecognitionModel: String?
+    let speakerRecognitionModelAvailable: Bool?
 }
 
 struct ASRModelInfo: Decodable, Identifiable {
@@ -71,6 +107,9 @@ struct VADModelInfo: Decodable, Identifiable {
 }
 
 struct SegmentPreview: Decodable {
+    let id: String?
+    let previewId: String?
+    let settingsKey: String?
     let duration: Double
     let count: Int
     let segments: [SubtitleSegment]
@@ -102,7 +141,7 @@ struct JobStatus: Decodable {
     let output: String?
 }
 
-enum OutputFormat: String, CaseIterable, Identifiable {
+enum OutputFormat: String, CaseIterable, Codable, Identifiable {
     case srt
     case vtt
     case txt
@@ -112,7 +151,7 @@ enum OutputFormat: String, CaseIterable, Identifiable {
     var title: String { rawValue.uppercased() }
 }
 
-enum SegmentMode: String, CaseIterable, Identifiable {
+enum SegmentMode: String, CaseIterable, Codable, Identifiable {
     case vad
     case fixed
 

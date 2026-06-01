@@ -2,6 +2,12 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+enum AppLinks {
+    static let homepage = URL(string: "https://github.com/kGMia/MSub")!
+    static let issues = URL(string: "https://github.com/kGMia/MSub/issues")!
+    static let copyrightHolder = "kGMia"
+}
+
 enum AppearanceTheme: String, CaseIterable, Identifiable {
     case system
     case light
@@ -20,6 +26,7 @@ enum AppearanceTheme: String, CaseIterable, Identifiable {
 
 @main
 struct MSubApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var api = APIClient()
     @State private var backend = BackendService()
     @State private var settings = TranscriptionSettings()
@@ -30,6 +37,7 @@ struct MSubApp: App {
 
     init() {
         AppLanguageBootstrap.applyStoredLanguageIfNeeded()
+        BackendService.terminateRecordedBackendProcesses()
     }
 
     private var language: AppLanguage {
@@ -41,7 +49,7 @@ struct MSubApp: App {
     }
 
     var body: some Scene {
-        WindowGroup {
+        Window("MSub", id: "main") {
             ContentView()
                 .environment(api)
                 .environment(backend)
@@ -50,6 +58,14 @@ struct MSubApp: App {
                 .environment(\.locale, language.locale)
                 .preferredColorScheme(appearance.colorScheme)
                 .frame(minWidth: 820, minHeight: 640)
+                .onAppear {
+                    DockMenuState.shared.recentFiles = recentFiles
+                    let pending = DockMenuState.shared.takePendingOpenURLs()
+                    for url in pending {
+                        NotificationCenter.default.post(name: .msubOpenRecentFileRequested, object: url)
+                    }
+                    DockMenuState.shared.isReady = true
+                }
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
                     backend.stop(waitForExit: true)
                 }
@@ -82,6 +98,10 @@ struct MSubApp: App {
                     NotificationCenter.default.post(name: .msubImportSubtitleRequested, object: nil)
                 }
                 .keyboardShortcut("i", modifiers: [.command, .shift])
+
+                Button(Copy.text("menu.authorizeSidecarFolder", language: language)) {
+                    NotificationCenter.default.post(name: .msubAuthorizeSidecarFolderRequested, object: nil)
+                }
             }
 
             CommandGroup(after: .saveItem) {
@@ -136,6 +156,13 @@ struct MSubApp: App {
 
                 Divider()
 
+                Button(Copy.text("translation.translate", language: language)) {
+                    NotificationCenter.default.post(name: .msubTranslateRequested, object: nil)
+                }
+                .keyboardShortcut("t", modifiers: [.command, .option])
+
+                Divider()
+
                 Button(Copy.text("menu.adjustTiming", language: language)) {
                     NotificationCenter.default.post(name: .msubAdjustTimingRequested, object: nil)
                 }
@@ -154,6 +181,21 @@ struct MSubApp: App {
                     NotificationCenter.default.post(name: .msubZoomTimelineOutRequested, object: nil)
                 }
                 .keyboardShortcut("-", modifiers: [.command, .option])
+            }
+
+            CommandGroup(replacing: .appInfo) {
+                Button(String(format: Copy.text("menu.aboutApp", language: language), AppAbout.appName)) {
+                    AppAbout.showPanel(language: language)
+                }
+            }
+
+            CommandGroup(replacing: .help) {
+                Button(Copy.text("help.homepage", language: language)) {
+                    NSWorkspace.shared.open(AppLinks.homepage)
+                }
+                Button(Copy.text("help.reportIssue", language: language)) {
+                    NSWorkspace.shared.open(AppLinks.issues)
+                }
             }
         }
 
@@ -206,6 +248,77 @@ enum AppLanguageBootstrap {
     }
 }
 
+// MARK: - About panel
+
+enum AppAbout {
+    static var appName: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String
+            ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+            ?? "MSub"
+    }
+
+    private static var shortVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
+    }
+
+    private static var buildNumber: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
+    }
+
+    @MainActor
+    static func showPanel(language: AppLanguage) {
+        let credits = NSMutableAttributedString()
+        let linkAttrs: [NSAttributedString.Key: Any] = [
+            .foregroundColor: NSColor.linkColor,
+            .link: AppLinks.homepage,
+            .font: NSFont.systemFont(ofSize: 11)
+        ]
+        let plainAttrs: [NSAttributedString.Key: Any] = [
+            .foregroundColor: NSColor.secondaryLabelColor,
+            .font: NSFont.systemFont(ofSize: 11)
+        ]
+        credits.append(NSAttributedString(
+            string: Copy.text("about.homepage", language: language) + ": ",
+            attributes: plainAttrs
+        ))
+        credits.append(NSAttributedString(
+            string: AppLinks.homepage.absoluteString,
+            attributes: linkAttrs
+        ))
+        credits.append(NSAttributedString(string: "\n", attributes: plainAttrs))
+        credits.append(NSAttributedString(
+            string: Copy.text("about.reportIssue", language: language) + ": ",
+            attributes: plainAttrs
+        ))
+        credits.append(NSAttributedString(
+            string: AppLinks.issues.absoluteString,
+            attributes: [
+                .foregroundColor: NSColor.linkColor,
+                .link: AppLinks.issues,
+                .font: NSFont.systemFont(ofSize: 11)
+            ]
+        ))
+
+        let year = Calendar(identifier: .gregorian).component(.year, from: Date())
+        let copyright = String(
+            format: Copy.text("about.copyright", language: language),
+            String(year),
+            AppLinks.copyrightHolder
+        )
+
+        let options: [NSApplication.AboutPanelOptionKey: Any] = [
+            .applicationName: appName,
+            .applicationVersion: shortVersion,
+            .version: buildNumber,
+            .credits: credits,
+            NSApplication.AboutPanelOptionKey(rawValue: "Copyright"): copyright
+        ]
+
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.orderFrontStandardAboutPanel(options: options)
+    }
+}
+
 // MARK: - Preferences Window
 
 struct PreferencesView: View {
@@ -213,6 +326,8 @@ struct PreferencesView: View {
     @AppStorage("huz.uiLanguage") private var languageRaw = AppLanguage.zh.rawValue
     @AppStorage("huz.appearanceTheme") private var appearanceRaw = AppearanceTheme.system.rawValue
     @State private var pendingRelaunchLanguage: AppLanguage?
+    private let visibleASREngines: [ASREngine] = [.fireredasr2, .sensevoice, .mimo, .apple]
+    private let visibleVADEngines: [VADEngine] = [.firered, .energy]
 
     private var language: AppLanguage {
         AppLanguage(rawValue: languageRaw) ?? .zh
@@ -277,7 +392,7 @@ struct PreferencesView: View {
             }
             stackedRow(t("settings.vadEngine")) {
                 Picker("", selection: $settings.vadEngine) {
-                    ForEach(VADEngine.allCases) { engine in
+                    ForEach(visibleVADEngines) { engine in
                         Text(t("settings.vadEngine.\(engine.rawValue)")).tag(engine)
                     }
                 }
@@ -294,31 +409,41 @@ struct PreferencesView: View {
         return VStack(alignment: .leading, spacing: 10) {
             stackedRow(t("settings.asrEngine")) {
                 Picker("", selection: $settings.asrEngine) {
-                    ForEach(ASREngine.allCases) { engine in
+                    ForEach(visibleASREngines) { engine in
                         Text(t("settings.asrEngine.\(engine.rawValue)")).tag(engine)
                     }
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
-                .onChange(of: settings.asrEngine) { _, _ in
-                    settings.applyDefaultModelForSelectedEngine()
+                .onChange(of: settings.asrEngine) { _, newValue in
+                    settings.selectASREngine(newValue)
                 }
             }
 
-            Text(t("prefs.modelPath"))
-                .font(.callout.weight(.medium))
-            HStack {
-                TextField("", text: $settings.model)
-                    .textFieldStyle(.roundedBorder)
-                    .labelsHidden()
-                Button(t("prefs.modelPath.choose")) {
-                    chooseModelDirectory()
+            if settings.effectiveASREngine == .apple {
+                Text(modelHelpText())
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(t("prefs.modelPath"))
+                    .font(.callout.weight(.medium))
+                HStack {
+                    TextField("", text: $settings.model)
+                        .textFieldStyle(.roundedBorder)
+                        .labelsHidden()
+                        .onChange(of: settings.model) { _, _ in
+                            settings.modelPathDidChange()
+                        }
+                    Button(t("prefs.modelPath.choose")) {
+                        chooseModelDirectory()
+                    }
                 }
+                Text(modelHelpText())
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            Text(Copy.text("help.model", language: language))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }
         .padding(14)
@@ -396,6 +521,92 @@ struct PreferencesView: View {
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let url = panel.url {
             settings.model = url.path
+            settings.modelPathDidChange()
         }
+    }
+
+    private func modelHelpText() -> String {
+        let key = "help.model.\(settings.effectiveASREngine.rawValue)"
+        let localized = t(key)
+        return localized == key ? t("help.model") : localized
+    }
+}
+
+// MARK: - Dock menu
+
+@MainActor
+final class DockMenuState {
+    static let shared = DockMenuState()
+    private init() {}
+
+    weak var recentFiles: RecentFilesStore?
+    var isReady = false
+    private var pendingOpenURLs: [URL] = []
+
+    func enqueueOpenURL(_ url: URL) {
+        pendingOpenURLs.append(url)
+    }
+
+    func takePendingOpenURLs() -> [URL] {
+        let urls = pendingOpenURLs
+        pendingOpenURLs = []
+        return urls
+    }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    @MainActor
+    func applicationWillTerminate(_ notification: Notification) {
+        BackendService.terminateRecordedBackendProcesses()
+    }
+
+    @MainActor
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        let raw = UserDefaults.standard.string(forKey: "huz.uiLanguage") ?? AppLanguage.zh.rawValue
+        let language = AppLanguage(rawValue: raw) ?? .zh
+        let urls = DockMenuState.shared.recentFiles?.urls ?? []
+
+        let menu = NSMenu()
+        if urls.isEmpty {
+            let empty = NSMenuItem(
+                title: Copy.text("menu.noRecentFiles", language: language),
+                action: nil,
+                keyEquivalent: ""
+            )
+            empty.isEnabled = false
+            menu.addItem(empty)
+        } else {
+            for url in urls {
+                let item = NSMenuItem(
+                    title: url.lastPathComponent,
+                    action: #selector(openRecentFile(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = url
+                item.toolTip = url.path
+                menu.addItem(item)
+            }
+        }
+        return menu
+    }
+
+    @MainActor
+    func application(_ application: NSApplication, open urls: [URL]) {
+        if DockMenuState.shared.isReady {
+            for url in urls {
+                NotificationCenter.default.post(name: .msubOpenRecentFileRequested, object: url)
+            }
+        } else {
+            for url in urls {
+                DockMenuState.shared.enqueueOpenURL(url)
+            }
+        }
+    }
+
+    @MainActor
+    @objc private func openRecentFile(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        NotificationCenter.default.post(name: .msubOpenRecentFileRequested, object: url)
     }
 }

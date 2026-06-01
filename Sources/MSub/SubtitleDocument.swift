@@ -714,7 +714,7 @@ final class PlaybackController {
 
     nonisolated let player = AVPlayer()
 
-    nonisolated(unsafe) private var timeObserverToken: Any?
+    @ObservationIgnored nonisolated(unsafe) private var timeObserverToken: Any?
     private var rateObservation: NSKeyValueObservation?
     private var currentURL: URL?
     private var playbackEndTime: Double?
@@ -836,6 +836,8 @@ struct SubtitleEditorPanel: View {
     @Binding var selectedFrequentTerm: String?
     let language: AppLanguage
     let playback: PlaybackController
+    var onTranslateCue: ((SubtitleCue.ID, TranslationLanguageChoice) -> Void)? = nil
+    @State private var inlineTranslationLanguage: TranslationLanguageChoice = .common[2]
 
     @Environment(APIClient.self) private var api
     @Environment(BackendService.self) private var backend
@@ -858,7 +860,7 @@ struct SubtitleEditorPanel: View {
     @State private var matchCase = false
     @State private var findStatus = ""
     @State private var isFindReplaceExpanded = false
-    @State private var isTimelineExpanded = false
+    @SceneStorage("ui.isTimelineExpanded") private var isTimelineExpanded = false
     @State private var styleColor = Color.yellow
     @State private var speakerStyleColor = Color.yellow
     @State private var selectedTextRange: NSRange?
@@ -1373,6 +1375,16 @@ struct SubtitleEditorPanel: View {
                     proxy.scrollTo(newValue, anchor: .center)
                 }
             }
+            .onAppear {
+                guard let selectedID = slot.selectedCueID else { return }
+                Task { @MainActor in
+                    // Wait for LazyVStack to lay out rows before scrolling.
+                    try? await Task.sleep(for: .milliseconds(80))
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        proxy.scrollTo(selectedID, anchor: .center)
+                    }
+                }
+            }
         }
     }
 
@@ -1531,6 +1543,32 @@ struct SubtitleEditorPanel: View {
                     .frame(height: 118)
                     .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary))
+
+                if let onTranslateCue {
+                    HStack(spacing: 6) {
+                        Image(systemName: "character.bubble")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Picker("", selection: $inlineTranslationLanguage) {
+                            ForEach(TranslationLanguageChoice.common) { choice in
+                                Text(choice.localizedTitle).tag(choice)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .controlSize(.mini)
+                        .fixedSize()
+                        Button {
+                            onTranslateCue(selectedCueID, inlineTranslationLanguage)
+                        } label: {
+                            Text(Copy.text("translation.translate", language: language))
+                                .font(.caption)
+                        }
+                        .controlSize(.small)
+                        .buttonStyle(.bordered)
+                        Spacer(minLength: 0)
+                    }
+                }
 
                 HStack(spacing: 8) {
                     compactNumberField(
@@ -4693,10 +4731,10 @@ private struct SubtitleCueBlockRow: View {
                     .foregroundStyle(.tertiary)
             }
 
-            StyledSubtitleText(SubtitleDocument.displayText(for: cue), font: .body, lineLimit: 2)
+            StyledSubtitleText(SubtitleDocument.displayText(for: cue), font: .body, lineLimit: nil)
                 .equatable()
                 .textSelection(.enabled)
-                .frame(height: 36, alignment: .topLeading)
+                .frame(maxWidth: .infinity, minHeight: 36, alignment: .topLeading)
                 .padding(6)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
                 .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))

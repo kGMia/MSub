@@ -4,8 +4,10 @@ import Observation
 @MainActor
 @Observable
 final class TranscriptionSettings {
+    private static let persistedSettingsKey = "msub.transcriptionSettings.v1"
+
     var model = ""
-    var asrEngine: ASREngine = .auto
+    var asrEngine: ASREngine = .fireredasr2
     var modelCatalog: [ASRModelInfo] = []
     var format: OutputFormat = .srt
     var recognitionLanguage: RecognitionLanguage = .auto
@@ -36,16 +38,40 @@ final class TranscriptionSettings {
     var eosPenalty = 1.0
     var decodeMaxLen = 0
     var diarizeSpeakers = false
+    var speakerLabelingEngine: SpeakerLabelingEngine = .pyannote
+    var speakerClusteringMethod: SpeakerClusteringMethod = .spectral
+    var speakerRecognitionModel = ""
+    var speakerRecognitionModelAvailable = false
+    var speakerClusterThreshold = 0.45
     var diarizationSpeakerCount = 0
+    var emotionModel = ""
+    var emotionModelAvailable = false
     var timelineSpeakerMarkersEnabled = true
     var waveformResolution: WaveformResolution = .high
+    var appleSpeechFastResults = false
+    var appleSpeechEtiquetteFilter = false
+
+    @ObservationIgnored private var pendingSaveTask: Task<Void, Never>?
+
+    init() {
+        beginObservingForPersistence()
+    }
 
     func apply(config: AppConfig) {
         modelCatalog = config.models ?? []
         vadCatalog = config.vadEngines ?? []
-        asrEngine = .auto
-        vadEngine = config.defaultVADEngine ?? .firered
+        asrEngine = sanitizedASREngine(config.defaultASREngine ?? .fireredasr2)
+        vadEngine = sanitizedVADEngine(config.defaultVADEngine ?? .firered)
         model = config.defaultModel
+        emotionModel = config.defaultEmotionModel ?? "emotion2vec/emotion2vec_plus_base"
+        emotionModelAvailable = config.emotionModelAvailable ?? false
+        speakerLabelingEngine = config.defaultSpeakerLabelingEngine ?? .pyannote
+        speakerClusteringMethod = sanitizedSpeakerClusteringMethod(config.defaultSpeakerClusteringMethod ?? .spectral)
+        speakerRecognitionModel = config.defaultSpeakerRecognitionModel ?? "iic/speech_eres2netv2_sv_zh-cn_16k-common"
+        speakerRecognitionModelAvailable = config.speakerRecognitionModelAvailable ?? false
+        if !restorePersistedSettings() {
+            applyModelSpecificDefaults()
+        }
     }
 
     var effectiveASREngine: ASREngine {
@@ -62,6 +88,17 @@ final class TranscriptionSettings {
         return .fireredasr2
     }
 
+    var effectiveVADEngine: VADEngine {
+        guard segmentMode == .vad else { return .energy }
+        if vadEngine != .auto {
+            return vadEngine
+        }
+        if let fireRed = vadCatalog.first(where: { $0.engine == .firered }) {
+            return fireRed.localModelAvailable ? .firered : .energy
+        }
+        return .firered
+    }
+
     var isSenseVoiceActive: Bool {
         effectiveASREngine == .sensevoice
     }
@@ -71,15 +108,88 @@ final class TranscriptionSettings {
     }
 
     var isFireRedVADActive: Bool {
-        segmentMode == .vad && vadEngine != .energy
+        segmentMode == .vad && effectiveVADEngine == .firered
+    }
+
+    var currentModelInfo: ASRModelInfo? {
+        modelCatalog.first { $0.engine == effectiveASREngine }
+    }
+
+    var currentVADInfo: VADModelInfo? {
+        vadCatalog.first { $0.engine == effectiveVADEngine }
+    }
+
+    var supportedRecognitionLanguages: [RecognitionLanguage] {
+        switch effectiveASREngine {
+        case .sensevoice:
+            return RecognitionLanguage.allCases
+        case .mimo:
+            return [.zh, .en]
+        case .apple:
+            return [.zh, .en, .yue, .ja, .ko]
+        case .fireredasr2, .auto:
+            return [.auto]
+        }
+    }
+
+    var usesBackendRecognition: Bool {
+        !effectiveASREngine.isLocal
+    }
+
+    var usesFireRedDecodingControls: Bool {
+        effectiveASREngine == .fireredasr2
+    }
+
+    var usesSenseVoiceRichInfo: Bool {
+        usesBackendRecognition
+    }
+
+    func selectASREngine(_ engine: ASREngine) {
+        asrEngine = sanitizedASREngine(engine)
+        applyDefaultModelForSelectedEngine()
+        applyModelSpecificDefaults()
+    }
+
+    func modelPathDidChange() {
+        if asrEngine == .auto {
+            applyModelSpecificDefaults()
+        }
     }
 
     func applyDefaultModelForSelectedEngine() {
+        if asrEngine == .apple {
+            model = ""
+            return
+        }
         guard asrEngine != .auto,
               let modelInfo = modelCatalog.first(where: { $0.engine == asrEngine }) else {
             return
         }
         model = modelInfo.defaultModel
+    }
+
+    func applyModelSpecificDefaults() {
+        let supportedLanguages = supportedRecognitionLanguages
+        if !supportedLanguages.contains(recognitionLanguage) {
+            recognitionLanguage = supportedLanguages.first ?? .auto
+        }
+
+        switch effectiveASREngine {
+        case .sensevoice:
+            senseVoiceUseITN = true
+        case .mimo:
+            mimoTemperature = 0.0
+            mimoTopP = 0.95
+            mimoTopK = 0
+            if mimoMaxTokens < 1 {
+                mimoMaxTokens = 256
+            }
+        case .apple:
+            senseVoiceRichInfo = false
+            diarizeSpeakers = false
+        case .fireredasr2, .auto:
+            break
+        }
     }
 
     func resetRecognitionDefaults() {
@@ -108,7 +218,116 @@ final class TranscriptionSettings {
         eosPenalty = 1.0
         decodeMaxLen = 0
         diarizeSpeakers = false
+        speakerLabelingEngine = .pyannote
+        speakerClusteringMethod = .spectral
+        speakerClusterThreshold = 0.45
         diarizationSpeakerCount = 0
+    }
+
+    private func sanitizedASREngine(_ engine: ASREngine) -> ASREngine {
+        engine == .auto ? .fireredasr2 : engine
+    }
+
+    private func sanitizedVADEngine(_ engine: VADEngine) -> VADEngine {
+        if engine == .auto {
+            if let fireRed = vadCatalog.first(where: { $0.engine == .firered }) {
+                return fireRed.localModelAvailable ? .firered : .energy
+            }
+            return .firered
+        }
+        if engine == .firered,
+           let fireRed = vadCatalog.first(where: { $0.engine == .firered }),
+           !fireRed.localModelAvailable {
+            return .energy
+        }
+        return engine
+    }
+
+    private func sanitizedSpeakerClusteringMethod(_ method: SpeakerClusteringMethod) -> SpeakerClusteringMethod {
+        method == .auto ? .spectral : method
+    }
+
+    func savePersistedSettings() {
+        pendingSaveTask?.cancel()
+        pendingSaveTask = nil
+        performImmediateSave()
+    }
+
+    private func performImmediateSave() {
+        let snapshot = PersistedTranscriptionSettings(settings: self)
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        UserDefaults.standard.set(data, forKey: Self.persistedSettingsKey)
+    }
+
+    private func scheduleDebouncedSave() {
+        pendingSaveTask?.cancel()
+        pendingSaveTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.performImmediateSave()
+        }
+    }
+
+    private func beginObservingForPersistence() {
+        withObservationTracking {
+            _ = PersistedTranscriptionSettings(settings: self)
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.scheduleDebouncedSave()
+                self.beginObservingForPersistence()
+            }
+        }
+    }
+
+    @discardableResult
+    func restorePersistedSettings() -> Bool {
+        guard let data = UserDefaults.standard.data(forKey: Self.persistedSettingsKey),
+              let snapshot = try? JSONDecoder().decode(PersistedTranscriptionSettings.self, from: data) else {
+            return false
+        }
+        format = snapshot.format
+        asrEngine = sanitizedASREngine(snapshot.asrEngine)
+        model = snapshot.model.isEmpty ? model : snapshot.model
+        recognitionLanguage = snapshot.recognitionLanguage
+        senseVoiceUseITN = snapshot.senseVoiceUseITN
+        senseVoiceRichInfo = snapshot.senseVoiceRichInfo
+        mimoMaxTokens = snapshot.mimoMaxTokens
+        mimoTemperature = snapshot.mimoTemperature
+        mimoTopP = snapshot.mimoTopP
+        mimoTopK = snapshot.mimoTopK
+        segmentMode = snapshot.segmentMode
+        vadEngine = sanitizedVADEngine(snapshot.vadEngine)
+        vadThreshold = snapshot.vadThreshold
+        fireRedVADThreshold = snapshot.fireRedVADThreshold
+        fireRedVADSmoothWindow = snapshot.fireRedVADSmoothWindow
+        vadMaxSegment = snapshot.vadMaxSegment
+        vadSilence = snapshot.vadSilence
+        vadSearch = snapshot.vadSearch
+        vadMinSpeech = snapshot.vadMinSpeech
+        vadPadding = snapshot.vadPadding
+        vadMinSegment = snapshot.vadMinSegment
+        chunkSeconds = snapshot.chunkSeconds
+        beamSize = snapshot.beamSize
+        minConfidence = snapshot.minConfidence
+        lineChars = snapshot.lineChars
+        softmaxSmoothing = snapshot.softmaxSmoothing
+        lengthPenalty = snapshot.lengthPenalty
+        eosPenalty = snapshot.eosPenalty
+        decodeMaxLen = snapshot.decodeMaxLen
+        diarizeSpeakers = snapshot.diarizeSpeakers
+        speakerLabelingEngine = snapshot.speakerLabelingEngine
+        speakerClusteringMethod = sanitizedSpeakerClusteringMethod(snapshot.speakerClusteringMethod)
+        speakerRecognitionModel = snapshot.speakerRecognitionModel.isEmpty ? speakerRecognitionModel : snapshot.speakerRecognitionModel
+        speakerClusterThreshold = snapshot.speakerClusterThreshold
+        diarizationSpeakerCount = snapshot.diarizationSpeakerCount
+        emotionModel = snapshot.emotionModel.isEmpty ? emotionModel : snapshot.emotionModel
+        timelineSpeakerMarkersEnabled = snapshot.timelineSpeakerMarkersEnabled
+        waveformResolution = snapshot.waveformResolution
+        appleSpeechFastResults = snapshot.appleSpeechFastResults
+        appleSpeechEtiquetteFilter = snapshot.appleSpeechEtiquetteFilter
+        applyModelSpecificDefaults()
+        return true
     }
 
     func applyPreset(_ preset: RecognitionPreset) {
@@ -119,6 +338,8 @@ final class TranscriptionSettings {
             return
         case .dialogue:
             vadThreshold = -39.0
+            fireRedVADThreshold = 0.38
+            fireRedVADSmoothWindow = 3
             vadMaxSegment = 4.2
             vadSilence = 0.2
             vadSearch = 0.8
@@ -130,6 +351,8 @@ final class TranscriptionSettings {
             lineChars = 16
         case .lowVoice:
             vadThreshold = -44.0
+            fireRedVADThreshold = 0.3
+            fireRedVADSmoothWindow = 7
             vadMaxSegment = 5.0
             vadSilence = 0.34
             vadSearch = 1.0
@@ -141,6 +364,8 @@ final class TranscriptionSettings {
             lineChars = 18
         case .noisy:
             vadThreshold = -32.0
+            fireRedVADThreshold = 0.58
+            fireRedVADSmoothWindow = 7
             vadMaxSegment = 4.5
             vadSilence = 0.24
             vadSearch = 0.7
@@ -152,6 +377,8 @@ final class TranscriptionSettings {
             lineChars = 16
         case .fastCut:
             vadThreshold = -37.0
+            fireRedVADThreshold = 0.46
+            fireRedVADSmoothWindow = 3
             vadMaxSegment = 3.5
             vadSilence = 0.16
             vadSearch = 0.6
@@ -162,14 +389,21 @@ final class TranscriptionSettings {
             minConfidence = 0.0
             lineChars = 14
         case .sensitive:
-            vadThreshold = -42.0
-            vadMaxSegment = 5.0
-            vadSilence = 0.22
-            vadSearch = 0.9
+            vadThreshold = -41.0
+            fireRedVADThreshold = 0.34
+            fireRedVADSmoothWindow = 7
+            vadMaxSegment = 7.5
+            vadSilence = 0.32
+            vadSearch = 1.1
             vadMinSpeech = 0.12
-            vadPadding = 0.08
-            vadMinSegment = 0.45
-            lineChars = 16
+            vadPadding = 0.22
+            vadMinSegment = 0.7
+            beamSize = 4
+            minConfidence = 0.0
+            lineChars = 18
+            softmaxSmoothing = 1.25
+            lengthPenalty = 0.6
+            eosPenalty = 1.0
         }
         applyEnginePreset(preset)
     }
@@ -196,7 +430,7 @@ final class TranscriptionSettings {
             }
         case .sensevoice:
             senseVoiceUseITN = true
-        case .fireredasr2, .auto:
+        case .fireredasr2, .auto, .apple:
             break
         }
     }
@@ -236,7 +470,12 @@ final class TranscriptionSettings {
                 ("mimo_temperature", "\(mimoTemperature)"),
                 ("mimo_top_p", "\(mimoTopP)"),
                 ("mimo_top_k", "\(mimoTopK)"),
+                ("emotion_model", emotionModel),
                 ("diarize_speakers", diarizeSpeakers ? "true" : "false"),
+                ("speaker_labeling_engine", speakerLabelingEngine.rawValue),
+                ("speaker_recognition_model", speakerRecognitionModel),
+                ("speaker_cluster_threshold", "\(speakerClusterThreshold)"),
+                ("speaker_clustering_method", speakerClusteringMethod.rawValue),
                 ("diarization_num_speakers", "\(diarizationSpeakerCount)")
             ])
         }
@@ -245,7 +484,94 @@ final class TranscriptionSettings {
     }
 }
 
-enum WaveformResolution: String, CaseIterable, Identifiable {
+private struct PersistedTranscriptionSettings: Codable {
+    var format: OutputFormat
+    var asrEngine: ASREngine
+    var model: String
+    var recognitionLanguage: RecognitionLanguage
+    var senseVoiceUseITN: Bool
+    var senseVoiceRichInfo: Bool
+    var mimoMaxTokens: Int
+    var mimoTemperature: Double
+    var mimoTopP: Double
+    var mimoTopK: Int
+    var segmentMode: SegmentMode
+    var vadEngine: VADEngine
+    var vadThreshold: Double
+    var fireRedVADThreshold: Double
+    var fireRedVADSmoothWindow: Int
+    var vadMaxSegment: Double
+    var vadSilence: Double
+    var vadSearch: Double
+    var vadMinSpeech: Double
+    var vadPadding: Double
+    var vadMinSegment: Double
+    var chunkSeconds: Double
+    var beamSize: Int
+    var minConfidence: Double
+    var lineChars: Int
+    var softmaxSmoothing: Double
+    var lengthPenalty: Double
+    var eosPenalty: Double
+    var decodeMaxLen: Int
+    var diarizeSpeakers: Bool
+    var speakerLabelingEngine: SpeakerLabelingEngine
+    var speakerClusteringMethod: SpeakerClusteringMethod
+    var speakerRecognitionModel: String
+    var speakerClusterThreshold: Double
+    var diarizationSpeakerCount: Int
+    var emotionModel: String
+    var timelineSpeakerMarkersEnabled: Bool
+    var waveformResolution: WaveformResolution
+    var appleSpeechFastResults: Bool
+    var appleSpeechEtiquetteFilter: Bool
+
+    @MainActor
+    init(settings: TranscriptionSettings) {
+        format = settings.format
+        asrEngine = settings.asrEngine
+        model = settings.model
+        recognitionLanguage = settings.recognitionLanguage
+        senseVoiceUseITN = settings.senseVoiceUseITN
+        senseVoiceRichInfo = settings.senseVoiceRichInfo
+        mimoMaxTokens = settings.mimoMaxTokens
+        mimoTemperature = settings.mimoTemperature
+        mimoTopP = settings.mimoTopP
+        mimoTopK = settings.mimoTopK
+        segmentMode = settings.segmentMode
+        vadEngine = settings.vadEngine
+        vadThreshold = settings.vadThreshold
+        fireRedVADThreshold = settings.fireRedVADThreshold
+        fireRedVADSmoothWindow = settings.fireRedVADSmoothWindow
+        vadMaxSegment = settings.vadMaxSegment
+        vadSilence = settings.vadSilence
+        vadSearch = settings.vadSearch
+        vadMinSpeech = settings.vadMinSpeech
+        vadPadding = settings.vadPadding
+        vadMinSegment = settings.vadMinSegment
+        chunkSeconds = settings.chunkSeconds
+        beamSize = settings.beamSize
+        minConfidence = settings.minConfidence
+        lineChars = settings.lineChars
+        softmaxSmoothing = settings.softmaxSmoothing
+        lengthPenalty = settings.lengthPenalty
+        eosPenalty = settings.eosPenalty
+        decodeMaxLen = settings.decodeMaxLen
+        diarizeSpeakers = settings.diarizeSpeakers
+        speakerLabelingEngine = settings.speakerLabelingEngine
+        speakerClusteringMethod = settings.speakerClusteringMethod
+        speakerRecognitionModel = settings.speakerRecognitionModel
+        speakerClusterThreshold = settings.speakerClusterThreshold
+        diarizationSpeakerCount = settings.diarizationSpeakerCount
+        emotionModel = settings.emotionModel
+        timelineSpeakerMarkersEnabled = settings.timelineSpeakerMarkersEnabled
+        waveformResolution = settings.waveformResolution
+        appleSpeechFastResults = settings.appleSpeechFastResults
+        appleSpeechEtiquetteFilter = settings.appleSpeechEtiquetteFilter
+    }
+}
+
+enum WaveformResolution: String, CaseIterable, Codable, Identifiable {
     case high
     case medium
     case low
