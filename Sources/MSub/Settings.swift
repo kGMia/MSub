@@ -5,6 +5,7 @@ import Observation
 @Observable
 final class TranscriptionSettings {
     private static let persistedSettingsKey = "msub.transcriptionSettings.v1"
+    private static let customPresetsKey = "msub.customRecognitionPresets.v1"
 
     var model = ""
     var asrEngine: ASREngine = .fireredasr2
@@ -50,10 +51,12 @@ final class TranscriptionSettings {
     var waveformResolution: WaveformResolution = .high
     var appleSpeechFastResults = false
     var appleSpeechEtiquetteFilter = false
+    var customPresets: [CustomRecognitionPreset] = []
 
     @ObservationIgnored private var pendingSaveTask: Task<Void, Never>?
 
     init() {
+        loadCustomPresets()
         beginObservingForPersistence()
     }
 
@@ -193,6 +196,8 @@ final class TranscriptionSettings {
     }
 
     func resetRecognitionDefaults() {
+        segmentMode = .vad
+        vadEngine = sanitizedVADEngine(.firered)
         recognitionLanguage = .auto
         senseVoiceUseITN = true
         senseVoiceRichInfo = false
@@ -222,6 +227,99 @@ final class TranscriptionSettings {
         speakerClusteringMethod = .spectral
         speakerClusterThreshold = 0.45
         diarizationSpeakerCount = 0
+    }
+
+    var recognitionPresetSnapshot: RecognitionPresetSnapshot {
+        RecognitionPresetSnapshot(settings: self)
+    }
+
+    func builtInPresetSnapshot(_ preset: RecognitionPreset) -> RecognitionPresetSnapshot {
+        var snapshot = RecognitionPresetSnapshot.defaults(for: effectiveASREngine)
+        snapshot.applyBuiltInPreset(preset, engine: effectiveASREngine)
+        snapshot.vadEngine = sanitizedVADEngine(snapshot.vadEngine)
+        snapshot.speakerClusteringMethod = sanitizedSpeakerClusteringMethod(snapshot.speakerClusteringMethod)
+        return snapshot
+    }
+
+    func apply(snapshot: RecognitionPresetSnapshot) {
+        segmentMode = snapshot.segmentMode
+        vadEngine = sanitizedVADEngine(snapshot.vadEngine)
+        recognitionLanguage = snapshot.recognitionLanguage
+        senseVoiceUseITN = snapshot.senseVoiceUseITN
+        senseVoiceRichInfo = snapshot.senseVoiceRichInfo
+        mimoMaxTokens = snapshot.mimoMaxTokens
+        mimoTemperature = snapshot.mimoTemperature
+        mimoTopP = snapshot.mimoTopP
+        mimoTopK = snapshot.mimoTopK
+        vadThreshold = snapshot.vadThreshold
+        fireRedVADThreshold = snapshot.fireRedVADThreshold
+        fireRedVADSmoothWindow = snapshot.fireRedVADSmoothWindow
+        vadMaxSegment = snapshot.vadMaxSegment
+        vadSilence = snapshot.vadSilence
+        vadSearch = snapshot.vadSearch
+        vadMinSpeech = snapshot.vadMinSpeech
+        vadPadding = snapshot.vadPadding
+        vadMinSegment = snapshot.vadMinSegment
+        chunkSeconds = snapshot.chunkSeconds
+        beamSize = snapshot.beamSize
+        minConfidence = snapshot.minConfidence
+        lineChars = snapshot.lineChars
+        softmaxSmoothing = snapshot.softmaxSmoothing
+        lengthPenalty = snapshot.lengthPenalty
+        eosPenalty = snapshot.eosPenalty
+        decodeMaxLen = snapshot.decodeMaxLen
+        diarizeSpeakers = snapshot.diarizeSpeakers
+        speakerLabelingEngine = snapshot.speakerLabelingEngine
+        speakerClusteringMethod = sanitizedSpeakerClusteringMethod(snapshot.speakerClusteringMethod)
+        speakerClusterThreshold = snapshot.speakerClusterThreshold
+        diarizationSpeakerCount = snapshot.diarizationSpeakerCount
+        applyModelSpecificDefaults()
+    }
+
+    func saveCustomPreset(named name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let preset = CustomRecognitionPreset(
+            id: UUID(),
+            name: trimmed,
+            snapshot: recognitionPresetSnapshot
+        )
+        customPresets.append(preset)
+        saveCustomPresets()
+    }
+
+    func renameCustomPreset(id: UUID, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let index = customPresets.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        customPresets[index].name = trimmed
+        saveCustomPresets()
+    }
+
+    func deleteCustomPreset(id: UUID) {
+        customPresets.removeAll { $0.id == id }
+        saveCustomPresets()
+    }
+
+    func applyCustomPreset(id: UUID) {
+        guard let preset = customPresets.first(where: { $0.id == id }) else { return }
+        apply(snapshot: preset.snapshot)
+    }
+
+    private func loadCustomPresets() {
+        guard let data = UserDefaults.standard.data(forKey: Self.customPresetsKey),
+              let presets = try? JSONDecoder().decode([CustomRecognitionPreset].self, from: data) else {
+            customPresets = []
+            return
+        }
+        customPresets = presets
+    }
+
+    private func saveCustomPresets() {
+        guard let data = try? JSONEncoder().encode(customPresets) else { return }
+        UserDefaults.standard.set(data, forKey: Self.customPresetsKey)
     }
 
     private func sanitizedASREngine(_ engine: ASREngine) -> ASREngine {
@@ -331,11 +429,176 @@ final class TranscriptionSettings {
     }
 
     func applyPreset(_ preset: RecognitionPreset) {
+        apply(snapshot: builtInPresetSnapshot(preset))
+    }
+
+    func formFields(includeOutput: Bool) -> [(String, String)] {
+        var fields: [(String, String)] = [
+            ("model", model),
+            ("asr_engine", asrEngine.rawValue),
+            ("language", recognitionLanguage.rawValue),
+            ("use_itn", senseVoiceUseITN ? "true" : "false"),
+            ("sensevoice_rich_info", senseVoiceRichInfo ? "true" : "false"),
+            ("segment_mode", segmentMode.rawValue),
+            ("vad_engine", vadEngine.rawValue),
+            ("vad_threshold_db", "\(vadThreshold)"),
+            ("firered_vad_threshold", "\(fireRedVADThreshold)"),
+            ("firered_vad_smooth_window", "\(fireRedVADSmoothWindow)"),
+            ("vad_max_segment_seconds", "\(vadMaxSegment)"),
+            ("vad_min_silence_seconds", "\(vadSilence)"),
+            ("vad_split_search_seconds", "\(vadSearch)"),
+            ("vad_min_speech_seconds", "\(vadMinSpeech)"),
+            ("vad_padding_seconds", "\(vadPadding)"),
+            ("vad_min_segment_seconds", "\(vadMinSegment)"),
+            ("chunk_seconds", "\(chunkSeconds)")
+        ]
+
+        if includeOutput {
+            fields.append(contentsOf: [
+                ("fmt", format.rawValue),
+                ("beam_size", "\(beamSize)"),
+                ("min_confidence", "\(minConfidence)"),
+                ("max_chars_per_line", "\(lineChars)"),
+                ("softmax_smoothing", "\(softmaxSmoothing)"),
+                ("length_penalty", "\(lengthPenalty)"),
+                ("eos_penalty", "\(eosPenalty)"),
+                ("decode_max_len", "\(decodeMaxLen)"),
+                ("mimo_max_tokens", "\(mimoMaxTokens)"),
+                ("mimo_temperature", "\(mimoTemperature)"),
+                ("mimo_top_p", "\(mimoTopP)"),
+                ("mimo_top_k", "\(mimoTopK)"),
+                ("emotion_model", emotionModel),
+                ("diarize_speakers", diarizeSpeakers ? "true" : "false"),
+                ("speaker_labeling_engine", speakerLabelingEngine.rawValue),
+                ("speaker_recognition_model", speakerRecognitionModel),
+                ("speaker_cluster_threshold", "\(speakerClusterThreshold)"),
+                ("speaker_clustering_method", speakerClusteringMethod.rawValue),
+                ("diarization_num_speakers", "\(diarizationSpeakerCount)")
+            ])
+        }
+
+        return fields
+    }
+}
+
+struct CustomRecognitionPreset: Identifiable, Codable, Equatable {
+    var id: UUID
+    var name: String
+    var snapshot: RecognitionPresetSnapshot
+}
+
+struct RecognitionPresetSnapshot: Codable, Equatable {
+    var segmentMode: SegmentMode
+    var vadEngine: VADEngine
+    var recognitionLanguage: RecognitionLanguage
+    var senseVoiceUseITN: Bool
+    var senseVoiceRichInfo: Bool
+    var mimoMaxTokens: Int
+    var mimoTemperature: Double
+    var mimoTopP: Double
+    var mimoTopK: Int
+    var vadThreshold: Double
+    var fireRedVADThreshold: Double
+    var fireRedVADSmoothWindow: Int
+    var vadMaxSegment: Double
+    var vadSilence: Double
+    var vadSearch: Double
+    var vadMinSpeech: Double
+    var vadPadding: Double
+    var vadMinSegment: Double
+    var chunkSeconds: Double
+    var beamSize: Int
+    var minConfidence: Double
+    var lineChars: Int
+    var softmaxSmoothing: Double
+    var lengthPenalty: Double
+    var eosPenalty: Double
+    var decodeMaxLen: Int
+    var diarizeSpeakers: Bool
+    var speakerLabelingEngine: SpeakerLabelingEngine
+    var speakerClusteringMethod: SpeakerClusteringMethod
+    var speakerClusterThreshold: Double
+    var diarizationSpeakerCount: Int
+
+    @MainActor
+    init(settings: TranscriptionSettings) {
+        segmentMode = settings.segmentMode
+        vadEngine = settings.vadEngine
+        recognitionLanguage = settings.recognitionLanguage
+        senseVoiceUseITN = settings.senseVoiceUseITN
+        senseVoiceRichInfo = settings.senseVoiceRichInfo
+        mimoMaxTokens = settings.mimoMaxTokens
+        mimoTemperature = settings.mimoTemperature
+        mimoTopP = settings.mimoTopP
+        mimoTopK = settings.mimoTopK
+        vadThreshold = settings.vadThreshold
+        fireRedVADThreshold = settings.fireRedVADThreshold
+        fireRedVADSmoothWindow = settings.fireRedVADSmoothWindow
+        vadMaxSegment = settings.vadMaxSegment
+        vadSilence = settings.vadSilence
+        vadSearch = settings.vadSearch
+        vadMinSpeech = settings.vadMinSpeech
+        vadPadding = settings.vadPadding
+        vadMinSegment = settings.vadMinSegment
+        chunkSeconds = settings.chunkSeconds
+        beamSize = settings.beamSize
+        minConfidence = settings.minConfidence
+        lineChars = settings.lineChars
+        softmaxSmoothing = settings.softmaxSmoothing
+        lengthPenalty = settings.lengthPenalty
+        eosPenalty = settings.eosPenalty
+        decodeMaxLen = settings.decodeMaxLen
+        diarizeSpeakers = settings.diarizeSpeakers
+        speakerLabelingEngine = settings.speakerLabelingEngine
+        speakerClusteringMethod = settings.speakerClusteringMethod
+        speakerClusterThreshold = settings.speakerClusterThreshold
+        diarizationSpeakerCount = settings.diarizationSpeakerCount
+    }
+
+    static func defaults(for engine: ASREngine) -> RecognitionPresetSnapshot {
+        var snapshot = RecognitionPresetSnapshot()
+        snapshot.applyEnginePreset(.balanced, engine: engine)
+        return snapshot
+    }
+
+    private init() {
+        segmentMode = .vad
+        vadEngine = .firered
+        recognitionLanguage = .auto
+        senseVoiceUseITN = true
+        senseVoiceRichInfo = false
+        mimoMaxTokens = 256
+        mimoTemperature = 0.0
+        mimoTopP = 0.95
+        mimoTopK = 0
+        vadThreshold = -38.0
+        fireRedVADThreshold = 0.4
+        fireRedVADSmoothWindow = 5
+        vadMaxSegment = 5.0
+        vadSilence = 0.28
+        vadSearch = 0.75
+        vadMinSpeech = 0.2
+        vadPadding = 0.12
+        vadMinSegment = 0.8
+        chunkSeconds = 20.0
+        beamSize = 3
+        minConfidence = 0.0
+        lineChars = 18
+        softmaxSmoothing = 1.25
+        lengthPenalty = 0.6
+        eosPenalty = 1.0
+        decodeMaxLen = 0
+        diarizeSpeakers = false
+        speakerLabelingEngine = .pyannote
+        speakerClusteringMethod = .spectral
+        speakerClusterThreshold = 0.45
+        diarizationSpeakerCount = 0
+    }
+
+    mutating func applyBuiltInPreset(_ preset: RecognitionPreset, engine: ASREngine) {
         switch preset {
         case .balanced:
-            resetRecognitionDefaults()
-            applyEnginePreset(.balanced)
-            return
+            break
         case .dialogue:
             vadThreshold = -39.0
             fireRedVADThreshold = 0.38
@@ -405,82 +668,28 @@ final class TranscriptionSettings {
             lengthPenalty = 0.6
             eosPenalty = 1.0
         }
-        applyEnginePreset(preset)
+        applyEnginePreset(preset, engine: engine)
     }
 
-    private func applyEnginePreset(_ preset: RecognitionPreset) {
-        switch effectiveASREngine {
+    private mutating func applyEnginePreset(_ preset: RecognitionPreset, engine: ASREngine) {
+        switch engine {
         case .mimo:
             mimoTemperature = 0.0
             mimoTopP = 0.95
             mimoTopK = 0
             switch preset {
-            case .balanced:
+            case .balanced, .dialogue, .noisy:
                 mimoMaxTokens = 256
-            case .dialogue:
-                mimoMaxTokens = 256
-            case .lowVoice:
+            case .lowVoice, .sensitive:
                 mimoMaxTokens = 320
-            case .noisy:
-                mimoMaxTokens = 256
             case .fastCut:
                 mimoMaxTokens = 192
-            case .sensitive:
-                mimoMaxTokens = 320
             }
         case .sensevoice:
             senseVoiceUseITN = true
         case .fireredasr2, .auto, .apple:
             break
         }
-    }
-
-    func formFields(includeOutput: Bool) -> [(String, String)] {
-        var fields: [(String, String)] = [
-            ("model", model),
-            ("asr_engine", asrEngine.rawValue),
-            ("language", recognitionLanguage.rawValue),
-            ("use_itn", senseVoiceUseITN ? "true" : "false"),
-            ("sensevoice_rich_info", senseVoiceRichInfo ? "true" : "false"),
-            ("segment_mode", segmentMode.rawValue),
-            ("vad_engine", vadEngine.rawValue),
-            ("vad_threshold_db", "\(vadThreshold)"),
-            ("firered_vad_threshold", "\(fireRedVADThreshold)"),
-            ("firered_vad_smooth_window", "\(fireRedVADSmoothWindow)"),
-            ("vad_max_segment_seconds", "\(vadMaxSegment)"),
-            ("vad_min_silence_seconds", "\(vadSilence)"),
-            ("vad_split_search_seconds", "\(vadSearch)"),
-            ("vad_min_speech_seconds", "\(vadMinSpeech)"),
-            ("vad_padding_seconds", "\(vadPadding)"),
-            ("vad_min_segment_seconds", "\(vadMinSegment)"),
-            ("chunk_seconds", "\(chunkSeconds)")
-        ]
-
-        if includeOutput {
-            fields.append(contentsOf: [
-                ("fmt", format.rawValue),
-                ("beam_size", "\(beamSize)"),
-                ("min_confidence", "\(minConfidence)"),
-                ("max_chars_per_line", "\(lineChars)"),
-                ("softmax_smoothing", "\(softmaxSmoothing)"),
-                ("length_penalty", "\(lengthPenalty)"),
-                ("eos_penalty", "\(eosPenalty)"),
-                ("decode_max_len", "\(decodeMaxLen)"),
-                ("mimo_max_tokens", "\(mimoMaxTokens)"),
-                ("mimo_temperature", "\(mimoTemperature)"),
-                ("mimo_top_p", "\(mimoTopP)"),
-                ("mimo_top_k", "\(mimoTopK)"),
-                ("emotion_model", emotionModel),
-                ("diarize_speakers", diarizeSpeakers ? "true" : "false"),
-                ("speaker_labeling_engine", speakerLabelingEngine.rawValue),
-                ("speaker_recognition_model", speakerRecognitionModel),
-                ("speaker_cluster_threshold", "\(speakerClusterThreshold)"),
-                ("speaker_clustering_method", speakerClusteringMethod.rawValue),
-                ("diarization_num_speakers", "\(diarizationSpeakerCount)")
-            ])
-        }
-
-        return fields
     }
 }
 

@@ -715,7 +715,7 @@ final class PlaybackController {
     nonisolated let player = AVPlayer()
 
     @ObservationIgnored nonisolated(unsafe) private var timeObserverToken: Any?
-    private var rateObservation: NSKeyValueObservation?
+    @ObservationIgnored nonisolated(unsafe) private var rateObservation: NSKeyValueObservation?
     private var currentURL: URL?
     private var playbackEndTime: Double?
 
@@ -728,6 +728,10 @@ final class PlaybackController {
         if let token = timeObserverToken {
             player.removeTimeObserver(token)
         }
+        rateObservation?.invalidate()
+        rateObservation = nil
+        player.pause()
+        player.replaceCurrentItem(with: nil)
     }
 
     func load(_ url: URL) async {

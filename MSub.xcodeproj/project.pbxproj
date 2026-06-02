@@ -15,6 +15,8 @@
 		000000000000000000000106 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000206 /* Models.swift */; };
 		000000000000000000000107 /* Settings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000207 /* Settings.swift */; };
 		000000000000000000000108 /* SubtitleDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000209 /* SubtitleDocument.swift */; };
+		972EEEEB2FCE6E6C009F6645 /* AppLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 972EEEEA2FCE6E6C009F6645 /* AppLog.swift */; };
+		972EEEED2FCE8892009F6645 /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 972EEEEC2FCE8892009F6645 /* README.md */; };
 		973399062FBE32A400FDA459 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 973399052FBE32A400FDA459 /* AppIcon.icon */; };
 		974075122FCAE5890019F9A1 /* NotificationsService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 974075112FCAE5890019F9A1 /* NotificationsService.swift */; };
 		974075142FCAE5EE0019F9A1 /* AppIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 974075132FCAE5EE0019F9A1 /* AppIntents.swift */; };
@@ -38,6 +40,8 @@
 		000000000000000000000209 /* SubtitleDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubtitleDocument.swift; sourceTree = "<group>"; };
 		00000000000000000000020A /* MSub.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = MSub.entitlements; sourceTree = "<group>"; };
 		000000000000000000000301 /* MSub.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MSub.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		972EEEEA2FCE6E6C009F6645 /* AppLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLog.swift; sourceTree = "<group>"; };
+		972EEEEC2FCE8892009F6645 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; name = README.md; path = /Users/august/Project/Huz/README.md; sourceTree = "<absolute>"; };
 		973399052FBE32A400FDA459 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 		974075112FCAE5890019F9A1 /* NotificationsService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationsService.swift; sourceTree = "<group>"; };
 		974075132FCAE5EE0019F9A1 /* AppIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppIntents.swift; sourceTree = "<group>"; };
@@ -60,6 +64,7 @@
 				000000000000000000000011 /* Scripts */,
 				000000000000000000000012 /* Products */,
 				974192942FBD973900E74857 /* Localizable.xcstrings */,
+				972EEEEC2FCE8892009F6645 /* README.md */,
 			);
 			sourceTree = "<group>";
 		};
@@ -82,6 +87,7 @@
 				974075172FCAEA950019F9A1 /* TranslationService.swift */,
 				974075192FCAEB210019F9A1 /* TranslationSheet.swift */,
 				9740751B2FCB43230019F9A1 /* FolderAuthorizationStore.swift */,
+				972EEEEA2FCE6E6C009F6645 /* AppLog.swift */,
 			);
 			name = MSub;
 			path = Sources/MSub;
@@ -161,6 +167,7 @@
 			files = (
 				974192942FBD973900E74858 /* Localizable.xcstrings in Resources */,
 				978E671F2FC1B89C0054DBBA /* ffmpeg in Resources */,
+				972EEEED2FCE8892009F6645 /* README.md in Resources */,
 				973399062FBE32A400FDA459 /* AppIcon.icon in Resources */,
 			);
 		};
@@ -199,6 +206,7 @@
 			isa = PBXSourcesBuildPhase;
 			files = (
 				000000000000000000000101 /* APIClient.swift in Sources */,
+				972EEEEB2FCE6E6C009F6645 /* AppLog.swift in Sources */,
 				974075142FCAE5EE0019F9A1 /* AppIntents.swift in Sources */,
 				000000000000000000000102 /* BackendService.swift in Sources */,
 				9740751A2FCAEB210019F9A1 /* TranslationSheet.swift in Sources */,

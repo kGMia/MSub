@@ -66,8 +66,12 @@ struct MSubApp: App {
                     }
                     DockMenuState.shared.isReady = true
                 }
-                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
-                    backend.stop(waitForExit: true)
+                .task {
+                    let stream = NotificationCenter.default.notifications(named: NSApplication.willTerminateNotification)
+                    for await _ in stream {
+                        backend.stop(waitForExit: true)
+                        break
+                    }
                 }
         }
         .commands {
@@ -204,7 +208,7 @@ struct MSubApp: App {
                 .environment(settings)
                 .environment(\.locale, language.locale)
                 .preferredColorScheme(appearance.colorScheme)
-                .frame(width: 420, height: 280)
+                .frame(width: 480, height: 360)
         }
         .windowResizability(.contentSize)
     }
@@ -326,6 +330,8 @@ struct PreferencesView: View {
     @AppStorage("huz.uiLanguage") private var languageRaw = AppLanguage.zh.rawValue
     @AppStorage("huz.appearanceTheme") private var appearanceRaw = AppearanceTheme.system.rawValue
     @State private var pendingRelaunchLanguage: AppLanguage?
+    @State private var editingPresetID: UUID?
+    @State private var editingPresetName = ""
     private let visibleASREngines: [ASREngine] = [.fireredasr2, .sensevoice, .mimo, .apple]
     private let visibleVADEngines: [VADEngine] = [.firered, .energy]
 
@@ -341,6 +347,8 @@ struct PreferencesView: View {
                 .tabItem { Label(t("prefs.general"), systemImage: "gearshape") }
             modelTab
                 .tabItem { Label(t("prefs.model"), systemImage: "cube") }
+            presetsTab
+                .tabItem { Label(t("prefs.presets"), systemImage: "slider.horizontal.3") }
             appearanceTab
                 .tabItem { Label(t("prefs.appearance"), systemImage: "paintbrush") }
         }
@@ -482,6 +490,66 @@ struct PreferencesView: View {
                 .pickerStyle(.segmented)
             }
             Spacer(minLength: 0)
+        }
+        .padding(14)
+    }
+
+    private var presetsTab: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(t("prefs.customPresets"))
+                .font(.headline)
+
+            if settings.customPresets.isEmpty {
+                Text(t("prefs.noCustomPresets"))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            } else {
+                List {
+                    ForEach(settings.customPresets) { preset in
+                        HStack(spacing: 8) {
+                            if editingPresetID == preset.id {
+                                TextField("", text: $editingPresetName)
+                                    .textFieldStyle(.roundedBorder)
+                                Button(t("button.save")) {
+                                    settings.renameCustomPreset(id: preset.id, to: editingPresetName)
+                                    editingPresetID = nil
+                                    editingPresetName = ""
+                                }
+                                .disabled(editingPresetName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                Button(t("button.cancel")) {
+                                    editingPresetID = nil
+                                    editingPresetName = ""
+                                }
+                            } else {
+                                Text(preset.name)
+                                    .lineLimit(1)
+                                Spacer()
+                                Button {
+                                    editingPresetID = preset.id
+                                    editingPresetName = preset.name
+                                } label: {
+                                    Image(systemName: "pencil")
+                                }
+                                .buttonStyle(.borderless)
+                                .help(t("prefs.renamePreset"))
+
+                                Button(role: .destructive) {
+                                    if editingPresetID == preset.id {
+                                        editingPresetID = nil
+                                        editingPresetName = ""
+                                    }
+                                    settings.deleteCustomPreset(id: preset.id)
+                                } label: {
+                                    Image(systemName: "trash")
+                                }
+                                .buttonStyle(.borderless)
+                                .help(t("prefs.deletePreset"))
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+            }
         }
         .padding(14)
     }

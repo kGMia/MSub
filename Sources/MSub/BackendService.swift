@@ -118,6 +118,7 @@ final class BackendService {
         environment["MSUB_CLEAR_MLX_CACHE_EACH_CHUNK"] = environment["MSUB_CLEAR_MLX_CACHE_EACH_CHUNK"] ?? "1"
         environment["PYTHONUNBUFFERED"] = "1"
         environment["PYTHONIOENCODING"] = "utf-8"
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
         environment["UV_NO_PROGRESS"] = "1"
         environment["UV_LINK_MODE"] = "copy"
         configureJobDirectory(&environment, workspace: workspace)

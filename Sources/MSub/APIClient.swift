@@ -45,6 +45,20 @@ final class APIClient {
         try validate(response: response, data: data)
     }
 
+    func pauseJob(id: String) async throws {
+        var request = URLRequest(url: baseURL.appending(path: "/api/jobs/\(id)/pause"))
+        request.httpMethod = "POST"
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validate(response: response, data: data)
+    }
+
+    func resumeJob(id: String) async throws {
+        var request = URLRequest(url: baseURL.appending(path: "/api/jobs/\(id)/resume"))
+        request.httpMethod = "POST"
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validate(response: response, data: data)
+    }
+
     func jobStatus(id: String) async throws -> JobStatus {
         let url = baseURL.appending(path: "/api/jobs/\(id)")
         let (data, response) = try await URLSession.shared.data(from: url)
@@ -61,6 +75,14 @@ final class APIClient {
         let (data, response) = try await URLSession.shared.data(from: url)
         try validate(response: response, data: data)
         let filename = filename(from: response) ?? "subtitle.srt"
+        return DownloadedOutput(data: data, filename: filename)
+    }
+
+    func fetchJobLog(jobID: String) async throws -> DownloadedOutput {
+        let url = baseURL.appending(path: "/api/jobs/\(jobID)/log")
+        let (data, response) = try await URLSession.shared.data(from: url)
+        try validate(response: response, data: data)
+        let filename = filename(from: response) ?? "\(jobID).log"
         return DownloadedOutput(data: data, filename: filename)
     }
 

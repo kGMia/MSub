@@ -9,7 +9,11 @@ enum NotificationsService {
         guard !didRequestAuthorization else { return }
         didRequestAuthorization = true
         let center = UNUserNotificationCenter.current()
-        _ = try? await center.requestAuthorization(options: [.alert, .sound])
+        do {
+            _ = try await center.requestAuthorization(options: [.alert, .sound])
+        } catch {
+            AppLog.notifications.error("requestAuthorization failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     static func postTranscriptionComplete(language: AppLanguage, fileCount: Int, failureCount: Int) {
@@ -37,6 +41,10 @@ enum NotificationsService {
             content: content,
             trigger: nil
         )
-        _ = try? await UNUserNotificationCenter.current().add(request)
+        do {
+            try await UNUserNotificationCenter.current().add(request)
+        } catch {
+            AppLog.notifications.error("deliver notification failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 }

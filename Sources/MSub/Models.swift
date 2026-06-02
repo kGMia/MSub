@@ -138,7 +138,9 @@ struct JobStatus: Decodable {
     let cueCount: Int?
     let preview: String?
     let error: String?
+    let errorTrace: String?
     let output: String?
+    let pauseRequested: Bool?
 }
 
 enum OutputFormat: String, CaseIterable, Codable, Identifiable {

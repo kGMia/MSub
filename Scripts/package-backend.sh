@@ -120,6 +120,10 @@ if [ "$INCLUDE_VENV" = "1" ]; then
             --exclude ".DS_Store" \
             "$PYTHON_ROOT/" \
             "$DEST/python/"
+        rm -f "$DEST/.venv/bin/python" "$DEST/.venv/bin/python3" "$DEST/.venv/bin/python3.12"
+        ln -s "../../python/bin/python3.12" "$DEST/.venv/bin/python"
+        ln -s "python" "$DEST/.venv/bin/python3"
+        ln -s "python" "$DEST/.venv/bin/python3.12"
     else
         rm -rf "$DEST/python"
     fi

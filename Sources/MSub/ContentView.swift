@@ -20,15 +20,20 @@ struct ContentView: View {
     @State private var files: [FileSlot] = []
     @State private var activeIndex: Int = 0
     @State private var isProcessing = false
+    @State private var isProcessingPaused = false
+    @State private var isPauseResumeRequestInFlight = false
     @State private var isSaving = false
     @State private var isDropTargeted = false
     @State private var errorMessage: String?
     @State private var connectionState: ConnectionState = .unknown
-    @AppStorage("msub.selectedPreset") private var selectedPreset: RecognitionPreset = .balanced
+    @State private var isSaveCustomPresetSheetPresented = false
+    @State private var customPresetName = ""
+    @State private var failureDetails: FailureDetails?
     @SceneStorage("ui.detailTab") private var detailTab: DetailTab = .segments
     @State private var processingTask: Task<Void, Never>?
     @State private var selectedFrequentTerm: String?
     @State private var chipScrollEdges = ChipScrollEdges(leading: false, trailing: false)
+    @State private var chipsAvailableWidth: CGFloat = 0
     @State private var isCapturingFrame = false
     @State private var isClippingVideo = false
     @State private var quickLookURL: URL?
@@ -70,6 +75,23 @@ struct ContentView: View {
 
     private var canRun: Bool {
         hasFiles && !isProcessing && !isSaving && !isClippingVideo
+    }
+
+    private var activeFailureDetails: FailureDetails? {
+        guard let slot = activeSlot else { return nil }
+        return failureDetails(for: slot)
+    }
+
+    private var pauseResumeLabelKey: String {
+        isProcessingPaused ? "action.resume" : "action.pause"
+    }
+
+    private var pauseResumeSystemImage: String {
+        isProcessingPaused ? "play.circle.fill" : "pause.circle"
+    }
+
+    private var pauseResumeTint: Color {
+        isProcessingPaused ? .green : .orange
     }
 
     private var statusLine: String {
@@ -121,6 +143,9 @@ struct ContentView: View {
     }
 
     private static let subtitleExtensions = ["srt", "vtt", "json", "txt"]
+    private static let unsavedCustomPresetTag = "custom:unsaved"
+    private static let builtInPresetTagPrefix = "builtin:"
+    private static let savedCustomPresetTagPrefix = "custom:"
     private let visibleASREngines: [ASREngine] = [.fireredasr2, .sensevoice, .mimo, .apple]
     private let visibleVADEngines: [VADEngine] = [.firered, .energy]
     private let visibleSpeakerClusteringMethods: [SpeakerClusteringMethod] = [.spectral, .incremental]
@@ -165,8 +190,18 @@ struct ContentView: View {
         .task {
             await loadConfig()
         }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
-            backend.stop(waitForExit: true)
+        .onDisappear {
+            processingTask?.cancel()
+            processingTask = nil
+            statusDetailDismissTask?.cancel()
+            statusDetailDismissTask = nil
+        }
+        .task {
+            let stream = NotificationCenter.default.notifications(named: NSApplication.willTerminateNotification)
+            for await _ in stream {
+                backend.stop(waitForExit: true)
+                break
+            }
         }
         .alert(t("error.title"), isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
             Button(t("button.ok"), role: .cancel) {}
@@ -199,6 +234,37 @@ struct ContentView: View {
                 onConfirm: {
                     isTranslationSheetPresented = false
                     startTranslationFromSheet()
+                }
+            )
+        }
+        .sheet(isPresented: $isSaveCustomPresetSheetPresented) {
+            SaveCustomPresetSheet(
+                language: language,
+                name: $customPresetName,
+                onCancel: {
+                    customPresetName = ""
+                    isSaveCustomPresetSheetPresented = false
+                },
+                onSave: {
+                    settings.saveCustomPreset(named: customPresetName)
+                    customPresetName = ""
+                    isSaveCustomPresetSheetPresented = false
+                }
+            )
+        }
+        .sheet(item: $failureDetails) { details in
+            FailureDetailsSheet(
+                language: language,
+                details: details,
+                onCopy: {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(details.exportText, forType: .string)
+                },
+                onExport: {
+                    exportFailureLog(details)
+                },
+                onClose: {
+                    failureDetails = nil
                 }
             )
         }
@@ -926,12 +992,13 @@ struct ContentView: View {
 
                 if isProcessing {
                     Button {
-                        cancelProcessing()
+                        togglePauseProcessing()
                     } label: {
-                        Label(t("action.stop"), systemImage: "stop.circle")
+                        Label(t(pauseResumeLabelKey), systemImage: pauseResumeSystemImage)
                     }
                     .buttonStyle(.borderless)
-                    .tint(.red)
+                    .tint(pauseResumeTint)
+                    .disabled(isPauseResumeRequestInFlight)
                 }
 
                 if isProcessing || isSaving {
@@ -964,6 +1031,24 @@ struct ContentView: View {
                     .lineLimit(2)
                     .textSelection(.enabled)
             }
+
+            if let details = activeFailureDetails {
+                HStack(spacing: 8) {
+                    Button {
+                        failureDetails = details
+                    } label: {
+                        Label(t("failure.showDetails"), systemImage: "doc.text.magnifyingglass")
+                    }
+
+                    Button {
+                        exportFailureLog(details)
+                    } label: {
+                        Label(t("failure.exportLog"), systemImage: "square.and.arrow.down")
+                    }
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -976,6 +1061,8 @@ struct ContentView: View {
         case "status.done", "status.saved", "status.savedAll", "status.copied", "status.renamed", "status.videoClipped": return "checkmark.circle.fill"
         case "status.failed", "status.previewFailed": return "exclamationmark.triangle.fill"
         case "status.cancelled": return "minus.circle.fill"
+        case "status.paused": return "pause.circle.fill"
+        case "status.pausePending": return "hourglass.circle.fill"
         case "status.transcribing", "status.detecting", "status.loading", "status.starting", "status.saving", "status.clippingMedia", "status.videoClipping":
             return "waveform"
         default: return "circle.dotted"
@@ -987,7 +1074,7 @@ struct ContentView: View {
         switch key {
         case "status.done", "status.saved", "status.savedAll", "status.copied", "status.renamed", "status.videoClipped": return .green
         case "status.failed", "status.previewFailed": return .red
-        case "status.cancelled": return .orange
+        case "status.cancelled", "status.paused", "status.pausePending": return .orange
         case "status.transcribing", "status.detecting", "status.loading", "status.starting", "status.saving", "status.clippingMedia", "status.videoClipping":
             return .teal
         default: return .secondary
@@ -1059,16 +1146,39 @@ struct ContentView: View {
 
             Section(t("settings.segmentation")) {
                 stackedField(t("settings.preset"), help: t("help.preset")) {
-                    Picker("", selection: $selectedPreset) {
-                        ForEach(RecognitionPreset.allCases) { preset in
-                            Text(presetTitle(preset)).tag(preset)
+                    HStack(spacing: 8) {
+                        Picker("", selection: presetSelectionBinding) {
+                            Text(t("preset.custom"))
+                                .tag(Self.unsavedCustomPresetTag)
+                            ForEach(RecognitionPreset.allCases) { preset in
+                                Text(presetTitle(preset))
+                                    .tag(builtInPresetTag(preset))
+                            }
+                            if !settings.customPresets.isEmpty {
+                                ForEach(settings.customPresets) { preset in
+                                    Text(preset.name)
+                                        .tag(savedCustomPresetTag(preset.id))
+                                }
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+
+                        if isUnsavedCustomPreset {
+                            Button {
+                                customPresetName = ""
+                                isSaveCustomPresetSheetPresented = true
+                            } label: {
+                                Image(systemName: "plus")
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .help(t("preset.saveCustom"))
                         }
                     }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
                 }
 
-                Text(presetHelp(selectedPreset))
+                Text(currentPresetHelpText())
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1092,7 +1202,6 @@ struct ContentView: View {
                 }
 
                 Button {
-                    selectedPreset = .balanced
                     settings.resetRecognitionDefaults()
                 } label: {
                     Label(t("preset.reset"), systemImage: "arrow.counterclockwise")
@@ -1323,9 +1432,6 @@ struct ContentView: View {
             }
         }
         .formStyle(.grouped)
-        .onChange(of: selectedPreset) { _, newValue in
-            settings.applyPreset(newValue)
-        }
     }
 
     // MARK: - File drop hero
@@ -1344,6 +1450,7 @@ struct ContentView: View {
             }
             .buttonStyle(.borderless)
             .help(t("file.add"))
+            .accessibilityLabel(t("file.add"))
 
             Button {
                 clearFiles()
@@ -1356,6 +1463,7 @@ struct ContentView: View {
             .foregroundStyle(.secondary)
             .disabled(files.isEmpty || isProcessing || isSaving)
             .help(t("file.clearAll"))
+            .accessibilityLabel(t("file.clearAll"))
 
             statusCapsule
                 .layoutPriority(1)
@@ -1454,14 +1562,15 @@ struct ContentView: View {
                     .transition(.opacity)
 
                 Button {
-                    cancelProcessing()
+                    togglePauseProcessing()
                 } label: {
-                    Image(systemName: "stop.circle")
+                    Image(systemName: pauseResumeSystemImage)
                         .font(Font.caption.weight(.semibold))
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(.red)
-                .help(t("action.stop"))
+                .foregroundStyle(pauseResumeTint)
+                .disabled(isPauseResumeRequestInFlight)
+                .help(t(pauseResumeLabelKey))
                 .transition(.scale.combined(with: .opacity))
             }
         }
@@ -1484,14 +1593,15 @@ struct ContentView: View {
 
                 if isProcessing {
                     Button {
-                        cancelProcessing()
+                        togglePauseProcessing()
                     } label: {
-                        Image(systemName: "stop.circle.fill")
+                        Image(systemName: pauseResumeSystemImage)
                             .font(.title3)
                     }
                     .buttonStyle(.plain)
-                    .foregroundStyle(.red)
-                    .help(t("action.stop"))
+                    .foregroundStyle(pauseResumeTint)
+                    .disabled(isPauseResumeRequestInFlight)
+                    .help(t(pauseResumeLabelKey))
                 }
             }
 
@@ -1543,6 +1653,24 @@ struct ContentView: View {
                     }
                     Spacer(minLength: 0)
                 }
+            }
+
+            if let details = activeFailureDetails {
+                HStack(spacing: 8) {
+                    Button {
+                        failureDetails = details
+                    } label: {
+                        Label(t("failure.showDetails"), systemImage: "doc.text.magnifyingglass")
+                    }
+
+                    Button {
+                        exportFailureLog(details)
+                    } label: {
+                        Label(t("failure.exportLog"), systemImage: "square.and.arrow.down")
+                    }
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
             }
         }
     }
@@ -1603,7 +1731,7 @@ struct ContentView: View {
             return "\(files.count) \(filesCountLabel(files.count))"
         }()
         let subtitle: String = {
-            if files.count == 0 { return t("input.none") }
+            if files.count == 0 { return t("input.supportedFormats") }
             if files.count == 1 { return files[0].url.deletingLastPathComponent().path }
             return files.map(\.url.lastPathComponent).prefix(3).joined(separator: " · ")
         }()
@@ -1682,6 +1810,14 @@ struct ContentView: View {
             .padding(.vertical, 4)
             .animation(.spring(response: 0.45, dampingFraction: 0.82), value: files.map(\.id))
         }
+        .background(
+            GeometryReader { proxy in
+                Color.clear.preference(key: ChipsRowWidthKey.self, value: proxy.size.width)
+            }
+        )
+        .onPreferenceChange(ChipsRowWidthKey.self) { width in
+            chipsAvailableWidth = width
+        }
         .onScrollGeometryChange(for: ChipScrollEdges.self) { geometry in
             let visible = geometry.visibleRect
             let contentWidth = geometry.contentSize.width
@@ -1694,6 +1830,13 @@ struct ContentView: View {
         }
         .mask(chipFadeMask)
         .animation(.easeInOut(duration: 0.2), value: chipScrollEdges)
+    }
+
+    private var chipNameMaxWidth: CGFloat {
+        let count = max(1, files.count)
+        guard chipsAvailableWidth > 0 else { return 200 }
+        let perChipBudget = (chipsAvailableWidth - 20 + 8) / CGFloat(count) - 50
+        return min(max(perChipBudget, 70), 260)
     }
 
     private var chipFadeMask: some View {
@@ -1714,16 +1857,35 @@ struct ContentView: View {
     private func fileChip(index: Int) -> some View {
         let slot = files[index]
         let isActive = index == activeIndex
+        let targetID = slot.id
         return FileChipView(
             slot: slot,
             isActive: isActive,
             iconName: chipIcon(slot.processingState),
             iconColor: chipColor(slot.processingState),
+            nameMaxWidth: chipNameMaxWidth,
             removeHelp: t("file.remove"),
             statusHelp: [t(slot.statusKey), slot.statusDetail].filter { !$0.isEmpty }.joined(separator: " · "),
+            showInFinderLabel: t("file.showInFinder"),
+            openWithDefaultLabel: t("file.openWithDefault"),
             onSelect: { activeIndex = index },
-            onRemove: { remove(at: index) }
+            onRemove: { remove(at: index) },
+            onReorder: { draggedID in moveChip(from: draggedID, to: targetID) }
         )
+    }
+
+    private func moveChip(from sourceID: UUID, to targetID: UUID) {
+        guard let fromIdx = files.firstIndex(where: { $0.id == sourceID }),
+              let toIdx = files.firstIndex(where: { $0.id == targetID }),
+              fromIdx != toIdx else { return }
+        let activeID = files.indices.contains(activeIndex) ? files[activeIndex].id : nil
+        withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) {
+            let item = files.remove(at: fromIdx)
+            files.insert(item, at: toIdx)
+            if let activeID, let newIdx = files.firstIndex(where: { $0.id == activeID }) {
+                activeIndex = newIdx
+            }
+        }
     }
 
     private func chipIcon(_ state: FileSlot.ProcessingState) -> String {
@@ -1979,17 +2141,20 @@ struct ContentView: View {
                 .controlSize(.small)
                 .disabled(slot?.hasEditableSubtitle != true || isTranslating)
                 .help(t("translation.translateAllHelp"))
+                .accessibilityLabel(t("translation.translateAllHelp"))
 
                 Button {
                     playback.togglePlayPause()
                 } label: {
                     Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
                         .frame(width: 18, height: 18)
+                        .contentTransition(.symbolEffect(.replace))
                 }
                 .buttonStyle(.borderless)
                 .controlSize(.small)
                 .help(t(playback.isPlaying ? "editor.pause" : "editor.play"))
                 .disabled(slot == nil)
+                .accessibilityLabel(t(playback.isPlaying ? "editor.pause" : "editor.play"))
 
                 if !cueListSelection.isEmpty {
                     Button(role: .destructive) {
@@ -2374,6 +2539,67 @@ struct ContentView: View {
         t("preset.\(preset.rawValue).help")
     }
 
+    private var presetSelectionBinding: Binding<String> {
+        Binding {
+            currentPresetTag() ?? Self.unsavedCustomPresetTag
+        } set: { tag in
+            applyPresetTag(tag)
+        }
+    }
+
+    private var isUnsavedCustomPreset: Bool {
+        currentPresetTag() == nil
+    }
+
+    private func builtInPresetTag(_ preset: RecognitionPreset) -> String {
+        Self.builtInPresetTagPrefix + preset.rawValue
+    }
+
+    private func savedCustomPresetTag(_ id: UUID) -> String {
+        Self.savedCustomPresetTagPrefix + id.uuidString
+    }
+
+    private func currentPresetTag() -> String? {
+        let snapshot = settings.recognitionPresetSnapshot
+        if let builtIn = RecognitionPreset.allCases.first(where: { settings.builtInPresetSnapshot($0) == snapshot }) {
+            return builtInPresetTag(builtIn)
+        }
+        if let custom = settings.customPresets.first(where: { $0.snapshot == snapshot }) {
+            return savedCustomPresetTag(custom.id)
+        }
+        return nil
+    }
+
+    private func applyPresetTag(_ tag: String) {
+        guard tag != Self.unsavedCustomPresetTag else { return }
+        if tag.hasPrefix(Self.builtInPresetTagPrefix) {
+            let rawValue = String(tag.dropFirst(Self.builtInPresetTagPrefix.count))
+            if let preset = RecognitionPreset(rawValue: rawValue) {
+                settings.applyPreset(preset)
+            }
+            return
+        }
+        if tag.hasPrefix(Self.savedCustomPresetTagPrefix) {
+            let rawValue = String(tag.dropFirst(Self.savedCustomPresetTagPrefix.count))
+            if let id = UUID(uuidString: rawValue) {
+                settings.applyCustomPreset(id: id)
+            }
+        }
+    }
+
+    private func currentPresetHelpText() -> String {
+        guard let tag = currentPresetTag() else {
+            return t("preset.custom.help")
+        }
+        if tag.hasPrefix(Self.builtInPresetTagPrefix) {
+            let rawValue = String(tag.dropFirst(Self.builtInPresetTagPrefix.count))
+            if let preset = RecognitionPreset(rawValue: rawValue) {
+                return presetHelp(preset)
+            }
+        }
+        return t("preset.custom.savedHelp")
+    }
+
     private func asrEngineTitle(_ engine: ASREngine) -> String {
         t("settings.asrEngine.\(engine.rawValue)")
     }
@@ -2521,13 +2747,14 @@ struct ContentView: View {
                 .foregroundStyle(.white)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 6)
+                .contentTransition(.symbolEffect(.replace))
         }
         .glassEffect(.regular.tint(isProcessing ? .red : .accentColor).interactive())
         .buttonBorderShape(.capsule)
         .controlSize(.large)
-        .keyboardShortcut(.return, modifiers: [.command])
         .disabled(!isProcessing && !canRun)
         .help(t(isProcessing ? "action.stop" : "action.transcribe"))
+        .accessibilityLabel(t(isProcessing ? "action.stop" : "action.transcribe"))
     }
 
     // MARK: - File handling
@@ -3184,9 +3411,12 @@ struct ContentView: View {
         let task = Task { @MainActor in
             defer {
                 isProcessing = false
+                isProcessingPaused = false
                 processingTask = nil
             }
             for index in files.indices {
+                if Task.isCancelled { break }
+                await waitWhileProcessingPaused()
                 if Task.isCancelled { break }
                 await preview(at: index)
             }
@@ -3216,9 +3446,12 @@ struct ContentView: View {
         let task = Task { @MainActor in
             defer {
                 isProcessing = false
+                isProcessingPaused = false
                 processingTask = nil
             }
             for index in files.indices {
+                if Task.isCancelled { break }
+                await waitWhileProcessingPaused()
                 if Task.isCancelled { break }
                 await transcribe(at: index)
             }
@@ -3238,10 +3471,104 @@ struct ContentView: View {
         await task.value
     }
 
+    private func togglePauseProcessing() {
+        guard isProcessing else { return }
+        Task {
+            if isProcessingPaused {
+                await resumeProcessing()
+            } else {
+                await pauseProcessing()
+            }
+        }
+    }
+
+    private func pauseProcessing() async {
+        guard isProcessing, !isPauseResumeRequestInFlight else { return }
+        isPauseResumeRequestInFlight = true
+        defer { isPauseResumeRequestInFlight = false }
+        isProcessingPaused = true
+
+        for index in files.indices {
+            switch files[index].processingState {
+            case .previewing, .transcribing:
+                files[index].statusKey = "status.pausePending"
+                if files[index].statusDetail.isEmpty {
+                    files[index].statusDetail = files[index].url.lastPathComponent
+                }
+            default:
+                break
+            }
+        }
+
+        for jobID in files.compactMap(\.jobID) {
+            do {
+                try await api.pauseJob(id: jobID)
+            } catch {
+                AppLog.api.error("pauseJob failed for \(jobID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    private func resumeProcessing() async {
+        guard isProcessing, !isPauseResumeRequestInFlight else { return }
+        isPauseResumeRequestInFlight = true
+        defer { isPauseResumeRequestInFlight = false }
+        isProcessingPaused = false
+
+        for jobID in files.compactMap(\.jobID) {
+            do {
+                try await api.resumeJob(id: jobID)
+            } catch {
+                AppLog.api.error("resumeJob failed for \(jobID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+
+        for index in files.indices {
+            if files[index].statusKey == "status.paused" || files[index].statusKey == "status.pausePending" {
+                switch files[index].processingState {
+                case .previewing:
+                    files[index].statusKey = "status.detecting"
+                case .transcribing:
+                    files[index].statusKey = "status.transcribing"
+                default:
+                    break
+                }
+            }
+        }
+    }
+
+    private func waitWhileProcessingPaused() async {
+        var didMarkPaused = false
+        while isProcessingPaused && !Task.isCancelled {
+            if !didMarkPaused {
+                for index in files.indices {
+                    switch files[index].processingState {
+                    case .previewing, .transcribing:
+                        files[index].statusKey = "status.paused"
+                        if files[index].statusDetail.isEmpty {
+                            files[index].statusDetail = files[index].url.lastPathComponent
+                        }
+                    default:
+                        break
+                    }
+                }
+                didMarkPaused = true
+            }
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+    }
+
     private func cancelProcessing() {
+        isProcessingPaused = false
         for slot in files {
             if let jobID = slot.jobID {
-                Task { try? await api.cancelJob(id: jobID) }
+                Task {
+                    do {
+                        try await api.cancelJob(id: jobID)
+                    } catch {
+                        AppLog.api.error("cancelJob failed for \(jobID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    }
+                }
             }
         }
         processingTask?.cancel()
@@ -3304,6 +3631,11 @@ struct ContentView: View {
             $0.statusKey = clipRange == nil ? "status.detecting" : "status.clippingMedia"
             $0.statusDetail = clipRange.map { clipRangeSummary($0) } ?? url.lastPathComponent
             $0.progress = 0
+            $0.failureMessage = nil
+            $0.failureTrace = nil
+            $0.failureLogText = nil
+            $0.failureLogFilename = nil
+            $0.failureJobID = nil
         }
         do {
             let preparedInput = try await preparedMediaInput(for: slot, clipRange: clipRange)
@@ -3333,6 +3665,14 @@ struct ContentView: View {
                 $0.progress = 1
             }
         } catch {
+            let details = recordFailureDetails(
+                fileIndex: index,
+                jobID: nil,
+                message: error.localizedDescription,
+                trace: nil,
+                logText: nil,
+                logFilename: nil
+            )
             update(at: index) {
                 $0.statusKey = "status.previewFailed"
                 $0.statusDetail = error.localizedDescription
@@ -3341,6 +3681,7 @@ struct ContentView: View {
                 $0.previewID = nil
                 $0.previewSettingsKey = nil
             }
+            failureDetails = details
         }
     }
 
@@ -3364,6 +3705,11 @@ struct ContentView: View {
             $0.progress = 0
             $0.statusKey = clipRange == nil ? "status.starting" : "status.clippingMedia"
             $0.statusDetail = clipRange.map { clipRangeSummary($0) } ?? url.lastPathComponent
+            $0.failureMessage = nil
+            $0.failureTrace = nil
+            $0.failureLogText = nil
+            $0.failureLogFilename = nil
+            $0.failureJobID = nil
         }
         do {
             if let reusablePreviewID, !settings.effectiveASREngine.isLocal {
@@ -3411,11 +3757,21 @@ struct ContentView: View {
                     $0.statusDetail = ""
                 }
             } else {
+                let existingDetails = files.indices.contains(index) ? failureDetails(for: files[index]) : nil
+                let details = existingDetails ?? recordFailureDetails(
+                    fileIndex: index,
+                    jobID: files.indices.contains(index) ? files[index].jobID : nil,
+                    message: error.localizedDescription,
+                    trace: nil,
+                    logText: nil,
+                    logFilename: nil
+                )
                 update(at: index) {
                     $0.processingState = .failed
                     $0.statusKey = "status.failed"
                     $0.statusDetail = error.localizedDescription
                 }
+                failureDetails = details
             }
         }
     }
@@ -3486,7 +3842,13 @@ struct ContentView: View {
                 $0.progress = progress
                 $0.chunkCurrent = current
                 $0.chunkTotal = total
-                if job.status == "running", total > 0 {
+                if job.status == "paused" {
+                    $0.statusKey = "status.paused"
+                    $0.statusDetail = job.progressText ?? ""
+                } else if job.pauseRequested == true {
+                    $0.statusKey = "status.pausePending"
+                    $0.statusDetail = job.progressText ?? ""
+                } else if job.status == "running", total > 0 {
                     $0.statusKey = "status.transcribing"
                     $0.statusDetail = "\(current) / \(total)"
                 } else if job.status == "running" {
@@ -3541,9 +3903,77 @@ struct ContentView: View {
                 return
             }
             if job.status == "error" {
-                throw NSError(domain: "MSub.Job", code: 2, userInfo: [NSLocalizedDescriptionKey: job.error ?? "Job failed"])
+                let message = job.error ?? t("error.jobFailed")
+                let log = try? await api.fetchJobLog(jobID: jobID)
+                let logText = log.flatMap { String(data: $0.data, encoding: .utf8) }
+                let details = recordFailureDetails(
+                    fileIndex: fileIndex,
+                    jobID: jobID,
+                    message: message,
+                    trace: job.errorTrace,
+                    logText: logText,
+                    logFilename: log?.filename
+                )
+                failureDetails = details
+                throw JobFailureError(message: message)
             }
             try await Task.sleep(for: .seconds(1))
+        }
+    }
+
+    @discardableResult
+    private func recordFailureDetails(
+        fileIndex: Int,
+        jobID: String?,
+        message: String,
+        trace: String?,
+        logText: String?,
+        logFilename: String?
+    ) -> FailureDetails {
+        let fileName = files.indices.contains(fileIndex) ? files[fileIndex].url.lastPathComponent : t("failure.unknownFile")
+        let details = FailureDetails(
+            fileName: fileName,
+            jobID: jobID,
+            message: message,
+            trace: trace,
+            logText: logText,
+            logFilename: logFilename
+        )
+        update(at: fileIndex) {
+            $0.failureMessage = message
+            $0.failureTrace = trace
+            $0.failureLogText = logText
+            $0.failureLogFilename = details.defaultLogFilename
+            $0.failureJobID = jobID
+        }
+        return details
+    }
+
+    private func failureDetails(for slot: FileSlot) -> FailureDetails? {
+        guard let message = slot.failureMessage, !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return FailureDetails(
+            fileName: slot.url.lastPathComponent,
+            jobID: slot.failureJobID,
+            message: message,
+            trace: slot.failureTrace,
+            logText: slot.failureLogText,
+            logFilename: slot.failureLogFilename
+        )
+    }
+
+    private func exportFailureLog(_ details: FailureDetails) {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.plainText]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = details.defaultLogFilename
+        panel.message = t("failure.exportPrompt")
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try details.exportText.write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            errorMessage = String(format: t("error.exportLogFailed"), error.localizedDescription)
         }
     }
 
@@ -3896,9 +4326,162 @@ struct ContentView: View {
     }
 }
 
+private struct SaveCustomPresetSheet: View {
+    let language: AppLanguage
+    @Binding var name: String
+    var onCancel: () -> Void
+    var onSave: () -> Void
+
+    @FocusState private var isNameFocused: Bool
+
+    private var trimmedName: String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(t("preset.saveTitle"))
+                .font(.headline)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(t("preset.name"))
+                    .font(.callout.weight(.medium))
+                TextField(t("preset.namePlaceholder"), text: $name)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($isNameFocused)
+            }
+
+            HStack {
+                Spacer()
+                Button(t("button.cancel")) {
+                    onCancel()
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button(t("button.save")) {
+                    name = trimmedName
+                    onSave()
+                }
+                .disabled(trimmedName.isEmpty)
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 360)
+        .onAppear {
+            isNameFocused = true
+        }
+    }
+
+    private func t(_ key: String) -> String {
+        Copy.text(key, language: language)
+    }
+}
+
+private struct FailureDetailsSheet: View {
+    let language: AppLanguage
+    let details: FailureDetails
+    var onCopy: () -> Void
+    var onExport: () -> Void
+    var onClose: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(t("failure.title"))
+                        .font(.headline)
+                    Text(details.fileName)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer()
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(t("failure.message"))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(details.message)
+                    .font(.callout)
+                    .textSelection(.enabled)
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    if let trace = details.trace, !trace.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        failureTextBlock(title: t("failure.trace"), text: trace)
+                    }
+                    if let logText = details.logText, !logText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        failureTextBlock(title: t("failure.log"), text: logText)
+                    } else {
+                        Text(t("failure.noLog"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(minHeight: 220, maxHeight: 360)
+
+            HStack {
+                Button {
+                    onCopy()
+                } label: {
+                    Label(t("failure.copyDetails"), systemImage: "doc.on.doc")
+                }
+
+                Button {
+                    onExport()
+                } label: {
+                    Label(t("failure.exportLog"), systemImage: "square.and.arrow.down")
+                }
+
+                Spacer()
+
+                Button(t("button.close")) {
+                    onClose()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 640)
+    }
+
+    private func failureTextBlock(title: String, text: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(text)
+                .font(.caption.monospaced())
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(10)
+                .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
+    private func t(_ key: String) -> String {
+        Copy.text(key, language: language)
+    }
+}
+
 private struct ChipScrollEdges: Equatable {
     var leading: Bool
     var trailing: Bool
+}
+
+private struct ChipsRowWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
 }
 
 private struct FileChipView: View {
@@ -3906,42 +4489,59 @@ private struct FileChipView: View {
     let isActive: Bool
     let iconName: String
     let iconColor: Color
+    let nameMaxWidth: CGFloat
     let removeHelp: String
     let statusHelp: String
+    let showInFinderLabel: String
+    let openWithDefaultLabel: String
     let onSelect: () -> Void
     let onRemove: () -> Void
+    let onReorder: (UUID) -> Void
 
     @State private var isHovering = false
+    @State private var isDropTarget = false
+
+    private static let dragPrefix = "msub-chip:"
 
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: iconName)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(iconColor)
+            ZStack {
+                Image(systemName: iconName)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(iconColor)
+                    .opacity(isHovering ? 0 : 1)
+                    .scaleEffect(isHovering ? 0.6 : 1)
+                Button {
+                    onRemove()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.secondary)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(removeHelp)
+                .accessibilityLabel(removeHelp)
+                .opacity(isHovering ? 1 : 0)
+                .scaleEffect(isHovering ? 1 : 0.6)
+                .allowsHitTesting(isHovering)
+            }
+            .frame(width: 14, height: 14)
+            .animation(.easeInOut(duration: 0.18), value: isHovering)
+
             Text(slot.url.lastPathComponent)
                 .font(.caption)
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .frame(maxWidth: 180, alignment: .leading)
+                .fixedSize(horizontal: isHovering, vertical: false)
+                .frame(maxWidth: isHovering ? nil : nameMaxWidth, alignment: .leading)
+
             if case .previewing = slot.processingState {
                 ProgressView()
                     .controlSize(.mini)
             } else if case .transcribing = slot.processingState {
                 ProgressView()
                     .controlSize(.mini)
-            }
-            if isHovering {
-                Button {
-                    onRemove()
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(.secondary)
-                        .padding(2)
-                }
-                .buttonStyle(.plain)
-                .help(removeHelp)
-                .transition(.opacity.combined(with: .scale(scale: 0.6)))
             }
         }
         .frame(minHeight: 16)
@@ -3952,18 +4552,62 @@ private struct FileChipView: View {
             in: Capsule()
         )
         .overlay(
-            Capsule().stroke(isActive ? Color.teal : Color.clear, lineWidth: 1.2)
+            Capsule().stroke(
+                isDropTarget ? Color.teal.opacity(0.7) : (isActive ? Color.teal : Color.clear),
+                lineWidth: isDropTarget ? 1.6 : 1.2
+            )
         )
+        .scaleEffect(isDropTarget ? 1.04 : 1)
+        .animation(.easeInOut(duration: 0.18), value: isDropTarget)
+        .animation(.easeInOut(duration: 0.22), value: isHovering)
+        .animation(.easeInOut(duration: 0.22), value: nameMaxWidth)
         .contentShape(Capsule())
         .onTapGesture {
             onSelect()
         }
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.18)) {
-                isHovering = hovering
-            }
+            isHovering = hovering
         }
         .help(statusHelp)
+        .contextMenu {
+            Button(showInFinderLabel) {
+                NSWorkspace.shared.activateFileViewerSelecting([slot.url])
+            }
+            Button(openWithDefaultLabel) {
+                NSWorkspace.shared.open(slot.url)
+            }
+            Divider()
+            Button(role: .destructive) {
+                onRemove()
+            } label: {
+                Text(removeHelp)
+            }
+        }
+        .draggable(Self.dragPrefix + slot.id.uuidString) {
+            HStack(spacing: 6) {
+                Image(systemName: iconName)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(iconColor)
+                Text(slot.url.lastPathComponent)
+                    .font(.caption)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(.regularMaterial, in: Capsule())
+        }
+        .dropDestination(for: String.self) { items, _ in
+            guard let raw = items.first,
+                  raw.hasPrefix(Self.dragPrefix),
+                  let draggedID = UUID(uuidString: String(raw.dropFirst(Self.dragPrefix.count))),
+                  draggedID != slot.id else {
+                return false
+            }
+            onReorder(draggedID)
+            return true
+        } isTargeted: { targeted in
+            isDropTarget = targeted
+        }
     }
 }
 
@@ -4182,6 +4826,11 @@ struct FileSlot: Identifiable {
     var chunkTotal: Int = 0
     var statusKey: String = "status.ready"
     var statusDetail: String = ""
+    var failureMessage: String?
+    var failureTrace: String?
+    var failureLogText: String?
+    var failureLogFilename: String?
+    var failureJobID: String?
     var processingState: ProcessingState = .idle
     var fileSizeBytes: Int64?
 
@@ -4192,6 +4841,52 @@ struct FileSlot: Identifiable {
         case done
         case failed
         case cancelled
+    }
+}
+
+private struct FailureDetails: Identifiable {
+    let id = UUID()
+    var fileName: String
+    var jobID: String?
+    var message: String
+    var trace: String?
+    var logText: String?
+    var logFilename: String?
+
+    var defaultLogFilename: String {
+        if let logFilename, !logFilename.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return logFilename
+        }
+        let stem = fileName.isEmpty
+            ? "MSub"
+            : URL(fileURLWithPath: fileName).deletingPathExtension().lastPathComponent
+        return "\(stem)-MSub-failure.log"
+    }
+
+    var exportText: String {
+        var parts = [
+            "MSub failure report",
+            "File: \(fileName)",
+            "Job: \(jobID ?? "-")",
+            "",
+            "Message:",
+            message
+        ]
+        if let trace, !trace.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            parts += ["", "Trace:", trace]
+        }
+        if let logText, !logText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            parts += ["", "Job log:", logText]
+        }
+        return parts.joined(separator: "\n")
+    }
+}
+
+private struct JobFailureError: LocalizedError {
+    var message: String
+
+    var errorDescription: String? {
+        message
     }
 }
 

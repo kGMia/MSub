@@ -51,11 +51,17 @@ final class FolderAuthorizationStore {
     // MARK: - File bookmarks
 
     func storeFileBookmark(for url: URL) {
-        guard let data = try? url.bookmarkData(
-            options: [.withSecurityScope],
-            includingResourceValuesForKeys: nil,
-            relativeTo: nil
-        ) else { return }
+        let data: Data
+        do {
+            data = try url.bookmarkData(
+                options: [.withSecurityScope],
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+        } catch {
+            AppLog.bookmarks.error("storeFileBookmark failed for \(url.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return
+        }
         fileBookmarks[url.standardizedFileURL.path] = data
         save(dictionary: fileBookmarks, forKey: fileBookmarksKey)
     }
@@ -66,12 +72,18 @@ final class FolderAuthorizationStore {
     func resolveFileForAccess(path: String) -> URL? {
         guard let data = fileBookmarks[path] else { return nil }
         var isStale = false
-        guard let url = try? URL(
-            resolvingBookmarkData: data,
-            options: [.withSecurityScope],
-            relativeTo: nil,
-            bookmarkDataIsStale: &isStale
-        ) else { return nil }
+        let url: URL
+        do {
+            url = try URL(
+                resolvingBookmarkData: data,
+                options: [.withSecurityScope],
+                relativeTo: nil,
+                bookmarkDataIsStale: &isStale
+            )
+        } catch {
+            AppLog.bookmarks.error("resolveFileForAccess failed for \(path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
         if isStale {
             fileBookmarks.removeValue(forKey: path)
             save(dictionary: fileBookmarks, forKey: fileBookmarksKey)
@@ -88,11 +100,17 @@ final class FolderAuthorizationStore {
     // MARK: - Folder bookmarks
 
     func authorizeFolder(_ folderURL: URL) {
-        guard let data = try? folderURL.bookmarkData(
-            options: [.withSecurityScope],
-            includingResourceValuesForKeys: nil,
-            relativeTo: nil
-        ) else { return }
+        let data: Data
+        do {
+            data = try folderURL.bookmarkData(
+                options: [.withSecurityScope],
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+        } catch {
+            AppLog.bookmarks.error("authorizeFolder failed for \(folderURL.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return
+        }
         let path = folderURL.standardizedFileURL.path
         folderBookmarks[path] = data
         save(dictionary: folderBookmarks, forKey: folderBookmarksKey)
@@ -153,12 +171,18 @@ final class FolderAuthorizationStore {
     private func resumeFolderAccesses() {
         for (path, data) in folderBookmarks {
             var isStale = false
-            guard let url = try? URL(
-                resolvingBookmarkData: data,
-                options: [.withSecurityScope],
-                relativeTo: nil,
-                bookmarkDataIsStale: &isStale
-            ) else { continue }
+            let url: URL
+            do {
+                url = try URL(
+                    resolvingBookmarkData: data,
+                    options: [.withSecurityScope],
+                    relativeTo: nil,
+                    bookmarkDataIsStale: &isStale
+                )
+            } catch {
+                AppLog.bookmarks.error("resumeFolderAccesses failed for \(path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                continue
+            }
             if isStale {
                 folderBookmarks.removeValue(forKey: path)
                 continue
