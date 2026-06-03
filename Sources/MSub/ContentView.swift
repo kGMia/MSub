@@ -13,7 +13,7 @@ struct ContentView: View {
     @Environment(TranscriptionSettings.self) private var settings
     @Environment(RecentFilesStore.self) private var recentFiles
 
-    @AppStorage("huz.uiLanguage") private var languageRaw = AppLanguage.zh.rawValue
+    @AppStorage("huz.uiLanguage") private var languageRaw = AppLanguage.systemDefault.rawValue
 
     @State private var playback = PlaybackController()
 
@@ -63,12 +63,16 @@ struct ContentView: View {
     @FocusState private var focusedMediaNameSlotID: UUID?
 
     private var language: AppLanguage {
-        AppLanguage(rawValue: languageRaw) ?? .zh
+        AppLanguage(rawValue: languageRaw) ?? .systemDefault
     }
 
     private var activeSlot: FileSlot? {
         guard files.indices.contains(activeIndex) else { return nil }
         return files[activeIndex]
+    }
+
+    private var activeSelectedCueID: SubtitleCue.ID? {
+        activeSlot?.selectedCueID
     }
 
     private var hasFiles: Bool { !files.isEmpty }
@@ -150,6 +154,10 @@ struct ContentView: View {
     private let visibleVADEngines: [VADEngine] = [.firered, .energy]
     private let visibleSpeakerClusteringMethods: [SpeakerClusteringMethod] = [.spectral, .incremental]
 
+    private func percentageText(_ ratio: Double) -> String {
+        localizedPercentageText(ratio, language: language)
+    }
+
     var body: some View {
         content
             .quickLookPreview($quickLookURL)
@@ -196,13 +204,10 @@ struct ContentView: View {
             statusDetailDismissTask?.cancel()
             statusDetailDismissTask = nil
         }
-        .task {
-            let stream = NotificationCenter.default.notifications(named: NSApplication.willTerminateNotification)
-            for await _ in stream {
-                backend.stop(waitForExit: true)
-                break
-            }
-        }
+        .modifier(MSubCommandsModifier(
+            detailTab: $detailTab,
+            onWillTerminate: { backend.stop(waitForExit: true) }
+        ))
         .alert(t("error.title"), isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
             Button(t("button.ok"), role: .cancel) {}
         } message: {
@@ -298,8 +303,18 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .msubSaveAllRequested)) { _ in
             Task { await saveAllOutputs() }
         }
+        .onAppear {
+            syncCueListSelectionFromActiveCue(activeSelectedCueID)
+        }
         .onChange(of: activeIndex) { _, _ in
             selectedFrequentTerm = nil
+            syncCueListSelectionFromActiveCue(activeSelectedCueID)
+        }
+        .onChange(of: activeSelectedCueID) { _, newValue in
+            syncCueListSelectionFromActiveCue(newValue)
+        }
+        .onChange(of: cueListSelection) { _, newValue in
+            syncActiveCueFromCueListSelection(newValue)
         }
     }
 
@@ -438,7 +453,7 @@ struct ContentView: View {
 
     private func emotionBarSegment(_ emotion: SubtitleEmotionFrequency, width: CGFloat) -> some View {
         let isSelected = selectedFrequentTerm == emotion.emoji
-        let percent = Int((emotion.ratio * 100).rounded())
+        let percent = percentageText(emotion.ratio)
         let color = emotionColor(emotion.emoji)
         return Button {
             if isSelected {
@@ -451,7 +466,7 @@ struct ContentView: View {
                 Text(emotion.emoji)
                     .font(.callout)
                 if width > 56 {
-                    Text("\(percent)%")
+                    Text(percent)
                         .font(.caption.monospacedDigit().weight(.semibold))
                         .foregroundStyle(.white)
                 }
@@ -469,7 +484,7 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .frame(width: width)
-        .help("\(emotion.emoji) \(emotion.count) (\(percent)%)")
+        .help("\(emotion.emoji) \(emotion.count) (\(percent))")
     }
 
     private func emotionColor(_ emoji: String) -> Color {
@@ -499,7 +514,7 @@ struct ContentView: View {
 
     private func emotionRatioPill(_ emotion: SubtitleEmotionFrequency) -> some View {
         let isSelected = selectedFrequentTerm == emotion.emoji
-        let percent = Int((emotion.ratio * 100).rounded())
+        let percent = percentageText(emotion.ratio)
         return Button {
             if isSelected {
                 selectedFrequentTerm = nil
@@ -510,7 +525,7 @@ struct ContentView: View {
             HStack(spacing: 3) {
                 Text(emotion.emoji)
                     .font(.caption2)
-                Text("\(percent)%")
+                Text(percent)
                     .font(.caption2.monospacedDigit())
             }
             .lineLimit(1)
@@ -526,7 +541,7 @@ struct ContentView: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .help("\(emotion.emoji) \(emotion.count) (\(percent)%)")
+        .help("\(emotion.emoji) \(emotion.count) (\(percent))")
     }
 
     private func frequentTermPill(_ term: SubtitleTermFrequency) -> some View {
@@ -679,14 +694,17 @@ struct ContentView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
 
-                switch detailTab {
-                case .segments:
-                    segmentsPanel
-                case .output:
-                    outputPanel
-                case .cueList:
-                    cueListPanel
+                Group {
+                    switch detailTab {
+                    case .segments:
+                        segmentsPanel
+                    case .output:
+                        outputPanel
+                    case .cueList:
+                        cueListPanel
+                    }
                 }
+                .transition(.opacity.animation(.easeOut(duration: 0.12)))
             }
         }
     }
@@ -697,14 +715,13 @@ struct ContentView: View {
 
     @ViewBuilder
     private func previewView(for slot: FileSlot) -> some View {
-        let subtitleText = subtitleOverlayText(for: slot, at: playback.currentTime)
         let canCaptureFrame = isVideoSlot(slot)
         switch previewKind(slot.url) {
         case .player:
             MediaPreviewCard(
                 url: slot.url,
                 title: t("preview.title"),
-                subtitleText: subtitleText,
+                cues: slot.cues,
                 canCaptureFrame: canCaptureFrame,
                 isCapturingFrame: isCapturingFrame,
                 captureHelp: t("action.captureFrame.help"),
@@ -725,11 +742,12 @@ struct ContentView: View {
                 url: slot.url,
                 title: t("preview.title"),
                 language: language,
-                subtitleText: subtitleText,
+                cues: slot.cues,
                 canCaptureFrame: canCaptureFrame,
                 isCapturingFrame: isCapturingFrame,
                 captureHelp: t("action.captureFrame.help"),
                 nativePreviewHelp: t("action.nativePreview.help"),
+                playback: playback,
                 onCaptureFrame: {
                     Task { await captureFrameForActiveSlot() }
                 },
@@ -737,9 +755,6 @@ struct ContentView: View {
                     openNativePreview(previewURL)
                 }
             )
-                .task(id: slot.url) {
-                    await playback.load(slot.url)
-                }
         case .none:
             EmptyView()
         }
@@ -756,15 +771,6 @@ struct ContentView: View {
         return (info.width ?? 0) > 0 && (info.height ?? 0) > 0
     }
 
-    private func subtitleOverlayText(for slot: FileSlot, at seconds: Double) -> String? {
-        guard seconds.isFinite else { return nil }
-        guard let cue = slot.cues.first(where: { seconds >= $0.start && seconds <= $0.end }) else {
-            return nil
-        }
-        let text = VideoFrameCapture.cleanSubtitleText(SubtitleDocument.displayText(for: cue))
-        return text.isEmpty ? nil : text
-    }
-
     private func captureFrameForActiveSlot() async {
         guard !isCapturingFrame, files.indices.contains(activeIndex) else { return }
         let index = activeIndex
@@ -772,7 +778,7 @@ struct ContentView: View {
         guard isVideoSlot(slot) else { return }
 
         let seconds = playback.currentTime
-        let subtitleText = subtitleOverlayText(for: slot, at: seconds)
+        let subtitleText = previewSubtitleText(for: slot.cues, at: seconds)
         isCapturingFrame = true
         update(at: index) {
             $0.statusKey = "status.capturingFrame"
@@ -850,10 +856,12 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .contentTransition(.opacity)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
             .contentShape(Capsule())
+            .animation(.easeInOut(duration: 0.25), value: connectionState)
         }
         .buttonStyle(.plain)
         .help(t("backend.status"))
@@ -883,10 +891,12 @@ struct ContentView: View {
                     Text(connectionState.title(language: language))
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .contentTransition(.opacity)
                 }
 
                 Spacer(minLength: 8)
             }
+            .animation(.easeInOut(duration: 0.25), value: connectionState)
 
             Divider()
 
@@ -899,7 +909,7 @@ struct ContentView: View {
                 }
             }
             if isProcessing {
-                backendDetailRow(t("backend.progress"), "\(Int((min(max(aggregateProgress, 0), 1) * 100).rounded()))%")
+                backendDetailRow(t("backend.progress"), progressPercentText)
                 ProgressView(value: min(max(aggregateProgress, 0), 1))
                     .tint(.teal)
             }
@@ -1004,12 +1014,16 @@ struct ContentView: View {
                 if isProcessing || isSaving {
                     ProgressView()
                         .controlSize(.small)
+                        .transition(.scale(scale: 0.6).combined(with: .opacity))
                 }
             }
+            .animation(.easeInOut(duration: 0.2), value: isProcessing || isSaving)
 
             ProgressView(value: min(max(aggregateProgress, 0), 1))
                 .progressViewStyle(.linear)
                 .tint(statusTint)
+                .animation(.easeInOut(duration: 0.25), value: aggregateProgress)
+                .animation(.easeInOut(duration: 0.25), value: statusTint)
 
             if let processingSummary {
                 Text(processingSummary)
@@ -1108,18 +1122,34 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
                     stackedField(t("settings.model"), help: modelHelpText()) {
-                        TextField("", text: $settings.model)
-                            .textFieldStyle(.roundedBorder)
-                            .onChange(of: settings.model) { _, _ in
-                                settings.modelPathDidChange()
+                        HStack(spacing: 6) {
+                            TextField("", text: $settings.model)
+                                .textFieldStyle(.roundedBorder)
+                                .onChange(of: settings.model) { _, _ in
+                                    settings.modelPathDidChange()
+                                }
+                            Button {
+                                chooseASRModelDirectory()
+                            } label: {
+                                Image(systemName: "folder")
                             }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .help(t("action.chooseModelFolder"))
+
+                            Button {
+                                resetASRModelToDefault()
+                            } label: {
+                                Image(systemName: "arrow.counterclockwise")
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .disabled(settings.currentModelInfo == nil)
+                            .help(t("model.useDefault"))
+                        }
                     }
-                    if let status = modelStatusText() {
-                        Text(status)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                    if let info = settings.currentModelInfo {
+                        modelStatusCard(info)
                     }
                 }
 
@@ -1699,8 +1729,7 @@ struct ContentView: View {
     }
 
     private var progressPercentText: String {
-        let percent = Int((min(max(aggregateProgress, 0), 1) * 100).rounded())
-        return "\(percent)%"
+        percentageText(aggregateProgress)
     }
 
     private var compactStatusText: String {
@@ -1810,12 +1839,9 @@ struct ContentView: View {
             .padding(.vertical, 4)
             .animation(.spring(response: 0.45, dampingFraction: 0.82), value: files.map(\.id))
         }
-        .background(
-            GeometryReader { proxy in
-                Color.clear.preference(key: ChipsRowWidthKey.self, value: proxy.size.width)
-            }
-        )
-        .onPreferenceChange(ChipsRowWidthKey.self) { width in
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.width
+        } action: { width in
             chipsAvailableWidth = width
         }
         .onScrollGeometryChange(for: ChipScrollEdges.self) { geometry in
@@ -1966,11 +1992,17 @@ struct ContentView: View {
                             .padding(.horizontal, 10)
                             .padding(.vertical, 6)
                             .background(.quinary, in: RoundedRectangle(cornerRadius: 6))
+                            .contentShape(RoundedRectangle(cornerRadius: 6))
+                            .onTapGesture {
+                                playback.seek(to: segment.start)
+                                playback.player.play()
+                            }
+                            .help(t("segments.tapToPlay"))
                         }
                     }
                     .padding(.vertical, 2)
                 }
-                .frame(minHeight: 220, maxHeight: 420)
+                .frame(minHeight: 340, idealHeight: 560, maxHeight: 760)
             }
         }
         .padding(14)
@@ -2081,8 +2113,8 @@ struct ContentView: View {
                     selectedFrequentTerm: $selectedFrequentTerm,
                     language: language,
                     playback: playback,
-                    onTranslateCue: { cueID, choice in
-                        translateCues(in: slotID, cueIDs: [cueID], to: choice)
+                    onTranslateCue: { cueID, choice, mode in
+                        translateCues(in: slotID, cueIDs: [cueID], to: choice, mode: mode)
                     }
                 )
                 .id(slotID)
@@ -2168,13 +2200,13 @@ struct ContentView: View {
                 }
             }
 
-            TimelineView(
+            PlaybackTimelineView(
                 segments: segments,
                 duration: duration,
                 clipRange: activeClipRangeBinding,
                 language: language,
                 isEnabled: !isProcessing,
-                currentTime: playback.currentTime,
+                playback: playback,
                 allowsClipSelection: false,
                 onSeek: { seconds in
                     playback.seek(to: seconds)
@@ -2289,7 +2321,7 @@ struct ContentView: View {
             .customizationID("endFrame")
             .defaultVisibility(.hidden)
         }
-        .frame(minHeight: 480, maxHeight: 820)
+        .frame(minHeight: 640, idealHeight: 780, maxHeight: 1120)
         .contextMenu(forSelectionType: SubtitleCue.ID.self) { ids in
             cueListContextMenu(for: ids)
         }
@@ -2381,6 +2413,52 @@ struct ContentView: View {
         return firstIndex.map { cues[$0].id }
     }
 
+    private func syncCueListSelectionFromActiveCue(_ cueID: SubtitleCue.ID?) {
+        guard files.indices.contains(activeIndex) else {
+            if !cueListSelection.isEmpty {
+                cueListSelection = []
+            }
+            return
+        }
+        guard let cueID,
+              files[activeIndex].cues.contains(where: { $0.id == cueID }) else {
+            if !cueListSelection.isEmpty {
+                cueListSelection = []
+            }
+            return
+        }
+        if cueListSelection.contains(cueID) {
+            return
+        }
+        cueListSelection = [cueID]
+    }
+
+    private func syncActiveCueFromCueListSelection(_ selection: Set<SubtitleCue.ID>) {
+        guard files.indices.contains(activeIndex) else {
+            if !cueListSelection.isEmpty {
+                cueListSelection = []
+            }
+            return
+        }
+
+        let validIDs = Set(files[activeIndex].cues.map(\.id))
+        let cleanedSelection = selection.intersection(validIDs)
+        if cleanedSelection != selection {
+            cueListSelection = cleanedSelection
+            return
+        }
+
+        guard let cueID = anchorCueID(in: cleanedSelection) else {
+            if files[activeIndex].selectedCueID != nil {
+                files[activeIndex].selectedCueID = nil
+            }
+            return
+        }
+        if files[activeIndex].selectedCueID != cueID {
+            files[activeIndex].selectedCueID = cueID
+        }
+    }
+
     private func insertCueRelativeToAnchor(_ anchorID: SubtitleCue.ID?, position: CueInsertPosition) {
         guard files.indices.contains(activeIndex), let anchorID,
               let anchorIdx = files[activeIndex].cues.firstIndex(where: { $0.id == anchorID })
@@ -2412,6 +2490,7 @@ struct ContentView: View {
         for offset in files[activeIndex].cues.indices {
             files[activeIndex].cues[offset].index = offset + 1
         }
+        files[activeIndex].selectedCueID = newCue.id
         cueListSelection = [newCue.id]
     }
 
@@ -2615,6 +2694,79 @@ struct ContentView: View {
         let availability = info.localModelAvailable ? t("model.localAvailable") : t("model.localMissing")
         let supports = info.supports.map(supportTitle).joined(separator: t("list.separator"))
         return String(format: t("model.status"), info.title, availability, supports)
+    }
+
+    private func modelStatusCard(_ info: ASRModelInfo) -> some View {
+        let supports = info.supports.map(supportTitle)
+        return VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                Label(info.title, systemImage: "cube")
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 8)
+                modelAvailabilityBadge(isAvailable: info.localModelAvailable)
+            }
+
+            compactStatusRow(
+                title: t("model.selectedPath"),
+                value: selectedModelPathDescription(for: info)
+            )
+            if !info.localModel.isEmpty {
+                compactStatusRow(
+                    title: t("model.localPath"),
+                    value: info.localModel
+                )
+            }
+            if !supports.isEmpty {
+                Text("\(t("model.supportedControls")) \(supports.joined(separator: t("list.separator")))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quinary, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary))
+    }
+
+    private func modelAvailabilityBadge(isAvailable: Bool) -> some View {
+        Label(
+            isAvailable ? t("model.localAvailable") : t("model.localMissing"),
+            systemImage: isAvailable ? "checkmark.circle.fill" : "exclamationmark.circle.fill"
+        )
+        .font(.caption2.weight(.medium))
+        .foregroundStyle(isAvailable ? .green : .orange)
+        .labelStyle(.titleAndIcon)
+        .lineLimit(1)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background((isAvailable ? Color.green : Color.orange).opacity(0.12), in: Capsule())
+    }
+
+    private func compactStatusRow(title: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            Text(value)
+                .font(.caption2.monospaced())
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help(value)
+        }
+    }
+
+    private func selectedModelPathDescription(for info: ASRModelInfo) -> String {
+        let trimmed = settings.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return t("model.notRequired") }
+        if trimmed == info.defaultModel {
+            return "\(t("model.default")): \(trimmed)"
+        }
+        return trimmed
     }
 
     private func supportTitle(_ support: String) -> String {
@@ -3310,6 +3462,28 @@ struct ContentView: View {
         api.baseURL = backend.baseURL
         connectionState = isReady ? .connected : .disconnected
         return isReady
+    }
+
+    private func chooseASRModelDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = t("action.chooseModelFolder")
+        panel.message = t("model.chooseASR.message")
+        if panel.runModal() == .OK, let url = panel.url {
+            settings.model = url.path
+            settings.modelPathDidChange()
+        }
+    }
+
+    private func resetASRModelToDefault() {
+        if settings.asrEngine == .auto, let info = settings.currentModelInfo {
+            settings.model = info.defaultModel
+        } else {
+            settings.applyDefaultModelForSelectedEngine()
+        }
+        settings.modelPathDidChange()
     }
 
     private func chooseEmotionModelDirectory() {
@@ -4477,13 +4651,6 @@ private struct ChipScrollEdges: Equatable {
     var trailing: Bool
 }
 
-private struct ChipsRowWidthKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}
-
 private struct FileChipView: View {
     let slot: FileSlot
     let isActive: Bool
@@ -4501,7 +4668,9 @@ private struct FileChipView: View {
     @State private var isHovering = false
     @State private var isDropTarget = false
 
-    private static let dragPrefix = "msub-chip:"
+    private var isActivelyProcessing: Bool {
+        slot.processingState == .transcribing || slot.processingState == .previewing
+    }
 
     var body: some View {
         HStack(spacing: 6) {
@@ -4509,6 +4678,8 @@ private struct FileChipView: View {
                 Image(systemName: iconName)
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(iconColor)
+                    .contentTransition(.symbolEffect(.replace))
+                    .symbolEffect(.variableColor.iterative, isActive: isActivelyProcessing)
                     .opacity(isHovering ? 0 : 1)
                     .scaleEffect(isHovering ? 0.6 : 1)
                 Button {
@@ -4536,12 +4707,10 @@ private struct FileChipView: View {
                 .fixedSize(horizontal: isHovering, vertical: false)
                 .frame(maxWidth: isHovering ? nil : nameMaxWidth, alignment: .leading)
 
-            if case .previewing = slot.processingState {
+            if isActivelyProcessing {
                 ProgressView()
                     .controlSize(.mini)
-            } else if case .transcribing = slot.processingState {
-                ProgressView()
-                    .controlSize(.mini)
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
             }
         }
         .frame(minHeight: 16)
@@ -4583,7 +4752,19 @@ private struct FileChipView: View {
                 Text(removeHelp)
             }
         }
-        .draggable(Self.dragPrefix + slot.id.uuidString) {
+        .onDrag {
+            let provider = NSItemProvider()
+            let payload = fileChipDragPrefix + slot.id.uuidString
+            let data = Data(payload.utf8)
+            provider.registerDataRepresentation(
+                forTypeIdentifier: UTType.utf8PlainText.identifier,
+                visibility: .ownProcess
+            ) { completion in
+                completion(data, nil)
+                return nil
+            }
+            return provider
+        } preview: {
             HStack(spacing: 6) {
                 Image(systemName: iconName)
                     .font(.caption2.weight(.semibold))
@@ -4596,19 +4777,65 @@ private struct FileChipView: View {
             .padding(.vertical, 6)
             .background(.regularMaterial, in: Capsule())
         }
-        .dropDestination(for: String.self) { items, _ in
-            guard let raw = items.first,
-                  raw.hasPrefix(Self.dragPrefix),
-                  let draggedID = UUID(uuidString: String(raw.dropFirst(Self.dragPrefix.count))),
-                  draggedID != slot.id else {
-                return false
-            }
-            onReorder(draggedID)
-            return true
-        } isTargeted: { targeted in
-            isDropTarget = targeted
-        }
+        .onDrop(of: [UTType.utf8PlainText], delegate: FileChipDropDelegate(
+            targetID: slot.id,
+            onReorder: onReorder,
+            isDropTarget: $isDropTarget
+        ))
     }
+}
+
+private let fileChipDragPrefix = "msub-chip:"
+
+private struct FileChipDropDelegate: DropDelegate {
+    let targetID: UUID
+    let onReorder: (UUID) -> Void
+    @Binding var isDropTarget: Bool
+
+    private static let acceptedTypes: [UTType] = [.utf8PlainText]
+
+    func validateDrop(info: DropInfo) -> Bool {
+        info.hasItemsConforming(to: Self.acceptedTypes)
+    }
+
+    func dropEntered(info: DropInfo) {
+        isDropTarget = true
+    }
+
+    func dropExited(info: DropInfo) {
+        isDropTarget = false
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        isDropTarget = false
+        let providers = info.itemProviders(for: Self.acceptedTypes)
+        guard let provider = providers.first else { return false }
+        let targetID = self.targetID
+        let reorder = UncheckedSendableBox(value: onReorder)
+        _ = provider.loadDataRepresentation(
+            forTypeIdentifier: UTType.utf8PlainText.identifier
+        ) { data, _ in
+            guard let data,
+                  let raw = String(data: data, encoding: .utf8),
+                  raw.hasPrefix(fileChipDragPrefix),
+                  let draggedID = UUID(uuidString: String(raw.dropFirst(fileChipDragPrefix.count))),
+                  draggedID != targetID else {
+                return
+            }
+            Task { @MainActor in
+                reorder.value(draggedID)
+            }
+        }
+        return true
+    }
+}
+
+private struct UncheckedSendableBox<T>: @unchecked Sendable {
+    let value: T
 }
 
 private struct ParameterHelpIcon: View {
@@ -5064,6 +5291,15 @@ private struct SegmentStats {
     }
 }
 
+private func localizedPercentageText(_ ratio: Double, language: AppLanguage) -> String {
+    let clamped = min(max(ratio, 0), 1)
+    return clamped.formatted(
+        .percent
+            .precision(.fractionLength(0))
+            .locale(language.locale)
+    )
+}
+
 private struct SegmentStatsView: View {
     let stats: SegmentStats
     let language: AppLanguage
@@ -5073,7 +5309,7 @@ private struct SegmentStatsView: View {
             GridRow {
                 stat(Copy.text("segments.avg", language: language), String(format: "%.2fs", stats.averageDuration))
                 stat(Copy.text("segments.max", language: language), String(format: "%.2fs", stats.maxDuration))
-                stat(Copy.text("segments.speech", language: language), String(format: "%.0f%%", stats.speechRatio * 100))
+                stat(Copy.text("segments.speech", language: language), localizedPercentageText(stats.speechRatio, language: language))
             }
         }
         .padding(10)
@@ -5096,6 +5332,32 @@ private struct SegmentStatsView: View {
 struct TimelineHighlightRange: Hashable {
     let start: Double
     let end: Double
+}
+
+struct PlaybackTimelineView: View {
+    let segments: [SubtitleSegment]
+    let duration: Double
+    @Binding var clipRange: MediaClipRange?
+    let language: AppLanguage
+    let isEnabled: Bool
+    let playback: PlaybackController
+    var allowsClipSelection: Bool = false
+    var onSeek: ((Double) -> Void)? = nil
+    var highlightedRanges: [TimelineHighlightRange] = []
+
+    var body: some View {
+        TimelineView(
+            segments: segments,
+            duration: duration,
+            clipRange: $clipRange,
+            language: language,
+            isEnabled: isEnabled,
+            currentTime: playback.currentTime,
+            allowsClipSelection: allowsClipSelection,
+            onSeek: onSeek,
+            highlightedRanges: highlightedRanges
+        )
+    }
 }
 
 struct TimelineView: View {
@@ -5217,18 +5479,27 @@ struct TimelineView: View {
         let selectionWidth = max(2, endX - startX)
         return ZStack(alignment: .leading) {
             Rectangle()
-                .fill(.black.opacity(0.13))
+                .fill(.ultraThinMaterial)
+                .opacity(0.55)
                 .frame(width: max(0, startX), height: height)
             Rectangle()
-                .fill(.black.opacity(0.13))
+                .fill(.ultraThinMaterial)
+                .opacity(0.55)
                 .frame(width: max(0, width - endX), height: height)
                 .offset(x: endX)
             RoundedRectangle(cornerRadius: 6)
-                .fill(.teal.opacity(0.16))
+                .fill(
+                    LinearGradient(
+                        colors: [.teal.opacity(0.20), .teal.opacity(0.10)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
                 .frame(width: selectionWidth, height: height)
                 .offset(x: startX)
             RoundedRectangle(cornerRadius: 6)
                 .stroke(.teal.opacity(0.9), lineWidth: 1.5)
+                .shadow(color: .teal.opacity(0.35), radius: 3)
                 .frame(width: selectionWidth, height: max(0, height - 1))
                 .offset(x: startX)
         }
@@ -5239,11 +5510,23 @@ struct TimelineView: View {
         let handleHeight = max(34, height - 12)
         let rawX = xPosition(edge == .start ? range.start : range.end, width: width) - handleWidth / 2
         let clampedX = min(max(0, rawX), max(0, width - handleWidth))
+        let isDragging = handleDragBase != nil
         return Capsule()
-            .fill(.white.opacity(0.94))
+            .fill(.white.opacity(0.96))
             .overlay(Capsule().stroke(.teal.opacity(0.95), lineWidth: 1.2))
+            .overlay(
+                VStack(spacing: 2) {
+                    ForEach(0..<3, id: \.self) { _ in
+                        Capsule()
+                            .fill(.teal.opacity(0.55))
+                            .frame(width: 3, height: 1.5)
+                    }
+                }
+            )
             .frame(width: handleWidth, height: handleHeight)
-            .shadow(color: .black.opacity(0.14), radius: 2, x: 0, y: 1)
+            .shadow(color: .black.opacity(isDragging ? 0.22 : 0.14), radius: isDragging ? 4 : 2, x: 0, y: 1)
+            .scaleEffect(isDragging ? 1.08 : 1)
+            .animation(.easeOut(duration: 0.15), value: isDragging)
             .offset(x: clampedX, y: (height - handleHeight) / 2)
             .gesture(handleGesture(edge: edge, width: width))
             .accessibilityLabel(Text(Copy.text("segments.keepRange", language: language)))
@@ -5281,6 +5564,7 @@ struct TimelineView: View {
                     ?? MediaClipRange(start: 0, end: duration)
                 if handleDragBase == nil {
                     handleDragBase = base
+                    NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
                 }
                 let delta = Double(value.translation.width / max(width, 1)) * duration
                 let nextRange: MediaClipRange
@@ -5293,6 +5577,9 @@ struct TimelineView: View {
                 clipRange = nextRange.normalized(in: duration, minimumDuration: minimumClipDuration)
             }
             .onEnded { _ in
+                if handleDragBase != nil {
+                    NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
+                }
                 handleDragBase = nil
             }
     }
@@ -5320,6 +5607,38 @@ private enum ClipHandleEdge {
     case end
 }
 
+private struct MSubCommandsModifier: ViewModifier {
+    @Binding var detailTab: DetailTab
+    let onWillTerminate: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .task {
+                let stream = NotificationCenter.default.notifications(named: NSApplication.willTerminateNotification)
+                for await _ in stream {
+                    onWillTerminate()
+                    break
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .msubShowSegmentsTabRequested)) { _ in
+                detailTab = .segments
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .msubShowOutputTabRequested)) { _ in
+                detailTab = .output
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .msubShowCueListTabRequested)) { _ in
+                detailTab = .cueList
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .msubFindInSubtitlesRequested)) { _ in
+                detailTab = .output
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(60))
+                    NotificationCenter.default.post(name: .msubFocusFindFieldRequested, object: nil)
+                }
+            }
+    }
+}
+
 extension Notification.Name {
     static let msubOpenFilesRequested = Notification.Name("MSubOpenFilesRequested")
     static let msubOpenRecentFileRequested = Notification.Name("MSubOpenRecentFileRequested")
@@ -5339,6 +5658,11 @@ extension Notification.Name {
     static let msubZoomTimelineInRequested = Notification.Name("MSubZoomTimelineInRequested")
     static let msubZoomTimelineOutRequested = Notification.Name("MSubZoomTimelineOutRequested")
     static let msubToggleTimelineRequested = Notification.Name("MSubToggleTimelineRequested")
+    static let msubFindInSubtitlesRequested = Notification.Name("MSubFindInSubtitlesRequested")
+    static let msubFocusFindFieldRequested = Notification.Name("MSubFocusFindFieldRequested")
+    static let msubShowSegmentsTabRequested = Notification.Name("MSubShowSegmentsTabRequested")
+    static let msubShowOutputTabRequested = Notification.Name("MSubShowOutputTabRequested")
+    static let msubShowCueListTabRequested = Notification.Name("MSubShowCueListTabRequested")
 }
 
 @MainActor
@@ -5450,11 +5774,12 @@ private struct UnsupportedMediaPreview: View {
     let url: URL
     let title: String
     let language: AppLanguage
-    let subtitleText: String?
+    let cues: [SubtitleCue]
     let canCaptureFrame: Bool
     let isCapturingFrame: Bool
     let captureHelp: String
     let nativePreviewHelp: String
+    let playback: PlaybackController
     let onCaptureFrame: () -> Void
     let onNativePreview: (URL) -> Void
 
@@ -5527,10 +5852,9 @@ private struct UnsupportedMediaPreview: View {
                         .aspectRatio(contentMode: .fit)
                         .frame(width: proxy.size.width, height: proxy.size.height)
                         .transition(.opacity)
-                    PreviewSubtitleOverlay(text: subtitleText)
+                    PlaybackSubtitleOverlay(cues: cues, playback: playback)
                         .padding(.horizontal, 12)
                         .padding(.bottom, 12)
-                        .allowsHitTesting(false)
                 } else if isLoadingCover {
                     ProgressView()
                         .controlSize(.small)
@@ -5592,6 +5916,7 @@ private struct UnsupportedMediaPreview: View {
     }
 
     private func reloadPreview() async {
+        await playback.load(url)
         cover = nil
         filmstrip = []
         selectedFrameIndex = nil
@@ -5787,12 +6112,31 @@ private struct PreviewSubtitleOverlay: View {
     }
 }
 
+private func previewSubtitleText(for cues: [SubtitleCue], at seconds: Double) -> String? {
+    guard seconds.isFinite else { return nil }
+    guard let cue = cues.first(where: { seconds >= $0.start && seconds <= $0.end }) else {
+        return nil
+    }
+    let text = VideoFrameCapture.cleanSubtitleText(SubtitleDocument.displayText(for: cue))
+    return text.isEmpty ? nil : text
+}
+
+private struct PlaybackSubtitleOverlay: View {
+    let cues: [SubtitleCue]
+    let playback: PlaybackController
+
+    var body: some View {
+        PreviewSubtitleOverlay(text: previewSubtitleText(for: cues, at: playback.currentTime))
+            .allowsHitTesting(false)
+    }
+}
+
 private struct MediaPreviewCard: View {
     static let cardHeight: CGFloat = PreviewCardMetrics.height
 
     let url: URL
     let title: String
-    let subtitleText: String?
+    let cues: [SubtitleCue]
     let canCaptureFrame: Bool
     let isCapturingFrame: Bool
     let captureHelp: String
@@ -5823,10 +6167,9 @@ private struct MediaPreviewCard: View {
                 AVPlayerViewRepresentable(player: playback.player)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 if playback.hasVideo {
-                    PreviewSubtitleOverlay(text: subtitleText)
+                    PlaybackSubtitleOverlay(cues: cues, playback: playback)
                         .padding(.horizontal, 12)
                         .padding(.bottom, 12)
-                        .allowsHitTesting(false)
                 }
             }
             .frame(height: playback.hasVideo ? 238 : 80)

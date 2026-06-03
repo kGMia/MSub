@@ -9,8 +9,8 @@ enum AppleSpeechError: LocalizedError {
     case audioFileUnreadable
 
     var errorDescription: String? {
-        let raw = UserDefaults.standard.string(forKey: "huz.uiLanguage") ?? AppLanguage.zh.rawValue
-        let language = AppLanguage(rawValue: raw) ?? .zh
+        let raw = UserDefaults.standard.string(forKey: "huz.uiLanguage") ?? AppLanguage.systemDefault.rawValue
+        let language = AppLanguage(rawValue: raw) ?? .systemDefault
         switch self {
         case .unsupportedLocale:
             return Copy.text("error.apple.unsupportedLocale", language: language)

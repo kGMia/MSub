@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -32,16 +33,17 @@ struct MSubApp: App {
     @State private var settings = TranscriptionSettings()
     @State private var recentFiles = RecentFilesStore()
 
-    @AppStorage("huz.uiLanguage") private var languageRaw = AppLanguage.zh.rawValue
+    @AppStorage("huz.uiLanguage") private var languageRaw = AppLanguage.systemDefault.rawValue
     @AppStorage("huz.appearanceTheme") private var appearanceRaw = AppearanceTheme.system.rawValue
 
     init() {
+        MSubCommandLine.handleLaunchArguments()
         AppLanguageBootstrap.applyStoredLanguageIfNeeded()
         BackendService.terminateRecordedBackendProcesses()
     }
 
     private var language: AppLanguage {
-        AppLanguage(rawValue: languageRaw) ?? .zh
+        AppLanguage(rawValue: languageRaw) ?? .systemDefault
     }
 
     private var appearance: AppearanceTheme {
@@ -60,11 +62,9 @@ struct MSubApp: App {
                 .frame(minWidth: 820, minHeight: 640)
                 .onAppear {
                     DockMenuState.shared.recentFiles = recentFiles
-                    let pending = DockMenuState.shared.takePendingOpenURLs()
-                    for url in pending {
-                        NotificationCenter.default.post(name: .msubOpenRecentFileRequested, object: url)
-                    }
                     DockMenuState.shared.isReady = true
+                    DockMenuState.shared.enqueueLaunchCommandsIfNeeded()
+                    DockMenuState.shared.flushPendingAutomation()
                 }
                 .task {
                     let stream = NotificationCenter.default.notifications(named: NSApplication.willTerminateNotification)
@@ -185,6 +185,30 @@ struct MSubApp: App {
                     NotificationCenter.default.post(name: .msubZoomTimelineOutRequested, object: nil)
                 }
                 .keyboardShortcut("-", modifiers: [.command, .option])
+
+                Divider()
+
+                Button(Copy.text("menu.findInSubtitles", language: language)) {
+                    NotificationCenter.default.post(name: .msubFindInSubtitlesRequested, object: nil)
+                }
+                .keyboardShortcut("f", modifiers: [.command])
+
+                Divider()
+
+                Button(Copy.text("menu.showSegmentsTab", language: language)) {
+                    NotificationCenter.default.post(name: .msubShowSegmentsTabRequested, object: nil)
+                }
+                .keyboardShortcut("1", modifiers: [.command])
+
+                Button(Copy.text("menu.showOutputTab", language: language)) {
+                    NotificationCenter.default.post(name: .msubShowOutputTabRequested, object: nil)
+                }
+                .keyboardShortcut("2", modifiers: [.command])
+
+                Button(Copy.text("menu.showCueListTab", language: language)) {
+                    NotificationCenter.default.post(name: .msubShowCueListTabRequested, object: nil)
+                }
+                .keyboardShortcut("3", modifiers: [.command])
             }
 
             CommandGroup(replacing: .appInfo) {
@@ -224,8 +248,15 @@ enum AppLanguageBootstrap {
     private static let appleLanguagesKey = "AppleLanguages"
 
     static func applyStoredLanguageIfNeeded() {
-        let raw = UserDefaults.standard.string(forKey: "huz.uiLanguage") ?? AppLanguage.zh.rawValue
-        let target = AppLanguage(rawValue: raw) ?? .zh
+        let raw: String
+        if let stored = UserDefaults.standard.string(forKey: "huz.uiLanguage") {
+            raw = stored
+        } else {
+            let systemLanguage = AppLanguage.systemDefault
+            UserDefaults.standard.set(systemLanguage.rawValue, forKey: "huz.uiLanguage")
+            raw = systemLanguage.rawValue
+        }
+        let target = AppLanguage(rawValue: raw) ?? .systemDefault
         let current = (UserDefaults.standard.array(forKey: appleLanguagesKey) as? [String])?.first
         if current != target.localeIdentifier {
             UserDefaults.standard.set([target.localeIdentifier], forKey: appleLanguagesKey)
@@ -323,11 +354,286 @@ enum AppAbout {
     }
 }
 
+// MARK: - Agent control
+
+enum MSubAutomationCommand: Sendable {
+    case open(URL)
+    case preview
+    case transcribe
+    case stop
+    case saveAll
+    case showSegments
+    case showOutput
+    case showCueList
+    case setLanguage(AppLanguage)
+    case setTheme(AppearanceTheme)
+}
+
+enum MSubCommandLine {
+    private static let launchParseResult = parse(arguments: Array(CommandLine.arguments.dropFirst()))
+
+    static func handleLaunchArguments() {
+        switch launchParseResult {
+        case .none:
+            return
+        case .help:
+            FileHandle.standardOutput.write(Data(helpText.utf8))
+            Darwin.exit(0)
+        case .version:
+            FileHandle.standardOutput.write(Data("\(AppAbout.appName)\n".utf8))
+            Darwin.exit(0)
+        case .commands(let commands):
+            if commands.isEmpty {
+                return
+            }
+        case .error(let message):
+            FileHandle.standardError.write(Data("MSub CLI error: \(message)\n\n\(helpText)".utf8))
+            Darwin.exit(64)
+        }
+    }
+
+    static var launchCommands: [MSubAutomationCommand] {
+        if case .commands(let commands) = launchParseResult {
+            return commands
+        }
+        return []
+    }
+
+    static func commands(from url: URL) -> [MSubAutomationCommand] {
+        guard url.scheme?.lowercased() == "msub" else { return [] }
+        var commands: [MSubAutomationCommand] = []
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        let action = (url.host ?? components?.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")) ?? "")
+            .lowercased()
+        let queryItems = components?.queryItems ?? []
+
+        func values(_ name: String) -> [String] {
+            queryItems.compactMap { $0.name == name ? $0.value : nil }
+        }
+
+        for rawPath in values("path") + values("file") {
+            commands.append(.open(fileURL(from: rawPath)))
+        }
+
+        switch action {
+        case "open":
+            break
+        case "preview":
+            commands.append(.preview)
+        case "transcribe", "start":
+            commands.append(.transcribe)
+        case "stop":
+            commands.append(.stop)
+        case "save-all", "saveall", "save":
+            commands.append(.saveAll)
+        case "segments":
+            commands.append(.showSegments)
+        case "output":
+            commands.append(.showOutput)
+        case "cue-list", "cuelist", "list":
+            commands.append(.showCueList)
+        case "":
+            break
+        default:
+            break
+        }
+
+        if truthy(values("preview").last) {
+            commands.append(.preview)
+        }
+        if truthy(values("transcribe").last) || truthy(values("start").last) {
+            commands.append(.transcribe)
+        }
+        if truthy(values("saveAll").last) || truthy(values("save-all").last) || truthy(values("save").last) {
+            commands.append(.saveAll)
+        }
+        if truthy(values("stop").last) {
+            commands.append(.stop)
+        }
+        if let tab = values("tab").last {
+            commands.append(contentsOf: commandsForTab(tab))
+        }
+        if let rawLanguage = values("language").last, let language = AppLanguage(rawValue: rawLanguage) {
+            commands.append(.setLanguage(language))
+        }
+        if let rawTheme = values("theme").last, let theme = AppearanceTheme(rawValue: rawTheme) {
+            commands.append(.setTheme(theme))
+        }
+
+        return commands
+    }
+
+    private static func parse(arguments: [String]) -> ParseResult {
+        guard !arguments.isEmpty else { return .none }
+        var commands: [MSubAutomationCommand] = []
+        var recognized = false
+        var index = 0
+
+        func nextValue(after option: String) -> String? {
+            let valueIndex = index + 1
+            guard valueIndex < arguments.count else { return nil }
+            let value = arguments[valueIndex]
+            guard !value.hasPrefix("--") else { return nil }
+            index = valueIndex
+            return value
+        }
+
+        while index < arguments.count {
+            let argument = arguments[index]
+            switch argument {
+            case "-h", "--help":
+                return .help
+            case "--version":
+                return .version
+            case "-o", "--open":
+                recognized = true
+                guard let value = nextValue(after: argument) else {
+                    return .error("Missing file path after \(argument).")
+                }
+                commands.append(.open(fileURL(from: value)))
+            case "--preview":
+                recognized = true
+                commands.append(.preview)
+            case "--transcribe", "--start":
+                recognized = true
+                commands.append(.transcribe)
+            case "--stop":
+                recognized = true
+                commands.append(.stop)
+            case "--save-all":
+                recognized = true
+                commands.append(.saveAll)
+            case "--tab":
+                recognized = true
+                guard let value = nextValue(after: argument) else {
+                    return .error("Missing tab name after \(argument).")
+                }
+                let tabCommands = commandsForTab(value)
+                guard !tabCommands.isEmpty else {
+                    return .error("Unknown tab '\(value)'. Use segments, output, or cue-list.")
+                }
+                commands.append(contentsOf: tabCommands)
+            case "--language":
+                recognized = true
+                guard let value = nextValue(after: argument) else {
+                    return .error("Missing language after \(argument).")
+                }
+                guard let language = AppLanguage(rawValue: value) else {
+                    return .error("Unknown language '\(value)'. Use zh, zh-Hant, ja, or en.")
+                }
+                commands.append(.setLanguage(language))
+            case "--theme":
+                recognized = true
+                guard let value = nextValue(after: argument) else {
+                    return .error("Missing theme after \(argument).")
+                }
+                guard let theme = AppearanceTheme(rawValue: value) else {
+                    return .error("Unknown theme '\(value)'. Use system, light, or dark.")
+                }
+                commands.append(.setTheme(theme))
+            default:
+                if argument.hasPrefix("-") {
+                    if recognized {
+                        return .error("Unknown option '\(argument)'.")
+                    }
+                    if shouldSkipCocoaArgumentValue(argument),
+                       index + 1 < arguments.count,
+                       !arguments[index + 1].hasPrefix("-") {
+                        index += 1
+                    }
+                } else {
+                    commands.append(.open(fileURL(from: argument)))
+                }
+            }
+            index += 1
+        }
+
+        return commands.isEmpty ? .none : .commands(commands)
+    }
+
+    private static func shouldSkipCocoaArgumentValue(_ argument: String) -> Bool {
+        argument.hasPrefix("-NS")
+            || argument.hasPrefix("-Apple")
+            || argument.hasPrefix("-NST")
+    }
+
+    private static func fileURL(from rawValue: String) -> URL {
+        if let url = URL(string: rawValue), url.isFileURL {
+            return url.standardizedFileURL
+        }
+        let expanded = (rawValue as NSString).expandingTildeInPath
+        if expanded.hasPrefix("/") {
+            return URL(fileURLWithPath: expanded).standardizedFileURL
+        }
+        return URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(expanded)
+            .standardizedFileURL
+    }
+
+    private static func commandsForTab(_ rawValue: String) -> [MSubAutomationCommand] {
+        switch rawValue.lowercased() {
+        case "segments", "segment":
+            [.showSegments]
+        case "output", "preview":
+            [.showOutput]
+        case "cue-list", "cuelist", "list", "cues":
+            [.showCueList]
+        default:
+            []
+        }
+    }
+
+    private static func truthy(_ value: String?) -> Bool {
+        guard let value else { return false }
+        switch value.lowercased() {
+        case "1", "true", "yes", "y", "on":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private enum ParseResult: Sendable {
+        case none
+        case help
+        case version
+        case commands([MSubAutomationCommand])
+        case error(String)
+    }
+
+    private static let helpText = """
+    Usage:
+      MSub [files...] [options]
+      MSub --open <file> [--preview | --transcribe] [--save-all]
+      open 'msub://open?path=/absolute/file.mp4&transcribe=1'
+
+    Options:
+      -o, --open <file>       Open a media or subtitle file in the app.
+          --preview           Run segment preview for loaded files.
+          --transcribe        Start transcription for loaded files.
+          --stop              Stop the running job.
+          --save-all          Save all generated or edited subtitles.
+          --tab <name>        Show segments, output, or cue-list.
+          --language <id>     Set UI language: zh, zh-Hant, ja, en.
+          --theme <theme>     Set theme: system, light, dark.
+      -h, --help              Show this help.
+
+    URL control:
+      msub://preview
+      msub://transcribe
+      msub://stop
+      msub://save-all
+      msub://show?tab=cue-list
+      msub://open?path=/absolute/file.mp4&preview=1
+
+    """
+}
+
 // MARK: - Preferences Window
 
 struct PreferencesView: View {
     @Environment(TranscriptionSettings.self) private var settings
-    @AppStorage("huz.uiLanguage") private var languageRaw = AppLanguage.zh.rawValue
+    @AppStorage("huz.uiLanguage") private var languageRaw = AppLanguage.systemDefault.rawValue
     @AppStorage("huz.appearanceTheme") private var appearanceRaw = AppearanceTheme.system.rawValue
     @State private var pendingRelaunchLanguage: AppLanguage?
     @State private var editingPresetID: UUID?
@@ -336,7 +642,7 @@ struct PreferencesView: View {
     private let visibleVADEngines: [VADEngine] = [.firered, .energy]
 
     private var language: AppLanguage {
-        AppLanguage(rawValue: languageRaw) ?? .zh
+        AppLanguage(rawValue: languageRaw) ?? .systemDefault
     }
 
     private func t(_ key: String) -> String { Copy.text(key, language: language) }
@@ -610,6 +916,8 @@ final class DockMenuState {
     weak var recentFiles: RecentFilesStore?
     var isReady = false
     private var pendingOpenURLs: [URL] = []
+    private var pendingAutomationCommands: [MSubAutomationCommand] = []
+    private var didEnqueueLaunchCommands = false
 
     func enqueueOpenURL(_ url: URL) {
         pendingOpenURLs.append(url)
@@ -619,6 +927,66 @@ final class DockMenuState {
         let urls = pendingOpenURLs
         pendingOpenURLs = []
         return urls
+    }
+
+    func enqueueAutomationCommands(_ commands: [MSubAutomationCommand]) {
+        guard !commands.isEmpty else { return }
+        pendingAutomationCommands.append(contentsOf: commands)
+    }
+
+    func enqueueLaunchCommandsIfNeeded() {
+        guard !didEnqueueLaunchCommands else { return }
+        didEnqueueLaunchCommands = true
+        enqueueAutomationCommands(MSubCommandLine.launchCommands)
+    }
+
+    func submitAutomationCommands(_ commands: [MSubAutomationCommand]) {
+        guard !commands.isEmpty else { return }
+        if isReady {
+            for command in commands {
+                dispatch(command)
+            }
+        } else {
+            enqueueAutomationCommands(commands)
+        }
+    }
+
+    func flushPendingAutomation() {
+        let openURLs = takePendingOpenURLs()
+        for url in openURLs {
+            dispatch(.open(url))
+        }
+
+        let commands = pendingAutomationCommands
+        pendingAutomationCommands = []
+        for command in commands {
+            dispatch(command)
+        }
+    }
+
+    private func dispatch(_ command: MSubAutomationCommand) {
+        switch command {
+        case .open(let url):
+            NotificationCenter.default.post(name: .msubOpenRecentFileRequested, object: url)
+        case .preview:
+            NotificationCenter.default.post(name: .msubPreviewRequested, object: nil)
+        case .transcribe:
+            NotificationCenter.default.post(name: .msubTranscribeRequested, object: nil)
+        case .stop:
+            NotificationCenter.default.post(name: .msubStopRequested, object: nil)
+        case .saveAll:
+            NotificationCenter.default.post(name: .msubSaveAllRequested, object: nil)
+        case .showSegments:
+            NotificationCenter.default.post(name: .msubShowSegmentsTabRequested, object: nil)
+        case .showOutput:
+            NotificationCenter.default.post(name: .msubShowOutputTabRequested, object: nil)
+        case .showCueList:
+            NotificationCenter.default.post(name: .msubShowCueListTabRequested, object: nil)
+        case .setLanguage(let language):
+            _ = AppLanguageBootstrap.setLanguage(language)
+        case .setTheme(let theme):
+            UserDefaults.standard.set(theme.rawValue, forKey: "huz.appearanceTheme")
+        }
     }
 }
 
@@ -630,8 +998,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
-        let raw = UserDefaults.standard.string(forKey: "huz.uiLanguage") ?? AppLanguage.zh.rawValue
-        let language = AppLanguage(rawValue: raw) ?? .zh
+        let raw = UserDefaults.standard.string(forKey: "huz.uiLanguage") ?? AppLanguage.systemDefault.rawValue
+        let language = AppLanguage(rawValue: raw) ?? .systemDefault
         let urls = DockMenuState.shared.recentFiles?.urls ?? []
 
         let menu = NSMenu()
@@ -661,20 +1029,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor
     func application(_ application: NSApplication, open urls: [URL]) {
-        if DockMenuState.shared.isReady {
-            for url in urls {
-                NotificationCenter.default.post(name: .msubOpenRecentFileRequested, object: url)
+        var controlCommands: [MSubAutomationCommand] = []
+        var fileURLs: [URL] = []
+        for url in urls {
+            let commands = MSubCommandLine.commands(from: url)
+            if commands.isEmpty {
+                fileURLs.append(url)
+            } else {
+                controlCommands.append(contentsOf: commands)
             }
-        } else {
-            for url in urls {
-                DockMenuState.shared.enqueueOpenURL(url)
-            }
+        }
+
+        if !fileURLs.isEmpty {
+            let openCommands = fileURLs.map(MSubAutomationCommand.open)
+            DockMenuState.shared.submitAutomationCommands(openCommands)
+        }
+        if !controlCommands.isEmpty {
+            DockMenuState.shared.submitAutomationCommands(controlCommands)
         }
     }
 
     @MainActor
     @objc private func openRecentFile(_ sender: NSMenuItem) {
         guard let url = sender.representedObject as? URL else { return }
-        NotificationCenter.default.post(name: .msubOpenRecentFileRequested, object: url)
+        DockMenuState.shared.submitAutomationCommands([.open(url)])
     }
 }

@@ -18,11 +18,7 @@ struct OpenMediaInMSubIntent: AppIntent {
         let didStartAccess = sourceURL.startAccessingSecurityScopedResource()
         defer { if didStartAccess { sourceURL.stopAccessingSecurityScopedResource() } }
 
-        if DockMenuState.shared.isReady {
-            NotificationCenter.default.post(name: .msubOpenRecentFileRequested, object: sourceURL)
-        } else {
-            DockMenuState.shared.enqueueOpenURL(sourceURL)
-        }
+        DockMenuState.shared.submitAutomationCommands([.open(sourceURL)])
         return .result()
     }
 }
@@ -34,7 +30,7 @@ struct StartTranscriptionIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult {
-        NotificationCenter.default.post(name: .msubTranscribeRequested, object: nil)
+        DockMenuState.shared.submitAutomationCommands([.transcribe])
         return .result()
     }
 }
@@ -46,7 +42,7 @@ struct StopTranscriptionIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult {
-        NotificationCenter.default.post(name: .msubStopRequested, object: nil)
+        DockMenuState.shared.submitAutomationCommands([.stop])
         return .result()
     }
 }

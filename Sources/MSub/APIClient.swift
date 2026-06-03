@@ -21,9 +21,21 @@ final class APIClient {
         return try JSONDecoder().decode(SegmentPreview.self, from: data)
     }
 
-    func createJob(fileURL: URL, settings: TranscriptionSettings, previewID: String? = nil) async throws -> JobCreated {
+    func createJob(
+        fileURL: URL,
+        settings: TranscriptionSettings,
+        previewID: String? = nil,
+        fieldOverrides: [(String, String)] = []
+    ) async throws -> JobCreated {
         let extraFields = previewID.map { [("preview_id", $0)] } ?? []
-        let (request, bodyURL) = try multipartRequest(path: "/api/jobs", fileURL: fileURL, settings: settings, includeOutput: true, extraFields: extraFields)
+        let (request, bodyURL) = try multipartRequest(
+            path: "/api/jobs",
+            fileURL: fileURL,
+            settings: settings,
+            includeOutput: true,
+            fieldOverrides: fieldOverrides,
+            extraFields: extraFields
+        )
         defer { try? FileManager.default.removeItem(at: bodyURL) }
         let (data, response) = try await URLSession.shared.data(for: request)
         try validate(response: response, data: data)
@@ -91,6 +103,7 @@ final class APIClient {
         fileURL: URL?,
         settings: TranscriptionSettings,
         includeOutput: Bool,
+        fieldOverrides: [(String, String)] = [],
         extraFields: [(String, String)] = []
     ) throws -> (URLRequest, URL) {
         let boundary = "Boundary-\(UUID().uuidString)"
@@ -104,7 +117,10 @@ final class APIClient {
         let output = try FileHandle(forWritingTo: bodyURL)
         defer { try? output.close() }
 
-        let fields = settings.formFields(includeOutput: includeOutput) + extraFields
+        let fields = applyingFieldOverrides(
+            fieldOverrides,
+            to: settings.formFields(includeOutput: includeOutput)
+        ) + extraFields
         for (name, value) in fields {
             try output.writeString("--\(boundary)\r\n")
             try output.writeString("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n")
@@ -134,9 +150,22 @@ final class APIClient {
 
     private func validate(response: URLResponse, data: Data) throws {
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            let text = String(data: data, encoding: .utf8) ?? "Request failed"
+            let text = responseErrorMessage(from: data) ?? String(data: data, encoding: .utf8) ?? "Request failed"
             throw NSError(domain: "MSub.API", code: 1, userInfo: [NSLocalizedDescriptionKey: text])
         }
+    }
+
+    private func responseErrorMessage(from data: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        if let detail = object["detail"] as? String {
+            if let tracePath = object["tracePath"] as? String, !tracePath.isEmpty {
+                return "\(detail)\n\(tracePath)"
+            }
+            return detail
+        }
+        return nil
     }
 
     private func filename(from response: URLResponse) -> String? {
@@ -151,6 +180,22 @@ final class APIClient {
             return raw.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
         }
         return nil
+    }
+
+    private func applyingFieldOverrides(
+        _ overrides: [(String, String)],
+        to fields: [(String, String)]
+    ) -> [(String, String)] {
+        guard !overrides.isEmpty else { return fields }
+        var merged = fields
+        for override in overrides {
+            if let index = merged.firstIndex(where: { $0.0 == override.0 }) {
+                merged[index] = override
+            } else {
+                merged.append(override)
+            }
+        }
+        return merged
     }
 }
 

@@ -810,7 +810,7 @@ final class PlaybackController {
     }
 
     private func attachObservers() {
-        let interval = CMTime(seconds: 1.0 / 15.0, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+        let interval = CMTime(seconds: 1.0 / 20.0, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
         timeObserverToken = player.addPeriodicTimeObserver(
             forInterval: interval,
             queue: .main
@@ -840,7 +840,7 @@ struct SubtitleEditorPanel: View {
     @Binding var selectedFrequentTerm: String?
     let language: AppLanguage
     let playback: PlaybackController
-    var onTranslateCue: ((SubtitleCue.ID, TranslationLanguageChoice) -> Void)? = nil
+    var onTranslateCue: ((SubtitleCue.ID, TranslationLanguageChoice, TranslationOutputMode) -> Void)? = nil
     @State private var inlineTranslationLanguage: TranslationLanguageChoice = .common[2]
 
     @Environment(APIClient.self) private var api
@@ -872,13 +872,18 @@ struct SubtitleEditorPanel: View {
     @State private var previewSyncTask: Task<Void, Never>?
     @State private var termStatsTask: Task<Void, Never>?
     @State private var waveformReloadTask: Task<Void, Never>?
+    @State private var cueListScrollTask: Task<Void, Never>?
     @State private var transcribingCueID: SubtitleCue.ID?
     @State private var transcribeError: String?
     @State private var editingSpeakerCueID: SubtitleCue.ID?
     @State private var speakerEditOriginalName: String?
     @State private var speakerEditText = ""
     @State private var editorColumnHeight: CGFloat = 300
+    @State private var cachedOriginalCuesByID: [SubtitleCue.ID: SubtitleCue] = [:]
+    @State private var cachedSpeakerColorsByName: [String: Color] = [:]
     @FocusState private var isSpeakerEditorFocused: Bool
+    @FocusState private var isSubtitleListFocused: Bool
+    @FocusState private var isFindFieldFocused: Bool
 
     private static let waveformResolutionSteps = [180, 360, 720, 1_440, 2_880, 5_760, 11_520, 23_040, 46_080, 92_160, 131_072, 262_144, 524_288, 1_048_576]
 
@@ -985,6 +990,10 @@ struct SubtitleEditorPanel: View {
         }
         .onAppear {
             configureUndoController()
+            refreshSlotCaches()
+        }
+        .onChange(of: slotCacheSignal) { _, _ in
+            refreshSlotCaches()
         }
         .onChange(of: isTimelineExpanded) { _, newValue in
             guard newValue else { return }
@@ -1017,7 +1026,10 @@ struct SubtitleEditorPanel: View {
             guard let newValue,
                   let cue = slot.cues.first(where: { $0.id == newValue }) else { return }
             selectedTextRange = nil
-            playback.seek(to: cue.start, pause: true)
+            let start = cue.start
+            Task { @MainActor in
+                playback.seek(to: start, pause: true)
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .msubDeleteSelectedCueRequested)) { _ in
             guard let cueID = slot.selectedCueID else { return }
@@ -1055,6 +1067,15 @@ struct SubtitleEditorPanel: View {
         .onReceive(NotificationCenter.default.publisher(for: .msubZoomTimelineOutRequested)) { _ in
             guard isTimelineExpanded else { return }
             timelineZoom = max(1.0, timelineZoom - 0.5)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .msubFocusFindFieldRequested)) { _ in
+            withAnimation(.easeInOut(duration: 0.18)) {
+                isFindReplaceExpanded = true
+            }
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(40))
+                isFindFieldFocused = true
+            }
         }
         .onDisappear {
             if let editingSpeakerCueID {
@@ -1294,7 +1315,7 @@ struct SubtitleEditorPanel: View {
                     .help(Copy.text(playback.isPlaying ? "editor.pause" : "editor.play", language: language))
                 }
 
-                ZoomableTimeline(
+                PlaybackZoomableTimeline(
                     cues: $slot.cues,
                     selectedCueID: $slot.selectedCueID,
                     highlightTerm: $selectedFrequentTerm,
@@ -1303,7 +1324,7 @@ struct SubtitleEditorPanel: View {
                     duration: duration,
                     zoom: $timelineZoom,
                     zoomRange: 1...maxTimelineZoom,
-                    currentTime: playback.currentTime,
+                    playback: playback,
                     centerRequest: timelineCenterRequest,
                     isSliderZooming: $isTimelineZoomSliderDragging,
                     activeSpeakerName: activeTimelineSpeakerName,
@@ -1321,14 +1342,14 @@ struct SubtitleEditorPanel: View {
                 )
                 .frame(height: 128)
             } else {
-                CompactTimelineStrip(
+                PlaybackCompactTimelineStrip(
                     cues: slot.cues,
                     selectedCueID: $slot.selectedCueID,
                     highlightTerm: $selectedFrequentTerm,
                     findTerm: activeFindHighlightTerm,
                     waveform: waveform,
                     duration: duration,
-                    currentTime: playback.currentTime,
+                    playback: playback,
                     activeSpeakerName: activeTimelineSpeakerName,
                     onSeek: { time in
                         playback.seek(to: time, pause: true)
@@ -1347,14 +1368,20 @@ struct SubtitleEditorPanel: View {
     }
 
     private var subtitleBlocks: some View {
-        ScrollViewReader { proxy in
+        let selectedCueID = slot.selectedCueID
+        let originalCuesByID = cachedOriginalCuesByID
+        let speakerColorsByName = cachedSpeakerColorsByName
+        let canCycleSpeakers = slot.cues.contains { SubtitleDocument.normalizedSpeakerName($0.speaker) != nil }
+
+        return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 8) {
                     ForEach($slot.cues) { $cue in
+                        let originalCue = originalCuesByID[cue.id]
                         SubtitleCueBlockRow(
                             cue: $cue,
-                            isSelected: cue.id == slot.selectedCueID,
-                            canReset: canResetCue(cue.id),
+                            isSelected: cue.id == selectedCueID,
+                            canReset: canResetCue(cue, original: originalCue),
                             select: { selectCueFromBlock(cue.id) },
                             reset: { resetCue(cue.id) },
                             duplicate: { duplicateCue(cue.id) },
@@ -1362,7 +1389,9 @@ struct SubtitleEditorPanel: View {
                             insertAfter: { insertCue(after: cue.id) },
                             closeGap: { closeGap(around: cue.id) },
                             delete: { deleteCue(cue.id) },
-                            language: language
+                            language: language,
+                            speakerColor: speakerColor(forCue: cue, colorCache: speakerColorsByName),
+                            cycleSpeaker: canCycleSpeakers ? { cycleSpeaker(for: cue.id) } : nil
                         )
                         .id(cue.id)
                     }
@@ -1373,21 +1402,82 @@ struct SubtitleEditorPanel: View {
             .padding(2)
             .background(.quinary, in: RoundedRectangle(cornerRadius: 10))
             .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 10))
+            .focusable()
+            .focusEffectDisabled()
+            .focused($isSubtitleListFocused)
+            .onKeyPress(phases: .down) { press in
+                let cmd = press.modifiers.contains(.command)
+                let shift = press.modifiers.contains(.shift)
+                switch press.key {
+                case .upArrow:
+                    cmd ? selectBoundaryCue(first: true) : selectAdjacentCue(offset: -1)
+                    return .handled
+                case .downArrow:
+                    cmd ? selectBoundaryCue(first: false) : selectAdjacentCue(offset: 1)
+                    return .handled
+                case .leftArrow:
+                    if cmd {
+                        jumpToAdjacentCue(offset: -1)
+                    } else {
+                        seekRelative(shift ? -5.0 : -1.0)
+                    }
+                    return .handled
+                case .rightArrow:
+                    if cmd {
+                        jumpToAdjacentCue(offset: 1)
+                    } else {
+                        seekRelative(shift ? 5.0 : 1.0)
+                    }
+                    return .handled
+                case .home:
+                    selectBoundaryCue(first: true)
+                    return .handled
+                case .end:
+                    selectBoundaryCue(first: false)
+                    return .handled
+                case .space:
+                    playback.togglePlayPause()
+                    return .handled
+                case KeyEquivalent("k") where cmd:
+                    insertCueAfterSelection()
+                    return .handled
+                case KeyEquivalent(";") where cmd:
+                    setSelectedCueStartToPlayhead()
+                    return .handled
+                case KeyEquivalent("'") where cmd:
+                    setSelectedCueEndToPlayhead()
+                    return .handled
+                default:
+                    return .ignored
+                }
+            }
             .onChange(of: slot.selectedCueID) { _, newValue in
                 guard let newValue else { return }
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    proxy.scrollTo(newValue, anchor: .center)
-                }
+                scheduleCueListScroll(to: newValue, proxy: proxy, initial: false)
             }
             .onAppear {
                 guard let selectedID = slot.selectedCueID else { return }
-                Task { @MainActor in
-                    // Wait for LazyVStack to lay out rows before scrolling.
-                    try? await Task.sleep(for: .milliseconds(80))
-                    withAnimation(.easeInOut(duration: 0.18)) {
-                        proxy.scrollTo(selectedID, anchor: .center)
-                    }
-                }
+                scheduleCueListScroll(to: selectedID, proxy: proxy, initial: true)
+            }
+            .onDisappear {
+                cueListScrollTask?.cancel()
+                cueListScrollTask = nil
+            }
+        }
+    }
+
+    private func scheduleCueListScroll(to cueID: SubtitleCue.ID, proxy: ScrollViewProxy, initial: Bool) {
+        cueListScrollTask?.cancel()
+        let delay: Duration = initial
+            ? .milliseconds(80)
+            : (slot.cues.count > 600 ? .milliseconds(45) : .zero)
+        cueListScrollTask = Task { @MainActor in
+            if delay != .zero {
+                try? await Task.sleep(for: delay)
+                guard !Task.isCancelled else { return }
+            }
+            withAnimation(.easeInOut(duration: initial ? 0.18 : 0.16)) {
+                proxy.scrollTo(cueID, anchor: .center)
             }
         }
     }
@@ -1422,6 +1512,7 @@ struct SubtitleEditorPanel: View {
                 VStack(alignment: .leading, spacing: 8) {
                     TextField(Copy.text("editor.find", language: language), text: $findText)
                         .textFieldStyle(.roundedBorder)
+                        .focused($isFindFieldFocused)
 
                     HStack(spacing: 8) {
                         Button {
@@ -1501,8 +1592,21 @@ struct SubtitleEditorPanel: View {
     private var selectedCueEditor: some View {
         if let selectedCueIndex, slot.cues.indices.contains(selectedCueIndex) {
             VStack(alignment: .leading, spacing: 10) {
-                Text(Copy.text("editor.selected", language: language))
-                    .font(.subheadline.weight(.semibold))
+                let selectedCue = slot.cues[selectedCueIndex]
+                let selectedCueID = selectedCue.id
+                HStack(spacing: 8) {
+                    Text(Copy.text("editor.selected", language: language))
+                        .font(.subheadline.weight(.semibold))
+                    Spacer(minLength: 8)
+                    CueStatusBadges(
+                        cue: selectedCue,
+                        canReset: canResetCue(selectedCueID),
+                        language: language,
+                        showsSpeaker: false,
+                        onReset: { resetSelectedCue() },
+                        editedFields: editedFields(for: selectedCueID)
+                    )
+                }
 
                 HStack(spacing: 6) {
                     Button {
@@ -1540,8 +1644,7 @@ struct SubtitleEditorPanel: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
 
-                let selectedCueID = slot.cues[selectedCueIndex].id
-                speakerControls(cueID: selectedCueID, cue: slot.cues[selectedCueIndex])
+                speakerControls(cueID: selectedCueID, cue: selectedCue)
 
                 SelectableTextEditor(text: cueTextBinding(for: selectedCueID), selection: $selectedTextRange) {}
                     .frame(height: 118)
@@ -1563,14 +1666,26 @@ struct SubtitleEditorPanel: View {
                         .controlSize(.mini)
                         .fixedSize()
                         Button {
-                            onTranslateCue(selectedCueID, inlineTranslationLanguage)
+                            onTranslateCue(selectedCueID, inlineTranslationLanguage, .replace)
                         } label: {
-                            Text(Copy.text("translation.translate", language: language))
+                            Text(Copy.text("translation.translateAndReplace", language: language))
                                 .font(.caption)
+                                .frame(maxWidth: .infinity)
                         }
                         .controlSize(.small)
                         .buttonStyle(.bordered)
-                        Spacer(minLength: 0)
+                        .help(Copy.text("translation.translateAndReplace.help", language: language))
+
+                        Button {
+                            onTranslateCue(selectedCueID, inlineTranslationLanguage, .bilingual)
+                        } label: {
+                            Text(Copy.text("translation.translateAndCoexist", language: language))
+                                .font(.caption)
+                                .frame(maxWidth: .infinity)
+                        }
+                        .controlSize(.small)
+                        .buttonStyle(.bordered)
+                        .help(Copy.text("translation.translateAndCoexist.help", language: language))
                     }
                 }
 
@@ -1605,17 +1720,6 @@ struct SubtitleEditorPanel: View {
                 subtitleStyleControls
 
                 reTranscribeCueButton(cueID: selectedCueID, cueIsEmpty: slot.cues[selectedCueIndex].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-                Button {
-                    resetSelectedCue()
-                } label: {
-                    Label(Copy.text("editor.resetCue", language: language), systemImage: "arrow.counterclockwise")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(!canResetSelectedCue)
-                .help(Copy.text("editor.resetCue.help", language: language))
             }
             .padding(12)
             .background(.quinary, in: RoundedRectangle(cornerRadius: 10))
@@ -1828,7 +1932,7 @@ struct SubtitleEditorPanel: View {
                     toggleMarkupTag("b")
                 } label: {
                     Image(systemName: "bold")
-                        .frame(width: 22, height: 22)
+                        .frame(maxWidth: .infinity, minHeight: 22)
                 }
                 .buttonStyle(.bordered)
                 .tint(hasOuterMarkupTag("b") ? .accentColor : nil)
@@ -1838,7 +1942,7 @@ struct SubtitleEditorPanel: View {
                     toggleMarkupTag("i")
                 } label: {
                     Image(systemName: "italic")
-                        .frame(width: 22, height: 22)
+                        .frame(maxWidth: .infinity, minHeight: 22)
                 }
                 .buttonStyle(.bordered)
                 .tint(hasOuterMarkupTag("i") ? .accentColor : nil)
@@ -1848,7 +1952,7 @@ struct SubtitleEditorPanel: View {
                     toggleMarkupTag("u")
                 } label: {
                     Image(systemName: "underline")
-                        .frame(width: 22, height: 22)
+                        .frame(maxWidth: .infinity, minHeight: 22)
                 }
                 .buttonStyle(.bordered)
                 .tint(hasOuterMarkupTag("u") ? .accentColor : nil)
@@ -1863,7 +1967,7 @@ struct SubtitleEditorPanel: View {
                     applyCueColor(styleColor)
                 } label: {
                     Image(systemName: "paintpalette")
-                        .frame(width: 22, height: 22)
+                        .frame(maxWidth: .infinity, minHeight: 22)
                 }
                 .buttonStyle(.bordered)
                 .tint(hasOuterFontColor ? .accentColor : nil)
@@ -1873,7 +1977,7 @@ struct SubtitleEditorPanel: View {
                     clearCueStyle()
                 } label: {
                     Image(systemName: "eraser")
-                        .frame(width: 22, height: 22)
+                        .frame(maxWidth: .infinity, minHeight: 22)
                 }
                 .buttonStyle(.bordered)
                 .help(Copy.text("editor.style.clear.help", language: language))
@@ -2012,6 +2116,10 @@ struct SubtitleEditorPanel: View {
             slot.speakerColors.removeValue(forKey: old)
         }
         var didChange = false
+        var originalIndexByID: [SubtitleCue.ID: Int] = [:]
+        for (index, original) in slot.originalCues.enumerated() {
+            originalIndexByID[original.id] = index
+        }
         for index in slot.cues.indices {
             guard SubtitleDocument.normalizedSpeakerName(slot.cues[index].speaker) == old else { continue }
             slot.cues[index].speaker = normalizedNew
@@ -2019,6 +2127,19 @@ struct SubtitleEditorPanel: View {
                 slot.cues[index].text = fontColoredText(slot.cues[index].text, hex: targetColor)
             }
             didChange = true
+            // Mirror global speaker rename / recolor in originalCues so it isn't
+            // treated as a per-cue edit by canResetCue / editedFields.
+            if let originalIndex = originalIndexByID[slot.cues[index].id] {
+                if SubtitleDocument.normalizedSpeakerName(slot.originalCues[originalIndex].speaker) == old {
+                    slot.originalCues[originalIndex].speaker = normalizedNew
+                }
+                if let targetColor {
+                    let updatedOriginal = fontColoredText(slot.originalCues[originalIndex].text, hex: targetColor)
+                    if updatedOriginal != slot.originalCues[originalIndex].text {
+                        slot.originalCues[originalIndex].text = updatedOriginal
+                    }
+                }
+            }
         }
         if snapshot != makeUndoSnapshot() {
             registerUndo("undo.editSpeaker", before: snapshot)
@@ -2071,12 +2192,25 @@ struct SubtitleEditorPanel: View {
         let hex = hexString(for: color)
         slot.speakerColors[targetSpeaker] = hex
         var didChange = false
+        var originalIndexByID: [SubtitleCue.ID: Int] = [:]
+        for (index, original) in slot.originalCues.enumerated() {
+            originalIndexByID[original.id] = index
+        }
         for index in slot.cues.indices {
             guard SubtitleDocument.normalizedSpeakerName(slot.cues[index].speaker) == targetSpeaker else { continue }
             let updated = fontColoredText(slot.cues[index].text, hex: hex)
-            guard updated != slot.cues[index].text else { continue }
-            slot.cues[index].text = updated
-            didChange = true
+            if updated != slot.cues[index].text {
+                slot.cues[index].text = updated
+                didChange = true
+            }
+            // Mirror the global speaker-color change in originalCues so it isn't
+            // detected as a per-cue edit by canResetCue / editedFields.
+            if let originalIndex = originalIndexByID[slot.cues[index].id] {
+                let updatedOriginal = fontColoredText(slot.originalCues[originalIndex].text, hex: hex)
+                if updatedOriginal != slot.originalCues[originalIndex].text {
+                    slot.originalCues[originalIndex].text = updatedOriginal
+                }
+            }
         }
         if snapshot != makeUndoSnapshot() {
             registerUndo("undo.editSpeaker", before: snapshot)
@@ -2126,10 +2260,19 @@ struct SubtitleEditorPanel: View {
               let hex = slot.speakerColors[speaker] else {
             return false
         }
+        let cueID = slot.cues[index].id
         let updated = fontColoredText(slot.cues[index].text, hex: hex)
-        guard updated != slot.cues[index].text else { return false }
-        slot.cues[index].text = updated
-        return true
+        let changedCue = updated != slot.cues[index].text
+        if changedCue {
+            slot.cues[index].text = updated
+        }
+        if let originalIndex = slot.originalCues.firstIndex(where: { $0.id == cueID }) {
+            let updatedOriginal = fontColoredText(slot.originalCues[originalIndex].text, hex: hex)
+            if updatedOriginal != slot.originalCues[originalIndex].text {
+                slot.originalCues[originalIndex].text = updatedOriginal
+            }
+        }
+        return changedCue
     }
 
     private func nextSpeakerName() -> String {
@@ -2190,6 +2333,26 @@ struct SubtitleEditorPanel: View {
         // truncated waveform. Route through AudioSource so unsupported sources
         // are transparently transcoded to a clean m4a before sampling.
         let audioURL = await AudioSource.resolve(slot.url)
+        let needsFreshPreview = waveformSourceKey != sourceKey || waveform.values.isEmpty
+        if needsFreshPreview {
+            let previewSamples = min(targetSamples, 720)
+            let previewValues = await WaveformLoader.samples(for: audioURL, targetSamples: previewSamples)
+            guard !Task.isCancelled else {
+                isLoadingWaveform = false
+                return
+            }
+            waveform = WaveformSamples(previewValues)
+            waveformSourceKey = sourceKey
+            if previewSamples >= targetSamples {
+                isLoadingWaveform = false
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(40))
+            guard !Task.isCancelled else {
+                isLoadingWaveform = false
+                return
+            }
+        }
         let values = await WaveformLoader.samples(for: audioURL, targetSamples: targetSamples)
         guard !Task.isCancelled else {
             isLoadingWaveform = false
@@ -2217,6 +2380,47 @@ struct SubtitleEditorPanel: View {
     private func selectCueFromBlock(_ cueID: SubtitleCue.ID) {
         slot.selectedCueID = cueID
         timelineCenterRequest = TimelineCenterRequest(cueID: cueID)
+        isSubtitleListFocused = true
+    }
+
+    private func selectAdjacentCue(offset: Int) {
+        guard !slot.cues.isEmpty else { return }
+        let current = selectedCueIndex ?? (offset > 0 ? -1 : slot.cues.count)
+        let target = max(0, min(slot.cues.count - 1, current + offset))
+        guard target != selectedCueIndex else { return }
+        selectCueFromBlock(slot.cues[target].id)
+    }
+
+    private func selectBoundaryCue(first: Bool) {
+        guard let cue = first ? slot.cues.first : slot.cues.last else { return }
+        selectCueFromBlock(cue.id)
+    }
+
+    private func jumpToAdjacentCue(offset: Int) {
+        guard !slot.cues.isEmpty else { return }
+        let current = selectedCueIndex ?? (offset > 0 ? -1 : slot.cues.count)
+        let target = max(0, min(slot.cues.count - 1, current + offset))
+        let cue = slot.cues[target]
+        selectCueFromBlock(cue.id)
+        playback.seek(to: cue.start)
+    }
+
+    private func seekRelative(_ deltaSeconds: Double) {
+        let target = max(0, playback.currentTime + deltaSeconds)
+        let clamped = duration > 0 ? min(target, duration) : target
+        playback.seek(to: clamped)
+    }
+
+    private func setSelectedCueStartToPlayhead() {
+        guard let index = selectedCueIndex else { return }
+        let cueID = slot.cues[index].id
+        cueStartBinding(for: cueID).wrappedValue = playback.currentTime
+    }
+
+    private func setSelectedCueEndToPlayhead() {
+        guard let index = selectedCueIndex else { return }
+        let cueID = slot.cues[index].id
+        cueEndBinding(for: cueID).wrappedValue = playback.currentTime
     }
 
     private func insertCueAfterSelection() {
@@ -2319,12 +2523,75 @@ struct SubtitleEditorPanel: View {
     private func canResetCue(_ cueID: SubtitleCue.ID) -> Bool {
         guard let index = cueIndex(for: cueID),
               let original = originalCue(for: cueID) else { return false }
-        let current = slot.cues[index]
+        return canResetCue(slot.cues[index], original: original)
+    }
+
+    private func canResetCue(_ current: SubtitleCue, original: SubtitleCue?) -> Bool {
+        guard let original else { return false }
         return current.start != original.start
             || current.end != original.end
             || current.text != original.text
             || current.confidence != original.confidence
             || SubtitleDocument.normalizedSpeakerName(current.speaker) != SubtitleDocument.normalizedSpeakerName(original.speaker)
+    }
+
+    private func refreshSlotCaches() {
+        cachedOriginalCuesByID = Dictionary(
+            slot.originalCues.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        cachedSpeakerColorsByName = slot.speakerColors.compactMapValues { TimelineSpeakerColor.color(fromHex: $0) }
+    }
+
+    private struct SlotCacheSignal: Equatable {
+        let cuesCount: Int
+        let originalCuesCount: Int
+        let speakerColors: [String: String]
+    }
+
+    private var slotCacheSignal: SlotCacheSignal {
+        SlotCacheSignal(
+            cuesCount: slot.cues.count,
+            originalCuesCount: slot.originalCues.count,
+            speakerColors: slot.speakerColors
+        )
+    }
+
+    private func editedFields(for cueID: SubtitleCue.ID) -> CueStatusBadges.EditedFields {
+        guard let index = cueIndex(for: cueID),
+              let original = originalCue(for: cueID) else { return .init() }
+        let current = slot.cues[index]
+        return CueStatusBadges.EditedFields(
+            text: current.text != original.text,
+            time: current.start != original.start || current.end != original.end,
+            speaker: SubtitleDocument.normalizedSpeakerName(current.speaker) != SubtitleDocument.normalizedSpeakerName(original.speaker)
+        )
+    }
+
+    private func speakerColor(forCue cue: SubtitleCue) -> Color? {
+        speakerColor(forCue: cue, colorCache: slot.speakerColors.compactMapValues { TimelineSpeakerColor.color(fromHex: $0) })
+    }
+
+    private func speakerColor(forCue cue: SubtitleCue, colorCache: [String: Color]) -> Color? {
+        guard let speaker = SubtitleDocument.normalizedSpeakerName(cue.speaker),
+              let color = colorCache[speaker] else {
+            return nil
+        }
+        return color
+    }
+
+    private func cycleSpeaker(for cueID: SubtitleCue.ID) {
+        guard let index = cueIndex(for: cueID) else { return }
+        let speakers = speakerNames
+        guard !speakers.isEmpty else { return }
+        let current = SubtitleDocument.normalizedSpeakerName(slot.cues[index].speaker)
+        let next: String
+        if let current, let pos = speakers.firstIndex(of: current) {
+            next = speakers[(pos + 1) % speakers.count]
+        } else {
+            next = speakers[0]
+        }
+        assignSpeaker(next, to: cueID)
     }
 
     private func originalCue(for cueID: SubtitleCue.ID) -> SubtitleCue? {
@@ -2358,64 +2625,112 @@ struct SubtitleEditorPanel: View {
             return
         }
 
-        guard let clipURL = await extractCueClip(start: cue.start, end: cue.end) else {
+        guard let cueClip = await extractCueClip(start: cue.start, end: cue.end) else {
             transcribeError = "Audio clip extraction failed"
             return
         }
-        defer { try? FileManager.default.removeItem(at: clipURL) }
+        defer { try? FileManager.default.removeItem(at: cueClip.url) }
 
         do {
-            let created = try await api.createJob(fileURL: clipURL, settings: settings)
-            while !Task.isCancelled {
-                let status = try await api.jobStatus(id: created.id)
-                if status.status == "done" { break }
-                if status.status == "error" {
-                    throw NSError(
-                        domain: "MSub.CueTranscribe",
-                        code: 1,
-                        userInfo: [NSLocalizedDescriptionKey: status.error ?? "Job failed"]
-                    )
-                }
-                if status.status == "cancelled" { return }
-                try await Task.sleep(for: .milliseconds(700))
+            if settings.effectiveASREngine.isLocal {
+                let cues = try await AppleSpeechService.transcribe(
+                    url: cueClip.url,
+                    locale: appleSpeechLocale(for: settings.recognitionLanguage),
+                    timeOffset: 0,
+                    fastResults: settings.appleSpeechFastResults,
+                    etiquetteFilter: settings.appleSpeechEtiquetteFilter
+                )
+                let text = SubtitleDocument.serialize(cues, format: slot.outputFormat)
+                applyRetranscribedCueOutput(text, cueID: cueID)
+                return
             }
-            let output = try await api.fetchOutput(jobID: created.id)
-            guard let text = String(data: output.data, encoding: .utf8) else { return }
-            let cuesFromClip = SubtitleDocument.parse(text, format: slot.outputFormat)
-            let parsedSpeakers = cuesFromClip.compactMap { SubtitleDocument.normalizedSpeakerName($0.speaker) }
-            let uniqueParsedSpeakers = parsedSpeakers.reduce(into: [String]()) { speakers, speaker in
-                if !speakers.contains(speaker) {
-                    speakers.append(speaker)
-                }
-            }
-            let combined: String
-            if cuesFromClip.isEmpty {
-                combined = text
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-            } else {
-                combined = cuesFromClip
-                    .map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty }
-                    .joined(separator: "\n")
-            }
-            guard let updatedIndex = slot.cues.firstIndex(where: { $0.id == cueID }) else { return }
-            let snapshot = makeUndoSnapshot()
-            slot.cues[updatedIndex].text = combined
-            if uniqueParsedSpeakers.count == 1 {
-                slot.cues[updatedIndex].speaker = uniqueParsedSpeakers.first
-                _ = applyStoredSpeakerColor(toCueAt: updatedIndex)
-            }
-            if snapshot != makeUndoSnapshot() {
-                registerUndo("undo.editSubtitle", before: snapshot)
-            }
-            schedulePreviewTextSync(for: slot.cues)
-            scheduleTermStatsSync(for: slot.cues)
+
+            let text = try await transcribeCueClip(cueClip)
+            applyRetranscribedCueOutput(text, cueID: cueID)
         } catch {
             transcribeError = error.localizedDescription
         }
     }
 
-    private func extractCueClip(start: Double, end: Double) async -> URL? {
+    private func transcribeCueClip(_ cueClip: (url: URL, duration: Double)) async throws -> String {
+        let duration = max(0.05, cueClip.duration)
+        let cueChunkSeconds = max(0.4, min(duration, max(settings.vadMaxSegment, 0.8)))
+        let fixedOverrides = [
+            ("segment_mode", SegmentMode.fixed.rawValue),
+            ("chunk_seconds", String(format: "%.3f", cueChunkSeconds)),
+            ("diarize_speakers", "false")
+        ]
+
+        do {
+            return try await runCueTranscriptionJob(
+                fileURL: cueClip.url,
+                fieldOverrides: fixedOverrides
+            )
+        } catch {
+            guard !Task.isCancelled else { throw error }
+            return try await runCueTranscriptionJob(fileURL: cueClip.url)
+        }
+    }
+
+    private func runCueTranscriptionJob(
+        fileURL: URL,
+        fieldOverrides: [(String, String)] = []
+    ) async throws -> String {
+        let created = try await api.createJob(
+            fileURL: fileURL,
+            settings: settings,
+            fieldOverrides: fieldOverrides
+        )
+        while !Task.isCancelled {
+            let status = try await api.jobStatus(id: created.id)
+            if status.status == "done" { break }
+            if status.status == "error" {
+                throw NSError(
+                    domain: "MSub.CueTranscribe",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: status.error ?? "Job failed"]
+                )
+            }
+            if status.status == "cancelled" { throw CancellationError() }
+            try await Task.sleep(for: .milliseconds(700))
+        }
+        let output = try await api.fetchOutput(jobID: created.id)
+        return String(data: output.data, encoding: .utf8) ?? ""
+    }
+
+    private func applyRetranscribedCueOutput(_ text: String, cueID: SubtitleCue.ID) {
+        let cuesFromClip = SubtitleDocument.parse(text, format: slot.outputFormat)
+        let parsedSpeakers = cuesFromClip.compactMap { SubtitleDocument.normalizedSpeakerName($0.speaker) }
+        let uniqueParsedSpeakers = parsedSpeakers.reduce(into: [String]()) { speakers, speaker in
+            if !speakers.contains(speaker) {
+                speakers.append(speaker)
+            }
+        }
+        let combined: String
+        if cuesFromClip.isEmpty {
+            combined = text
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            combined = cuesFromClip
+                .map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n")
+        }
+        guard let updatedIndex = slot.cues.firstIndex(where: { $0.id == cueID }) else { return }
+        let snapshot = makeUndoSnapshot()
+        slot.cues[updatedIndex].text = combined
+        if uniqueParsedSpeakers.count == 1 {
+            slot.cues[updatedIndex].speaker = uniqueParsedSpeakers.first
+            _ = applyStoredSpeakerColor(toCueAt: updatedIndex)
+        }
+        if snapshot != makeUndoSnapshot() {
+            registerUndo("undo.editSubtitle", before: snapshot)
+        }
+        schedulePreviewTextSync(for: slot.cues)
+        scheduleTermStatsSync(for: slot.cues)
+    }
+
+    private func extractCueClip(start: Double, end: Double) async -> (url: URL, duration: Double)? {
         let audioURL = await AudioSource.resolve(slot.url)
 
         let cachesDir: URL
@@ -2443,7 +2758,7 @@ struct SubtitleEditorPanel: View {
             startSeconds: safeStart,
             durationSeconds: safeDuration
         ) {
-            return result
+            return (result, await FFmpegRunner.probeDuration(of: result) ?? safeDuration)
         }
         // AVF failed (likely because AudioSource fell back to the original URL of
         // an unsupported container). Try ffmpeg directly on the source.
@@ -2453,10 +2768,21 @@ struct SubtitleEditorPanel: View {
             start: safeStart,
             duration: safeDuration
         ) {
-            return result
+            return (result, await FFmpegRunner.probeDuration(of: result) ?? safeDuration)
         }
         try? FileManager.default.removeItem(at: dest)
         return nil
+    }
+
+    private func appleSpeechLocale(for language: RecognitionLanguage) -> Locale {
+        switch language {
+        case .auto, .nospeech: return Locale.current
+        case .zh: return Locale(identifier: "zh-CN")
+        case .en: return Locale(identifier: "en-US")
+        case .yue: return Locale(identifier: "zh-HK")
+        case .ja: return Locale(identifier: "ja-JP")
+        case .ko: return Locale(identifier: "ko-KR")
+        }
     }
 
     private func clipViaAVFoundation(
@@ -3124,6 +3450,79 @@ private struct TimelineZoomSlider: NSViewRepresentable {
     }
 }
 
+private struct PlaybackZoomableTimeline: View {
+    @Binding var cues: [SubtitleCue]
+    @Binding var selectedCueID: SubtitleCue.ID?
+    @Binding var highlightTerm: String?
+    let findTerm: String?
+
+    let waveform: WaveformSamples
+    let duration: Double
+    @Binding var zoom: Double
+    let zoomRange: ClosedRange<Double>
+    let playback: PlaybackController
+    let centerRequest: TimelineCenterRequest?
+    @Binding var isSliderZooming: Bool
+    let activeSpeakerName: String?
+    let speakerColors: [String: String]
+    let language: AppLanguage
+    let onSeek: (Double) -> Void
+    let onScrub: (Double) -> Void
+    let onCueTimingEditBegan: () -> Void
+    let onCueTimingEditEnded: () -> Void
+    let cueActions: TimelineCueActions
+
+    var body: some View {
+        ZoomableTimeline(
+            cues: $cues,
+            selectedCueID: $selectedCueID,
+            highlightTerm: $highlightTerm,
+            findTerm: findTerm,
+            waveform: waveform,
+            duration: duration,
+            zoom: $zoom,
+            zoomRange: zoomRange,
+            currentTime: playback.currentTime,
+            centerRequest: centerRequest,
+            isSliderZooming: $isSliderZooming,
+            activeSpeakerName: activeSpeakerName,
+            speakerColors: speakerColors,
+            language: language,
+            onSeek: onSeek,
+            onScrub: onScrub,
+            onCueTimingEditBegan: onCueTimingEditBegan,
+            onCueTimingEditEnded: onCueTimingEditEnded,
+            cueActions: cueActions
+        )
+    }
+}
+
+private struct PlaybackCompactTimelineStrip: View {
+    let cues: [SubtitleCue]
+    @Binding var selectedCueID: SubtitleCue.ID?
+    @Binding var highlightTerm: String?
+    let findTerm: String?
+    let waveform: WaveformSamples
+    let duration: Double
+    let playback: PlaybackController
+    let activeSpeakerName: String?
+    let onSeek: (Double) -> Void
+
+    var body: some View {
+        CompactTimelineStrip(
+            cues: cues,
+            selectedCueID: $selectedCueID,
+            highlightTerm: $highlightTerm,
+            findTerm: findTerm,
+            waveform: waveform,
+            duration: duration,
+            currentTime: playback.currentTime,
+            activeSpeakerName: activeSpeakerName,
+            onSeek: onSeek
+        )
+    }
+}
+
 private struct ZoomableTimeline: View {
     @Binding var cues: [SubtitleCue]
     @Binding var selectedCueID: SubtitleCue.ID?
@@ -3384,6 +3783,139 @@ private struct TimelineDotsCanvas: View {
     }
 }
 
+private struct CueDensityCanvas: View, Equatable {
+    enum Layout: Equatable {
+        case compact(height: CGFloat)
+        case expanded(top: CGFloat, height: CGFloat)
+    }
+
+    let cues: [SubtitleCue]
+    let duration: Double
+    let width: CGFloat
+    let activeSpeakerName: String?
+    let layout: Layout
+
+    var body: some View {
+        Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: true) { context, _ in
+            let binCount = densityBinCount
+            var deltas = [Int](repeating: 0, count: binCount + 1)
+            var speakerDeltas = [Int](repeating: 0, count: binCount + 1)
+
+            for cue in cues {
+                let lower = max(0, min(binCount - 1, Int((cue.start / max(duration, 0.001)) * Double(binCount))))
+                let upper = max(lower, min(binCount - 1, Int(ceil((cue.end / max(duration, 0.001)) * Double(binCount)))))
+                deltas[lower] += 1
+                if upper + 1 < deltas.count {
+                    deltas[upper + 1] -= 1
+                }
+                if speakerMatchesActive(cue) {
+                    speakerDeltas[lower] += 1
+                    if upper + 1 < speakerDeltas.count {
+                        speakerDeltas[upper + 1] -= 1
+                    }
+                }
+            }
+
+            var bins = [Int](repeating: 0, count: binCount)
+            var runningCount = 0
+            for index in 0..<binCount {
+                runningCount += deltas[index]
+                bins[index] = runningCount
+            }
+            let maxCount = max(bins.max() ?? 1, 1)
+            let binWidth = width / CGFloat(binCount)
+            for (index, count) in bins.enumerated() where count > 0 {
+                let intensity = min(1.0, Double(count) / Double(maxCount))
+                let rect = densityRect(index: index, binWidth: binWidth, intensity: intensity)
+                context.fill(
+                    Path(roundedRect: rect, cornerRadius: 2),
+                    with: .color(Color.teal.opacity(baseOpacity + opacityRange * intensity))
+                )
+            }
+
+            if activeSpeakerName != nil {
+                var runningSpeakerCount = 0
+                for index in 0..<binCount {
+                    runningSpeakerCount += speakerDeltas[index]
+                    guard runningSpeakerCount > 0 else { continue }
+                    context.fill(
+                        Path(roundedRect: speakerRect(index: index, binWidth: binWidth), cornerRadius: 2),
+                        with: .color(Color.teal.opacity(0.34))
+                    )
+                }
+            }
+        }
+    }
+
+    var densityBinCount: Int {
+        switch layout {
+        case .compact:
+            return max(20, min(180, Int(width / 4)))
+        case .expanded:
+            return max(24, min(260, Int(width / 3)))
+        }
+    }
+
+    private var baseOpacity: Double {
+        switch layout {
+        case .compact: return 0.18
+        case .expanded: return 0.18
+        }
+    }
+
+    private var opacityRange: Double {
+        switch layout {
+        case .compact: return 0.32
+        case .expanded: return 0.36
+        }
+    }
+
+    private func densityRect(index: Int, binWidth: CGFloat, intensity: Double) -> CGRect {
+        switch layout {
+        case .compact(let height):
+            let blockHeight = (height - 10) * (0.3 + 0.6 * intensity)
+            return CGRect(
+                x: CGFloat(index) * binWidth,
+                y: (height - blockHeight) / 2,
+                width: max(1, binWidth * 0.82),
+                height: blockHeight
+            )
+        case .expanded(let top, let height):
+            let blockHeight = height * (0.35 + 0.55 * intensity)
+            return CGRect(
+                x: CGFloat(index) * binWidth,
+                y: top + (height - blockHeight) / 2,
+                width: max(1, binWidth * 0.82),
+                height: blockHeight
+            )
+        }
+    }
+
+    private func speakerRect(index: Int, binWidth: CGFloat) -> CGRect {
+        switch layout {
+        case .compact(let height):
+            return CGRect(
+                x: CGFloat(index) * binWidth,
+                y: 4,
+                width: max(1, binWidth * 0.82),
+                height: height - 8
+            )
+        case .expanded(let top, let height):
+            return CGRect(
+                x: CGFloat(index) * binWidth,
+                y: top,
+                width: max(1, binWidth * 0.82),
+                height: height
+            )
+        }
+    }
+
+    private func speakerMatchesActive(_ cue: SubtitleCue) -> Bool {
+        guard let activeSpeakerName else { return false }
+        return SubtitleDocument.normalizedSpeakerName(cue.speaker) == activeSpeakerName
+    }
+}
+
 private struct CompactTimelineStrip: View {
     let cues: [SubtitleCue]
     @Binding var selectedCueID: SubtitleCue.ID?
@@ -3422,6 +3954,11 @@ private struct CompactTimelineStrip: View {
                 if cues.count > 240 {
                     compactDensityCanvas(width: width, height: height)
                         .allowsHitTesting(false)
+                    if let selectedCue {
+                        compactSelectedDensityOverlay(cue: selectedCue, width: width, height: height)
+                            .allowsHitTesting(false)
+                            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .center)))
+                    }
                 } else {
                     compactCueCanvas(width: width, height: height)
                         .allowsHitTesting(false)
@@ -3500,6 +4037,11 @@ private struct CompactTimelineStrip: View {
         }
     }
 
+    private var selectedCue: SubtitleCue? {
+        guard let selectedCueID else { return nil }
+        return cues.first { $0.id == selectedCueID }
+    }
+
     private func compactCueCanvas(width: CGFloat, height: CGFloat) -> some View {
         Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: true) { context, _ in
             for cue in cues {
@@ -3523,78 +4065,25 @@ private struct CompactTimelineStrip: View {
     }
 
     private func compactDensityCanvas(width: CGFloat, height: CGFloat) -> some View {
-        Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: true) { context, _ in
-            let binCount = max(20, min(180, Int(width / 4)))
-            var deltas = [Int](repeating: 0, count: binCount + 1)
-            var speakerDeltas = [Int](repeating: 0, count: binCount + 1)
-            var selectedBin: Int?
+        CueDensityCanvas(
+            cues: cues,
+            duration: duration,
+            width: width,
+            activeSpeakerName: activeSpeakerName,
+            layout: .compact(height: height)
+        )
+        .equatable()
+    }
 
-            for cue in cues {
-                let lower = max(0, min(binCount - 1, Int((cue.start / max(duration, 0.001)) * Double(binCount))))
-                let upper = max(lower, min(binCount - 1, Int(ceil((cue.end / max(duration, 0.001)) * Double(binCount)))))
-                deltas[lower] += 1
-                if upper + 1 < deltas.count {
-                    deltas[upper + 1] -= 1
-                }
-                if speakerMatchesActive(cue) {
-                    speakerDeltas[lower] += 1
-                    if upper + 1 < speakerDeltas.count {
-                        speakerDeltas[upper + 1] -= 1
-                    }
-                }
-                if cue.id == selectedCueID {
-                    selectedBin = lower
-                }
-            }
-
-            var bins = [Int](repeating: 0, count: binCount)
-            var runningCount = 0
-            for index in 0..<binCount {
-                runningCount += deltas[index]
-                bins[index] = runningCount
-            }
-            let maxCount = max(bins.max() ?? 1, 1)
-            let binWidth = width / CGFloat(binCount)
-            for (index, count) in bins.enumerated() where count > 0 {
-                let intensity = min(1.0, Double(count) / Double(maxCount))
-                let blockHeight = (height - 10) * (0.3 + 0.6 * intensity)
-                let rect = CGRect(
-                    x: CGFloat(index) * binWidth,
-                    y: (height - blockHeight) / 2,
-                    width: max(1, binWidth * 0.82),
-                    height: blockHeight
-                )
-                context.fill(
-                    Path(roundedRect: rect, cornerRadius: 2),
-                    with: .color(Color.teal.opacity(0.18 + 0.32 * intensity))
-                )
-            }
-
-            if activeSpeakerName != nil {
-                var runningSpeakerCount = 0
-                for index in 0..<binCount {
-                    runningSpeakerCount += speakerDeltas[index]
-                    guard runningSpeakerCount > 0 else { continue }
-                    let rect = CGRect(
-                        x: CGFloat(index) * binWidth,
-                        y: 4,
-                        width: max(1, binWidth * 0.82),
-                        height: height - 8
-                    )
-                    context.fill(Path(roundedRect: rect, cornerRadius: 2), with: .color(Color.teal.opacity(0.34)))
-                }
-            }
-
-            if let selectedBin {
-                let rect = CGRect(
-                    x: CGFloat(selectedBin) * binWidth,
-                    y: 4,
-                    width: max(2, binWidth),
-                    height: height - 8
-                )
-                context.fill(Path(roundedRect: rect, cornerRadius: 2), with: .color(Color.accentColor.opacity(0.5)))
-            }
-        }
+    private func compactSelectedDensityOverlay(cue: SubtitleCue, width: CGFloat, height: CGFloat) -> some View {
+        let binCount = max(20, min(180, Int(width / 4)))
+        let lower = max(0, min(binCount - 1, Int((cue.start / max(duration, 0.001)) * Double(binCount))))
+        let binWidth = width / CGFloat(binCount)
+        return RoundedRectangle(cornerRadius: 2)
+            .fill(Color.accentColor.opacity(0.5))
+            .frame(width: max(2, binWidth), height: height - 8)
+            .offset(x: CGFloat(lower) * binWidth, y: 4)
+            .animation(.easeInOut(duration: 0.16), value: cue.id)
     }
 
     private func xPosition(_ seconds: Double, width: CGFloat) -> CGFloat {
@@ -3697,12 +4186,22 @@ private struct WaveformTimelineEditor: View {
     let cueActions: TimelineCueActions
 
     @State private var dragSession: HandleDragSession?
+    @State private var moveSession: CueMoveSession?
+    @State private var hoveredCueID: SubtitleCue.ID?
 
     private struct HandleDragSession {
         let cueID: SubtitleCue.ID
         let edge: Edge
         let initialStart: Double
         let initialEnd: Double
+        var isSnapped: Bool = false
+    }
+
+    private struct CueMoveSession {
+        let cueID: SubtitleCue.ID
+        let initialStart: Double
+        let initialEnd: Double
+        var isSnapped: Bool = false
     }
 
     private enum Edge { case start, end }
@@ -3713,6 +4212,9 @@ private struct WaveformTimelineEditor: View {
     private let handleHitWidth: CGFloat = 16
     private let handleVisualWidth: CGFloat = 5
     private let handleHitHeightExtra: CGFloat = 12
+    private let moveHandleHitHeight: CGFloat = 22
+    private let moveHandleVisualWidth: CGFloat = 34
+    private let moveHandleVisualHeight: CGFloat = 4
     private let cursorDragHeight: CGFloat = 20
     private let rulerHeight: CGFloat = 22
     private let waveformBottomGap: CGFloat = 4
@@ -3765,6 +4267,12 @@ private struct WaveformTimelineEditor: View {
 
                             if let selectedCue {
                                 selectedCueOverlay(cue: selectedCue, width: width)
+                                    .id(selectedCue.id)
+                                    .transition(
+                                        .scale(scale: 0.94, anchor: .center)
+                                            .combined(with: .opacity)
+                                            .animation(.spring(response: 0.28, dampingFraction: 0.88))
+                                    )
                             }
 
                             if let selectedCueBinding {
@@ -3776,6 +4284,11 @@ private struct WaveformTimelineEditor: View {
                         cueDensityCanvas(width: width)
                             .allowsHitTesting(false)
                             .transition(.opacity.combined(with: .scale(scale: 0.995, anchor: .center)))
+                        if let selectedCue {
+                            densitySelectedCueOverlay(cue: selectedCue, width: width)
+                                .allowsHitTesting(false)
+                                .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .center)))
+                        }
                     }
                 }
                 .animation(.easeInOut(duration: 0.22), value: detailedCues)
@@ -3896,15 +4409,17 @@ private struct WaveformTimelineEditor: View {
 
     private func cueBlocksCanvas(width: CGFloat, cueRange: Range<Array<SubtitleCue>.Index>) -> some View {
         Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: true) { context, _ in
+            var lowConfidenceMarker: GraphicsContext.ResolvedText?
             for cue in cues[cueRange] {
                 let selected = cue.id == selectedCueID
+                let hovered = !selected && cue.id == hoveredCueID
                 let speakerMatched = speakerMatchesActive(cue)
                 let startX = xPosition(cue.start, width: width)
                 let endX = xPosition(cue.end, width: width)
                 let cueWidth = max(2, endX - startX)
                 let rect = CGRect(x: startX, y: cueTopOffset, width: cueWidth, height: cueHeight)
                 let path = Path(roundedRect: rect, cornerRadius: 5)
-                context.fill(path, with: .color(cueFillColor(selected: selected, speakerMatched: speakerMatched)))
+                context.fill(path, with: .color(cueFillColor(selected: selected, speakerMatched: speakerMatched, hovered: hovered)))
                 context.stroke(
                     path,
                     with: .color(cueStrokeColor(selected: selected, speakerMatched: speakerMatched)),
@@ -3921,6 +4436,23 @@ private struct WaveformTimelineEditor: View {
                         Path(roundedRect: lineRect, cornerRadius: 1.5),
                         with: .color(lineColor.opacity(0.9))
                     )
+                }
+                if let confidence = cue.confidence,
+                   confidence < SubtitleConfidence.lowThreshold,
+                   cueWidth >= 12 {
+                    if lowConfidenceMarker == nil {
+                        lowConfidenceMarker = context.resolve(
+                            Text("?")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(.orange)
+                        )
+                    }
+                    if let marker = lowConfidenceMarker {
+                        context.draw(
+                            marker,
+                            at: CGPoint(x: rect.minX + 7, y: rect.minY + 8)
+                        )
+                    }
                 }
             }
         }
@@ -3954,78 +4486,25 @@ private struct WaveformTimelineEditor: View {
     }
 
     private func cueDensityCanvas(width: CGFloat) -> some View {
-        Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: true) { context, _ in
-            let binCount = max(24, min(260, Int(width / 3)))
-            var deltas = [Int](repeating: 0, count: binCount + 1)
-            var speakerDeltas = [Int](repeating: 0, count: binCount + 1)
-            var selectedBin: Int?
+        CueDensityCanvas(
+            cues: cues,
+            duration: duration,
+            width: width,
+            activeSpeakerName: activeSpeakerName,
+            layout: .expanded(top: cueTopOffset, height: cueHeight)
+        )
+        .equatable()
+    }
 
-            for cue in cues {
-                let lower = max(0, min(binCount - 1, Int((cue.start / max(duration, 0.001)) * Double(binCount))))
-                let upper = max(lower, min(binCount - 1, Int(ceil((cue.end / max(duration, 0.001)) * Double(binCount)))))
-                deltas[lower] += 1
-                if upper + 1 < deltas.count {
-                    deltas[upper + 1] -= 1
-                }
-                if speakerMatchesActive(cue) {
-                    speakerDeltas[lower] += 1
-                    if upper + 1 < speakerDeltas.count {
-                        speakerDeltas[upper + 1] -= 1
-                    }
-                }
-                if cue.id == selectedCueID {
-                    selectedBin = lower
-                }
-            }
-
-            var bins = [Int](repeating: 0, count: binCount)
-            var runningCount = 0
-            for index in 0..<binCount {
-                runningCount += deltas[index]
-                bins[index] = runningCount
-            }
-            let maxCount = max(bins.max() ?? 1, 1)
-            let binWidth = width / CGFloat(binCount)
-            for (index, count) in bins.enumerated() where count > 0 {
-                let intensity = min(1.0, Double(count) / Double(maxCount))
-                let blockHeight = cueHeight * (0.35 + 0.55 * intensity)
-                let rect = CGRect(
-                    x: CGFloat(index) * binWidth,
-                    y: cueTopOffset + (cueHeight - blockHeight) / 2,
-                    width: max(1, binWidth * 0.82),
-                    height: blockHeight
-                )
-                context.fill(
-                    Path(roundedRect: rect, cornerRadius: 2),
-                    with: .color(Color.teal.opacity(0.18 + 0.36 * intensity))
-                )
-            }
-
-            if activeSpeakerName != nil {
-                var runningSpeakerCount = 0
-                for index in 0..<binCount {
-                    runningSpeakerCount += speakerDeltas[index]
-                    guard runningSpeakerCount > 0 else { continue }
-                    let rect = CGRect(
-                        x: CGFloat(index) * binWidth,
-                        y: cueTopOffset,
-                        width: max(1, binWidth * 0.82),
-                        height: cueHeight
-                    )
-                    context.fill(Path(roundedRect: rect, cornerRadius: 2), with: .color(Color.teal.opacity(0.34)))
-                }
-            }
-
-            if let selectedBin {
-                let rect = CGRect(
-                    x: CGFloat(selectedBin) * binWidth,
-                    y: cueTopOffset,
-                    width: max(2, binWidth),
-                    height: cueHeight
-                )
-                context.stroke(Path(roundedRect: rect, cornerRadius: 3), with: .color(Color.accentColor), lineWidth: 1.4)
-            }
-        }
+    private func densitySelectedCueOverlay(cue: SubtitleCue, width: CGFloat) -> some View {
+        let binCount = max(24, min(260, Int(width / 3)))
+        let lower = max(0, min(binCount - 1, Int((cue.start / max(duration, 0.001)) * Double(binCount))))
+        let binWidth = width / CGFloat(binCount)
+        return RoundedRectangle(cornerRadius: 3)
+            .stroke(Color.accentColor, lineWidth: 1.4)
+            .frame(width: max(2, binWidth), height: cueHeight)
+            .offset(x: CGFloat(lower) * binWidth, y: cueTopOffset)
+            .animation(.easeInOut(duration: 0.16), value: cue.id)
     }
 
     private func selectedCueOverlay(cue: SubtitleCue, width: CGFloat) -> some View {
@@ -4035,6 +4514,7 @@ private struct WaveformTimelineEditor: View {
         let hitWidth = max(24, cueWidth)
         let hitOffset = max(0, startX - (hitWidth - cueWidth) / 2)
         let visualOffset = startX - hitOffset
+        let moving = moveSession?.cueID == cue.id
 
         return ZStack(alignment: .leading) {
             Color.white.opacity(0.001)
@@ -4059,18 +4539,30 @@ private struct WaveformTimelineEditor: View {
             }
             Text("\(cue.index)")
                 .font(.caption2.monospacedDigit().bold())
-                .foregroundStyle(.primary)
+                .foregroundStyle(.secondary)
                 .padding(.leading, visualOffset + 5)
                 .lineLimit(1)
         }
         .frame(width: hitWidth, height: cueHeight, alignment: .leading)
         .contentShape(Rectangle())
+        .offset(y: moving ? -2 : 0)
         .offset(x: hitOffset, y: cueTopOffset)
         .zIndex(3)
+        .shadow(
+            color: Color.black.opacity(moving ? 0.22 : 0),
+            radius: moving ? 9 : 0,
+            x: 0,
+            y: moving ? 6 : 0
+        )
+        .shadow(
+            color: Color.accentColor.opacity(moving ? 0.28 : 0),
+            radius: moving ? 7 : 0
+        )
         .help(cueTooltip(cue))
         .contextMenu {
             cueContextMenu(for: cue, language: language, actions: cueActions)
         }
+        .animation(.spring(response: 0.22, dampingFraction: 0.74), value: moving)
     }
 
     private func cueHitOverlays(width: CGFloat, cueRange: Range<Array<SubtitleCue>.Index>) -> some View {
@@ -4084,8 +4576,17 @@ private struct WaveformTimelineEditor: View {
                     .contentShape(Rectangle())
                     .offset(x: startX, y: cueTopOffset)
                     .help(cueTooltip(cue))
+                    .onHover { hovering in
+                        if hovering {
+                            hoveredCueID = cue.id
+                        } else if hoveredCueID == cue.id {
+                            hoveredCueID = nil
+                        }
+                    }
                     .onTapGesture {
-                        selectedCueID = cue.id
+                        withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
+                            selectedCueID = cue.id
+                        }
                     }
                     .contextMenu {
                         cueContextMenu(for: cue, language: language, actions: cueActions)
@@ -4101,15 +4602,30 @@ private struct WaveformTimelineEditor: View {
         let selected = cue.wrappedValue.id == selectedCueID
         let handleHitHeight = cueHeight + handleHitHeightExtra
         let handleYOffset = cueTopOffset - handleHitHeightExtra / 2
+        let cueWidth = max(2, endX - startX)
+        let moveHitWidth = max(1, cueWidth)
+        let moveHitX = startX
+        let moveHitY = cueTopOffset - moveHandleHitHeight / 2 + 4
+        let activeID = dragSession?.cueID
+        let activeEdge = dragSession?.edge
+        let startDragging = activeID == cue.wrappedValue.id && activeEdge == .start
+        let endDragging = activeID == cue.wrappedValue.id && activeEdge == .end
+        let moving = moveSession?.cueID == cue.wrappedValue.id
 
         return ZStack(alignment: .topLeading) {
-            handleHitArea(selected: selected)
+            moveHandleArea(blockWidth: cueWidth, dragging: moving)
+                .frame(width: moveHitWidth, height: moveHandleHitHeight)
+                .offset(x: moveHitX, y: moveHitY)
+                .gesture(moveCueGesture(for: cue, width: width))
+                .help(Copy.text("editor.moveCue.help", language: language))
+
+            handleHitArea(selected: selected, dragging: startDragging)
                 .frame(width: handleHitWidth, height: handleHitHeight)
                 .offset(x: startX - handleHitWidth / 2, y: handleYOffset)
                 .gesture(handleDragGesture(for: cue, edge: .start, width: width))
                 .help(Copy.text("editor.handleStart.help", language: language))
 
-            handleHitArea(selected: selected)
+            handleHitArea(selected: selected, dragging: endDragging)
                 .frame(width: handleHitWidth, height: handleHitHeight)
                 .offset(x: endX - handleHitWidth / 2, y: handleYOffset)
                 .gesture(handleDragGesture(for: cue, edge: .end, width: width))
@@ -4121,14 +4637,52 @@ private struct WaveformTimelineEditor: View {
         .zIndex(4)
     }
 
-    private func handleHitArea(selected: Bool) -> some View {
+    private func moveHandleArea(blockWidth: CGFloat, dragging: Bool) -> some View {
+        let horizontalInset = blockWidth >= 4 ? min(6, max(1, blockWidth * 0.18)) : 0
+        let availableWidth = max(0, blockWidth - horizontalInset * 2)
+        let minimumPreferredWidth = min(10, availableWidth)
+        let restingWidth = min(
+            moveHandleVisualWidth,
+            max(minimumPreferredWidth, blockWidth * 0.42),
+            availableWidth
+        )
+        let draggingWidth = min(
+            moveHandleVisualWidth + 12,
+            max(restingWidth, blockWidth * 0.52),
+            availableWidth
+        )
+        return ZStack {
+            Color.white.opacity(0.001)
+            Capsule()
+                .fill(Color.accentColor.opacity(dragging ? 1.0 : 0.82))
+                .frame(
+                    width: dragging ? draggingWidth : restingWidth,
+                    height: dragging ? moveHandleVisualHeight + 1 : moveHandleVisualHeight
+                )
+                .shadow(color: .accentColor.opacity(dragging ? 0.45 : 0), radius: dragging ? 5 : 0)
+                .shadow(color: .black.opacity(dragging ? 0.16 : 0), radius: dragging ? 4 : 0, y: dragging ? 2 : 0)
+        }
+        .contentShape(Rectangle())
+        .animation(.spring(response: 0.2, dampingFraction: 0.72), value: dragging)
+        .onHover { hovering in
+            if hovering {
+                NSCursor.resizeLeftRight.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
+    }
+
+    private func handleHitArea(selected: Bool, dragging: Bool) -> some View {
         ZStack {
             Color.white.opacity(0.001)
             Capsule()
-                .fill(Color.accentColor.opacity(selected ? 0.95 : 0.7))
-                .frame(width: handleVisualWidth, height: cueHeight)
+                .fill(Color.accentColor.opacity(dragging ? 1.0 : (selected ? 0.95 : 0.7)))
+                .frame(width: dragging ? handleVisualWidth + 2 : handleVisualWidth, height: cueHeight)
+                .shadow(color: .accentColor.opacity(dragging ? 0.55 : 0), radius: dragging ? 4 : 0)
         }
         .contentShape(Rectangle())
+        .animation(.easeOut(duration: 0.12), value: dragging)
         .onHover { hovering in
             if hovering {
                 NSCursor.resizeLeftRight.push()
@@ -4141,29 +4695,42 @@ private struct WaveformTimelineEditor: View {
     private func handleDragGesture(for cue: Binding<SubtitleCue>, edge: Edge, width: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .local)
             .onChanged { value in
-                isHandleDragging = true
-                if dragSession?.cueID != cue.wrappedValue.id || dragSession?.edge != edge {
-                    onCueTimingEditBegan()
-                    selectedCueID = cue.wrappedValue.id
-                    dragSession = HandleDragSession(
-                        cueID: cue.wrappedValue.id,
-                        edge: edge,
-                        initialStart: cue.wrappedValue.start,
-                        initialEnd: cue.wrappedValue.end
-                    )
-                }
-                guard let session = dragSession else { return }
-                let delta = Double(value.translation.width / max(width, 1)) * duration
-                switch edge {
-                case .start:
-                    var target = session.initialStart + delta
-                    target = snappedTime(target, excluding: cue.wrappedValue.id, width: width)
-                    cue.wrappedValue.start = max(0, min(target, cue.wrappedValue.end - 0.05))
-                case .end:
-                    var target = session.initialEnd + delta
-                    target = snappedTime(target, excluding: cue.wrappedValue.id, width: width)
-                    let upper = duration > 0 ? duration : target
-                    cue.wrappedValue.end = max(cue.wrappedValue.start + 0.05, min(upper, target))
+                var noAnimation = Transaction()
+                noAnimation.animation = nil
+                noAnimation.disablesAnimations = true
+                withTransaction(noAnimation) {
+                    isHandleDragging = true
+                    if dragSession?.cueID != cue.wrappedValue.id || dragSession?.edge != edge {
+                        onCueTimingEditBegan()
+                        selectedCueID = cue.wrappedValue.id
+                        dragSession = HandleDragSession(
+                            cueID: cue.wrappedValue.id,
+                            edge: edge,
+                            initialStart: cue.wrappedValue.start,
+                            initialEnd: cue.wrappedValue.end
+                        )
+                    }
+                    guard let session = dragSession else { return }
+                    let delta = Double(value.translation.width / max(width, 1)) * duration
+                    let rawTarget: Double
+                    switch edge {
+                    case .start:
+                        rawTarget = session.initialStart + delta
+                    case .end:
+                        rawTarget = session.initialEnd + delta
+                    }
+                    let snapResult = snappedTime(rawTarget, excluding: cue.wrappedValue.id, width: width)
+                    if snapResult.didSnap && !session.isSnapped {
+                        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+                    }
+                    dragSession?.isSnapped = snapResult.didSnap
+                    switch edge {
+                    case .start:
+                        cue.wrappedValue.start = max(0, min(snapResult.time, cue.wrappedValue.end - 0.05))
+                    case .end:
+                        let upper = duration > 0 ? duration : snapResult.time
+                        cue.wrappedValue.end = max(cue.wrappedValue.start + 0.05, min(upper, snapResult.time))
+                    }
                 }
             }
             .onEnded { _ in
@@ -4174,10 +4741,59 @@ private struct WaveformTimelineEditor: View {
             }
     }
 
-    /// Returns `target` snapped to the nearest other cue edge within ~5px on screen.
-    /// Threshold scales with zoom (since seconds-per-pixel changes), so the "stickiness"
-    /// always feels the same visually.
-    private func snappedTime(_ target: Double, excluding cueID: SubtitleCue.ID, width: CGFloat) -> Double {
+    private func moveCueGesture(for cue: Binding<SubtitleCue>, width: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .local)
+            .onChanged { value in
+                if moveSession?.cueID != cue.wrappedValue.id {
+                    onCueTimingEditBegan()
+                    selectedCueID = cue.wrappedValue.id
+                    withAnimation(.spring(response: 0.22, dampingFraction: 0.74)) {
+                        moveSession = CueMoveSession(
+                            cueID: cue.wrappedValue.id,
+                            initialStart: cue.wrappedValue.start,
+                            initialEnd: cue.wrappedValue.end
+                        )
+                    }
+                }
+
+                var noAnimation = Transaction()
+                noAnimation.animation = nil
+                noAnimation.disablesAnimations = true
+                withTransaction(noAnimation) {
+                    isHandleDragging = true
+                    guard let session = moveSession else { return }
+                    let cueDuration = max(0.05, session.initialEnd - session.initialStart)
+                    let delta = Double(value.translation.width / max(width, 1)) * duration
+                    let upperStart = max(0, duration - cueDuration)
+                    let rawStart = clamp(session.initialStart + delta, 0, upperStart)
+                    let snapResult = snappedCueMove(
+                        start: rawStart,
+                        end: rawStart + cueDuration,
+                        excluding: cue.wrappedValue.id,
+                        width: width
+                    )
+                    if snapResult.didSnap && !session.isSnapped {
+                        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+                    }
+                    moveSession?.isSnapped = snapResult.didSnap
+                    cue.wrappedValue.start = snapResult.start
+                    cue.wrappedValue.end = snapResult.end
+                }
+            }
+            .onEnded { _ in
+                withAnimation(.spring(response: 0.22, dampingFraction: 0.78)) {
+                    moveSession = nil
+                }
+                isHandleDragging = false
+                cues = SubtitleDocument.normalize(cues)
+                onCueTimingEditEnded()
+            }
+    }
+
+    /// Returns `target` snapped to the nearest other cue edge within ~5px on screen,
+    /// plus a flag indicating whether the snap engaged. Caller is responsible for firing
+    /// haptic only on the snap-engagement transition.
+    private func snappedTime(_ target: Double, excluding cueID: SubtitleCue.ID, width: CGFloat) -> (time: Double, didSnap: Bool) {
         let snapPixels: CGFloat = 5
         let secondsPerPixel = duration / Double(max(width, 1))
         let threshold = secondsPerPixel * Double(snapPixels)
@@ -4193,9 +4809,48 @@ private struct WaveformTimelineEditor: View {
             }
         }
         if let bestEdge, bestDistance <= threshold {
-            return bestEdge
+            return (bestEdge, true)
         }
-        return target
+        return (target, false)
+    }
+
+    private func snappedCueMove(
+        start: Double,
+        end: Double,
+        excluding cueID: SubtitleCue.ID,
+        width: CGFloat
+    ) -> (start: Double, end: Double, didSnap: Bool) {
+        let cueDuration = max(0.05, end - start)
+        let upperStart = max(0, duration - cueDuration)
+        let clampedStart = clamp(start, 0, upperStart)
+        let clampedEnd = clampedStart + cueDuration
+        let snapPixels: CGFloat = 5
+        let secondsPerPixel = duration / Double(max(width, 1))
+        let threshold = secondsPerPixel * Double(snapPixels)
+        var bestStart: Double?
+        var bestDistance = Double.infinity
+
+        for other in cues where other.id != cueID {
+            for edge in [other.start, other.end] {
+                let startDistance = abs(edge - clampedStart)
+                if startDistance < bestDistance {
+                    bestDistance = startDistance
+                    bestStart = edge
+                }
+
+                let endDistance = abs(edge - clampedEnd)
+                if endDistance < bestDistance {
+                    bestDistance = endDistance
+                    bestStart = edge - cueDuration
+                }
+            }
+        }
+
+        if let bestStart, bestDistance <= threshold {
+            let snappedStart = clamp(bestStart, 0, upperStart)
+            return (snappedStart, snappedStart + cueDuration, true)
+        }
+        return (clampedStart, clampedEnd, false)
     }
 
     private func playbackCursor(width: CGFloat, height: CGFloat) -> some View {
@@ -4247,7 +4902,9 @@ private struct WaveformTimelineEditor: View {
             return
         }
         if let cue = cue(at: seconds) {
-            selectedCueID = cue.id
+            withAnimation(.spring(response: 0.26, dampingFraction: 0.72)) {
+                selectedCueID = cue.id
+            }
         } else {
             onSeek(seconds)
         }
@@ -4267,11 +4924,13 @@ private struct WaveformTimelineEditor: View {
         CGFloat(max(0, min(seconds / max(duration, 0.001), 1))) * width
     }
 
-    private func cueFillColor(selected: Bool, speakerMatched: Bool) -> Color {
+    private func cueFillColor(selected: Bool, speakerMatched: Bool, hovered: Bool = false) -> Color {
         if selected {
             return Color.accentColor.opacity(speakerMatched ? 0.36 : 0.28)
         }
-        return Color.teal.opacity(speakerMatched ? 0.34 : 0.22)
+        let base = speakerMatched ? 0.34 : 0.22
+        let hoverBoost = hovered ? 0.16 : 0.0
+        return Color.teal.opacity(base + hoverBoost)
     }
 
     private func cueStrokeColor(selected: Bool, speakerMatched: Bool) -> Color {
@@ -4707,6 +5366,169 @@ struct TimingAdjustmentSheet: View {
     }
 }
 
+private struct CueStatusBadges: View {
+    struct EditedFields: Equatable {
+        var text: Bool = false
+        var time: Bool = false
+        var speaker: Bool = false
+    }
+
+    let cue: SubtitleCue
+    let canReset: Bool
+    let language: AppLanguage
+    var showsSpeaker: Bool = true
+    var onReset: (() -> Void)? = nil
+    var editedFields: EditedFields = .init()
+    var speakerColor: Color? = nil
+    var onCycleSpeaker: (() -> Void)? = nil
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if canReset {
+                if let onReset {
+                    EditedResetBadge(language: language, fields: editedFields, onReset: onReset)
+                } else {
+                    iconBadge(
+                        systemImage: "pencil",
+                        title: Copy.text("cue.edited", language: language),
+                        tint: .accentColor
+                    )
+                }
+            }
+            if isEmptyText {
+                iconBadge(
+                    systemImage: "text.badge.xmark",
+                    title: Copy.text("cue.empty", language: language),
+                    tint: .red
+                )
+            }
+            if showsSpeaker, let speaker {
+                speakerBadge(speaker)
+            }
+            if isLowConfidence {
+                iconBadge(
+                    systemImage: "questionmark.circle.fill",
+                    title: Copy.text("cue.lowConfidence", language: language),
+                    tint: .orange
+                )
+            }
+        }
+        .animation(.easeInOut(duration: 0.12), value: canReset)
+        .animation(.easeInOut(duration: 0.12), value: cue.text)
+        .animation(.easeInOut(duration: 0.12), value: cue.confidence)
+        .animation(.easeInOut(duration: 0.12), value: cue.speaker)
+    }
+
+    private var isEmptyText: Bool {
+        cue.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var isLowConfidence: Bool {
+        guard let confidence = cue.confidence else { return false }
+        return confidence < SubtitleConfidence.lowThreshold
+    }
+
+    private var speaker: String? {
+        SubtitleDocument.normalizedSpeakerName(cue.speaker)
+    }
+
+    private func iconBadge(systemImage: String, title: String, tint: Color) -> some View {
+        Image(systemName: systemImage)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(tint)
+            .frame(width: 18, height: 18)
+            .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 4))
+            .help(title)
+            .accessibilityLabel(title)
+            .transition(.scale.combined(with: .opacity))
+    }
+
+    private func speakerBadge(_ speaker: String) -> some View {
+        let title = String(format: Copy.text("cue.speakerAssigned", language: language), speaker)
+        let helpText = onCycleSpeaker != nil
+            ? "\(title) — \(Copy.text("cue.speaker.cycleHint", language: language))"
+            : title
+        let background: AnyShapeStyle = speakerColor.map { AnyShapeStyle($0.opacity(0.18)) } ?? AnyShapeStyle(.quaternary)
+        let content = Label(speaker, systemImage: "person.crop.circle.fill")
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .frame(maxWidth: 74, alignment: .leading)
+            .padding(.horizontal, 5)
+            .frame(height: 18)
+            .background(background, in: RoundedRectangle(cornerRadius: 4))
+
+        return Group {
+            if let onCycleSpeaker {
+                Button(action: onCycleSpeaker) { content }
+                    .buttonStyle(.plain)
+            } else {
+                content
+            }
+        }
+        .help(helpText)
+        .accessibilityLabel(helpText)
+        .transition(.scale.combined(with: .opacity))
+    }
+}
+
+private struct EditedResetBadge: View {
+    let language: AppLanguage
+    let fields: CueStatusBadges.EditedFields
+    let onReset: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "pencil")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(Color.accentColor)
+            if isHovered {
+                if fields.text {
+                    fieldChip(Copy.text("editor.edited.text", language: language))
+                }
+                if fields.time {
+                    fieldChip(Copy.text("editor.edited.time", language: language))
+                }
+                if fields.speaker {
+                    fieldChip(Copy.text("editor.edited.speaker", language: language))
+                }
+                Divider()
+                    .frame(height: 10)
+                Button(action: onReset) {
+                    Image(systemName: "arrow.counterclockwise")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
+                .buttonStyle(.plain)
+                .help(Copy.text("editor.resetCue.help", language: language))
+                .accessibilityLabel(Copy.text("editor.resetCue", language: language))
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+        }
+        .padding(.horizontal, 5)
+        .frame(height: 18)
+        .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 4))
+        .help(Copy.text("cue.edited", language: language))
+        .accessibilityLabel(Copy.text("cue.edited", language: language))
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.18)) {
+                isHovered = hovering
+            }
+        }
+    }
+
+    private func fieldChip(_ title: String) -> some View {
+        Text(title)
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(Color.accentColor)
+            .lineLimit(1)
+            .fixedSize()
+            .transition(.opacity.combined(with: .move(edge: .trailing)))
+    }
+}
+
 private struct SubtitleCueBlockRow: View {
     @Binding var cue: SubtitleCue
     let isSelected: Bool
@@ -4719,6 +5541,8 @@ private struct SubtitleCueBlockRow: View {
     let closeGap: () -> Void
     let delete: () -> Void
     let language: AppLanguage
+    var speakerColor: Color? = nil
+    var cycleSpeaker: (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -4730,6 +5554,13 @@ private struct SubtitleCueBlockRow: View {
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
                 Spacer()
+                CueStatusBadges(
+                    cue: cue,
+                    canReset: canReset,
+                    language: language,
+                    speakerColor: speakerColor,
+                    onCycleSpeaker: cycleSpeaker
+                )
                 Text(durationText)
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.tertiary)
@@ -4813,6 +5644,11 @@ private struct SubtitleCueBlockRow: View {
     private var rowBackground: Color {
         isSelected ? Color.accentColor.opacity(0.14) : Color(nsColor: .controlBackgroundColor)
     }
+
+}
+
+enum SubtitleConfidence {
+    static let lowThreshold: Double = 0.6
 }
 
 private struct SelectableTextEditor: NSViewRepresentable {

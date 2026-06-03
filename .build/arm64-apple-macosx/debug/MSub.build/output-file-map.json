@@ -65,6 +65,13 @@
     "swift-dependencies": "/Users/august/Project/Huz/apps/MSub/.build/arm64-apple-macosx/debug/MSub.build/Localization.swiftdeps",
     "diagnostics": "/Users/august/Project/Huz/apps/MSub/.build/arm64-apple-macosx/debug/MSub.build/Localization.dia"
   },
+  "/Users/august/Project/Huz/apps/MSub/Sources/MSub/LocalizationCatalogReferences.swift": {
+    "dependencies": "/Users/august/Project/Huz/apps/MSub/.build/arm64-apple-macosx/debug/MSub.build/LocalizationCatalogReferences.d",
+    "object": "/Users/august/Project/Huz/apps/MSub/.build/arm64-apple-macosx/debug/MSub.build/LocalizationCatalogReferences.swift.o",
+    "swiftmodule": "/Users/august/Project/Huz/apps/MSub/.build/arm64-apple-macosx/debug/MSub.build/LocalizationCatalogReferences~partial.swiftmodule",
+    "swift-dependencies": "/Users/august/Project/Huz/apps/MSub/.build/arm64-apple-macosx/debug/MSub.build/LocalizationCatalogReferences.swiftdeps",
+    "diagnostics": "/Users/august/Project/Huz/apps/MSub/.build/arm64-apple-macosx/debug/MSub.build/LocalizationCatalogReferences.dia"
+  },
   "/Users/august/Project/Huz/apps/MSub/Sources/MSub/Models.swift": {
     "dependencies": "/Users/august/Project/Huz/apps/MSub/.build/arm64-apple-macosx/debug/MSub.build/Models.d",
     "object": "/Users/august/Project/Huz/apps/MSub/.build/arm64-apple-macosx/debug/MSub.build/Models.swift.o",

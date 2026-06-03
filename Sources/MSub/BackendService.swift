@@ -1429,8 +1429,8 @@ final class BackendService {
     }
 
     private func currentAppLanguage() -> AppLanguage {
-        let raw = UserDefaults.standard.string(forKey: "huz.uiLanguage") ?? AppLanguage.zh.rawValue
-        return AppLanguage(rawValue: raw) ?? .zh
+        let raw = UserDefaults.standard.string(forKey: "huz.uiLanguage") ?? AppLanguage.systemDefault.rawValue
+        return AppLanguage(rawValue: raw) ?? .systemDefault
     }
 
     private func sourceModelPathFromManifest(in workspace: URL) -> URL? {

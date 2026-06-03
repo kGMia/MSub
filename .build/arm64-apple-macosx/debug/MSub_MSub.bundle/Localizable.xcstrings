@@ -1,7 +1,16 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "" : {
+
+    },
+    "?" : {
+
+    },
     "#%@" : {
+
+    },
+    "#%lld" : {
 
     },
     "%.2fs" : {
@@ -20,11 +29,33 @@
         }
       }
     },
-    "%@%%" : {
+    "%@ %lld" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ %2$lld"
+          }
+        }
+      }
+    },
+    "%@ %lld (%@)" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ %2$lld (%3$@)"
+          }
+        }
+      }
+    },
+    "%@F" : {
+
+    },
+    "%lld" : {
 
     },
     "action.copy" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -41,7 +72,6 @@
       }
     },
     "action.preview" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -58,7 +88,6 @@
       }
     },
     "action.save" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -75,7 +104,6 @@
       }
     },
     "action.transcribe" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -92,7 +120,6 @@
       }
     },
     "app.title" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -109,7 +136,6 @@
       }
     },
     "backend.check" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -126,7 +152,6 @@
       }
     },
     "backend.connected" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -143,7 +168,6 @@
       }
     },
     "backend.disconnected" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -160,7 +184,6 @@
       }
     },
     "backend.running" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -177,7 +200,6 @@
       }
     },
     "backend.start" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -194,7 +216,6 @@
       }
     },
     "backend.stop" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -211,7 +232,6 @@
       }
     },
     "backend.stopped" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -228,7 +248,6 @@
       }
     },
     "button.ok" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -245,7 +264,6 @@
       }
     },
     "error.title" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -262,7 +280,6 @@
       }
     },
     "help.beam" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -279,7 +296,6 @@
       }
     },
     "help.confidence" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -296,7 +312,6 @@
       }
     },
     "help.fixedChunk" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -313,7 +328,6 @@
       }
     },
     "help.format" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -330,7 +344,6 @@
       }
     },
     "help.lineChars" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -347,7 +360,6 @@
       }
     },
     "help.maxSegment" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -364,7 +376,6 @@
       }
     },
     "help.minSegment" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -381,7 +392,6 @@
       }
     },
     "help.minSpeech" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -398,7 +408,6 @@
       }
     },
     "help.mode" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -415,7 +424,6 @@
       }
     },
     "help.model" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -432,7 +440,6 @@
       }
     },
     "help.padding" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -449,7 +456,6 @@
       }
     },
     "help.preset" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -466,7 +472,6 @@
       }
     },
     "help.search" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -483,7 +488,6 @@
       }
     },
     "help.silence" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -500,7 +504,6 @@
       }
     },
     "help.threshold" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -517,7 +520,6 @@
       }
     },
     "input.choose" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -534,7 +536,6 @@
       }
     },
     "input.drop" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -551,7 +552,6 @@
       }
     },
     "input.none" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -568,7 +568,6 @@
       }
     },
     "input.section" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -584,8 +583,57 @@
         }
       }
     },
+    "Media File" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "媒体文件"
+          }
+        }
+      }
+    },
+    "MSub" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MSub"
+          }
+        }
+      }
+    },
+    "Open Media" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "打开媒体"
+          }
+        }
+      }
+    },
+    "Open Media in MSub" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在 MSub 中打开媒体"
+          }
+        }
+      }
+    },
+    "Opens a video or audio file in MSub for subtitle transcription." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在 MSub 中打开视频或音频文件以生成字幕。"
+          }
+        }
+      }
+    },
     "output.placeholder" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -602,7 +650,6 @@
       }
     },
     "output.title" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -619,7 +666,6 @@
       }
     },
     "prefs.appearance" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -636,7 +682,6 @@
       }
     },
     "prefs.defaultFormat" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -653,7 +698,6 @@
       }
     },
     "prefs.defaultMode" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -670,7 +714,6 @@
       }
     },
     "prefs.general" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -687,7 +730,6 @@
       }
     },
     "prefs.model" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -704,7 +746,6 @@
       }
     },
     "prefs.modelPath" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -721,7 +762,6 @@
       }
     },
     "prefs.modelPath.choose" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -738,7 +778,6 @@
       }
     },
     "prefs.title" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -755,7 +794,6 @@
       }
     },
     "prefs.uiLanguage" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -772,7 +810,6 @@
       }
     },
     "preset.apply" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -789,7 +826,6 @@
       }
     },
     "preset.balanced" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -806,7 +842,6 @@
       }
     },
     "preset.balanced.help" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -823,7 +858,6 @@
       }
     },
     "preset.dialogue" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -840,7 +874,6 @@
       }
     },
     "preset.dialogue.help" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -857,7 +890,6 @@
       }
     },
     "preset.fastCut" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -874,7 +906,6 @@
       }
     },
     "preset.fastCut.help" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -891,7 +922,6 @@
       }
     },
     "preset.lowVoice" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -908,7 +938,6 @@
       }
     },
     "preset.lowVoice.help" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -925,7 +954,6 @@
       }
     },
     "preset.noisy" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -942,7 +970,6 @@
       }
     },
     "preset.noisy.help" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -959,7 +986,6 @@
       }
     },
     "preset.reset" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -976,7 +1002,6 @@
       }
     },
     "preset.sensitive" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -993,7 +1018,6 @@
       }
     },
     "preset.sensitive.help" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1010,7 +1034,6 @@
       }
     },
     "preview.show" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1027,7 +1050,6 @@
       }
     },
     "preview.title" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1044,7 +1066,6 @@
       }
     },
     "preview.unsupported" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1064,7 +1085,6 @@
 
     },
     "segments.avg" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1081,7 +1101,6 @@
       }
     },
     "segments.count" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1098,7 +1117,6 @@
       }
     },
     "segments.empty" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1115,7 +1133,6 @@
       }
     },
     "segments.max" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1132,7 +1149,6 @@
       }
     },
     "segments.noPreview" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1149,7 +1165,6 @@
       }
     },
     "segments.speech" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1166,7 +1181,6 @@
       }
     },
     "segments.title" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1183,7 +1197,6 @@
       }
     },
     "settings.advanced" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1200,7 +1213,6 @@
       }
     },
     "settings.beam" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1217,7 +1229,6 @@
       }
     },
     "settings.confidence" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1234,7 +1245,6 @@
       }
     },
     "settings.fixedChunk" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1251,7 +1261,6 @@
       }
     },
     "settings.format" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1268,7 +1277,6 @@
       }
     },
     "settings.language" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1285,7 +1293,6 @@
       }
     },
     "settings.lineChars" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1302,7 +1309,6 @@
       }
     },
     "settings.maxSegment" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1319,7 +1325,6 @@
       }
     },
     "settings.minSegment" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1336,7 +1341,6 @@
       }
     },
     "settings.minSpeech" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1353,7 +1357,6 @@
       }
     },
     "settings.mode" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1370,7 +1373,6 @@
       }
     },
     "settings.model" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1387,7 +1389,6 @@
       }
     },
     "settings.output" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1404,7 +1405,6 @@
       }
     },
     "settings.padding" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1421,7 +1421,6 @@
       }
     },
     "settings.preset" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1438,7 +1437,6 @@
       }
     },
     "settings.recognition" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1455,7 +1453,6 @@
       }
     },
     "settings.search" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1472,7 +1469,6 @@
       }
     },
     "settings.segmentation" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1489,7 +1485,6 @@
       }
     },
     "settings.silence" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1506,7 +1501,6 @@
       }
     },
     "settings.threshold" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1522,8 +1516,27 @@
         }
       }
     },
+    "Start Transcription" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "开始转写"
+          }
+        }
+      }
+    },
+    "Starts transcription of the files currently loaded in MSub." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "开始转写 MSub 当前加载的文件。"
+          }
+        }
+      }
+    },
     "status.connected" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1540,7 +1553,6 @@
       }
     },
     "status.copied" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1557,7 +1569,6 @@
       }
     },
     "status.detecting" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1574,7 +1585,6 @@
       }
     },
     "status.done" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1591,7 +1601,6 @@
       }
     },
     "status.failed" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1608,7 +1617,6 @@
       }
     },
     "status.loading" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1625,7 +1633,6 @@
       }
     },
     "status.previewFailed" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1642,7 +1649,6 @@
       }
     },
     "status.previewReady" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1659,7 +1665,6 @@
       }
     },
     "status.ready" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1676,7 +1681,6 @@
       }
     },
     "status.saved" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1693,7 +1697,6 @@
       }
     },
     "status.saving" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1710,7 +1713,6 @@
       }
     },
     "status.starting" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1727,7 +1729,6 @@
       }
     },
     "status.transcribing" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1743,8 +1744,27 @@
         }
       }
     },
+    "Stop Transcription" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "停止转写"
+          }
+        }
+      }
+    },
+    "Stops the transcription that's currently running in MSub." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "停止 MSub 当前正在运行的转写。"
+          }
+        }
+      }
+    },
     "tab.output" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1761,7 +1781,6 @@
       }
     },
     "tab.segments" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {

@@ -8,6 +8,29 @@ enum AppLanguage: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    static var systemDefault: AppLanguage {
+        for identifier in Locale.preferredLanguages {
+            let normalized = identifier.lowercased()
+            if normalized.hasPrefix("zh-hant")
+                || normalized.contains("-hant")
+                || normalized.hasPrefix("zh-tw")
+                || normalized.hasPrefix("zh-hk")
+                || normalized.hasPrefix("zh-mo") {
+                return .zhHant
+            }
+            if normalized.hasPrefix("zh") {
+                return .zh
+            }
+            if normalized.hasPrefix("ja") {
+                return .ja
+            }
+            if normalized.hasPrefix("en") {
+                return .en
+            }
+        }
+        return .en
+    }
+
     var title: String {
         switch self {
         case .zh: "中文"
@@ -192,6 +215,11 @@ enum Copy {
         "editor.deleteCue": [.zhHant: "刪除字幕塊", .ja: "字幕キューを削除"],
         "editor.resetCue": [.zhHant: "重置目前字幕塊", .ja: "現在のキューをリセット"],
         "editor.resetCue.help": [.zhHant: "將目前字幕塊的文字、開始時間和結束時間恢復到匯入或生成時的內容。", .ja: "選択中のキューのテキスト、開始時刻、終了時刻を読み込み時または生成時の内容に戻します。"],
+        "editor.reset": [.zhHant: "重置", .ja: "リセット"],
+        "editor.edited.text": [.zhHant: "文字", .ja: "テキスト"],
+        "editor.edited.time": [.zhHant: "時間", .ja: "時間"],
+        "editor.edited.speaker": [.zhHant: "發言人", .ja: "発言者"],
+        "cue.speaker.cycleHint": [.zhHant: "點擊切換發言人", .ja: "クリックで発言者を切り替え"],
         "editor.recognizeCue": [.zhHant: "識別此字幕塊", .ja: "このキューを認識"],
         "editor.reRecognizeCue": [.zhHant: "重新識別此字幕塊", .ja: "このキューを再認識"],
         "editor.transcribingCue": [.zhHant: "正在識別…", .ja: "認識中…"],
@@ -318,6 +346,10 @@ enum Copy {
         "help.appleSpeech": [.zhHant: "Apple 設備端語音模型在本機運行，首次使用時會依語言下載對應資源。", .ja: "Apple のオンデバイス音声モデルはローカルで実行され、初回利用時に言語データを自動ダウンロードします。"],
         "translation.title": [.zhHant: "翻譯字幕", .ja: "字幕を翻訳"],
         "translation.translate": [.zhHant: "翻譯", .ja: "翻訳"],
+        "translation.translateAndReplace": [.zhHant: "翻譯並取代", .ja: "翻訳して置き換え"],
+        "translation.translateAndCoexist": [.zhHant: "翻譯並共存", .ja: "翻訳して併記"],
+        "translation.translateAndReplace.help": [.zhHant: "用翻譯後的文字取代原字幕", .ja: "翻訳後のテキストで字幕を置き換え"],
+        "translation.translateAndCoexist.help": [.zhHant: "在原字幕下方追加翻譯", .ja: "元の字幕の下に翻訳を追記"],
         "translation.translateAllHelp": [.zhHant: "翻譯全部字幕", .ja: "字幕全体を翻訳"],
         "translation.targetLanguage": [.zhHant: "目標語言", .ja: "ターゲット言語"],
         "translation.scope.whole": [.zhHant: "翻譯目前檔案的全部字幕。", .ja: "現在のファイルの字幕全体を翻訳します。"],
@@ -435,6 +467,10 @@ enum Copy {
         "menu.toggleTimeline": [.zhHant: "顯示/隱藏時間軸", .ja: "タイムラインを表示/非表示"],
         "menu.zoomTimelineIn": [.zhHant: "放大時間軸", .ja: "タイムラインを拡大"],
         "menu.zoomTimelineOut": [.zhHant: "縮小時間軸", .ja: "タイムラインを縮小"],
+        "menu.findInSubtitles": [.zhHant: "在字幕中尋找…", .ja: "字幕内を検索…"],
+        "menu.showSegmentsTab": [.zhHant: "顯示分段", .ja: "分割を表示"],
+        "menu.showOutputTab": [.zhHant: "顯示輸出", .ja: "出力を表示"],
+        "menu.showCueListTab": [.zhHant: "顯示字幕列表", .ja: "字幕リストを表示"],
         "help.homepage": [.zhHant: "專案首頁", .ja: "プロジェクトホーム"],
         "help.reportIssue": [.zhHant: "回報問題…", .ja: "問題を報告…"],
         "about.homepage": [.zhHant: "首頁", .ja: "ホーム"],
@@ -574,6 +610,8 @@ enum Copy {
         "action.saveAll": [.zh: "保存全部", .en: "Save All"],
         "action.chooseModelFolder": [.zh: "选择模型文件夹", .en: "Choose model folder"],
         "action.useRemoteModel": [.zh: "使用远端/缓存模型", .en: "Use remote/cached model"],
+        "model.useDefault": [.zh: "恢复此引擎的默认模型", .en: "Restore this engine's default model"],
+        "model.chooseASR.message": [.zh: "请选择当前 ASR 引擎使用的模型文件夹。", .en: "Choose the model folder used by the current ASR engine."],
         "model.chooseEmotion.message": [.zh: "请选择 emotion2vec_plus_base 模型文件夹，或选择包含该文件夹的上级目录。选择后后端会重启以继承沙盒授权。", .en: "Choose the emotion2vec_plus_base model folder, or its parent folder. The backend will restart so the sandbox grant is inherited."],
         "model.chooseSpeaker.message": [.zh: "请选择 speech_eres2netv2_sv_zh-cn_16k-common 模型文件夹，或选择包含该文件夹的上级目录。选择后后端会重启以继承沙盒授权。", .en: "Choose the speech_eres2netv2_sv_zh-cn_16k-common model folder, or its parent folder. The backend will restart so the sandbox grant is inherited."],
         "action.importSubtitle": [.zh: "导入字幕", .en: "Import Subtitle"],
@@ -604,6 +642,11 @@ enum Copy {
         "segments.keepRange.help": [.zh: "在时间轴拖动选择预览和识别要保留的范围。", .en: "Drag on the timeline to choose the range to keep for preview and transcription."],
         "segments.clearClip": [.zh: "清除保留范围", .en: "Clear keep range"],
         "segments.clipVideo": [.zh: "剪切视频", .en: "Clip Video"],
+        "segments.tapToPlay": [.zh: "点击播放此段", .en: "Tap to play this segment"],
+        "cue.lowConfidence": [.zh: "识别置信度较低，建议复查", .en: "Low recognition confidence — please review"],
+        "cue.edited": [.zh: "此字幕块已被手动修改", .en: "This cue has manual edits"],
+        "cue.empty": [.zh: "此字幕块没有文本", .en: "This cue has no text"],
+        "cue.speakerAssigned": [.zh: "发言人：%@", .en: "Speaker: %@"],
         "segments.clipVideo.help": [.zh: "使用 ffmpeg 将当前媒体剪切为只保留时间轴中选中的范围，并保存到源目录。", .en: "Use ffmpeg to create a media file that keeps only the selected timeline range, saved beside the source."],
         "output.title": [.zh: "字幕结果", .en: "Subtitle Output"],
         "output.placeholder": [.zh: "识别完成后，字幕预览会显示在这里。", .en: "Subtitle preview will appear here after transcription."],
@@ -614,6 +657,7 @@ enum Copy {
         "editor.timelineOverviewHelp": [.zh: "当前缩放较低，时间轴显示为密度概览；放大后可显示并拖动具体字幕块。", .en: "Low zoom shows a density overview; zoom in to show and drag individual cue blocks."],
         "editor.handleStart.help": [.zh: "拖动调整该字幕块的开始时间", .en: "Drag to adjust the cue's start time"],
         "editor.handleEnd.help": [.zh: "拖动调整该字幕块的结束时间", .en: "Drag to adjust the cue's end time"],
+        "editor.moveCue.help": [.zh: "拖动平移整个字幕块", .en: "Drag to move the whole cue"],
         "editor.play": [.zh: "播放", .en: "Play"],
         "editor.pause": [.zh: "暂停", .en: "Pause"],
         "editor.playCurrent": [.zh: "仅播放当前段落", .en: "Play Current Cue"],
@@ -658,6 +702,11 @@ enum Copy {
         "editor.addAfter.help": [.zh: "在当前字幕块后插入一个空字幕块，并选中新建块。", .en: "Insert an empty cue after the selected cue and select it."],
         "editor.resetCue": [.zh: "重置当前字幕块", .en: "Reset Current Cue"],
         "editor.resetCue.help": [.zh: "将当前字幕块的文字、开始时间和结束时间恢复到导入或生成时的内容。", .en: "Restore the selected cue's text, start time, and end time to the imported or generated version."],
+        "editor.reset": [.zh: "重置", .en: "Reset"],
+        "editor.edited.text": [.zh: "文字", .en: "Text"],
+        "editor.edited.time": [.zh: "时间", .en: "Time"],
+        "editor.edited.speaker": [.zh: "发言人", .en: "Speaker"],
+        "cue.speaker.cycleHint": [.zh: "点击切换发言人", .en: "Click to cycle speaker"],
         "editor.recognizeCue": [.zh: "识别此字幕块", .en: "Transcribe Cue"],
         "editor.reRecognizeCue": [.zh: "重新识别此字幕块", .en: "Re-transcribe Cue"],
         "editor.transcribingCue": [.zh: "正在识别…", .en: "Transcribing…"],
@@ -755,6 +804,11 @@ enum Copy {
         "model.status": [.zh: "%@ · %@ · 支持：%@", .en: "%@ · %@ · Supports: %@"],
         "model.localAvailable": [.zh: "本地可用", .en: "local available"],
         "model.localMissing": [.zh: "本地未找到", .en: "local missing"],
+        "model.selectedPath": [.zh: "当前", .en: "Selected"],
+        "model.localPath": [.zh: "本地", .en: "Local"],
+        "model.supportedControls": [.zh: "支持：", .en: "Supports:"],
+        "model.default": [.zh: "默认", .en: "Default"],
+        "model.notRequired": [.zh: "无需模型路径", .en: "No model path needed"],
         "model.support.beam_size": [.zh: "Beam", .en: "beam"],
         "model.support.softmax_smoothing": [.zh: "softmax 平滑", .en: "softmax smoothing"],
         "model.support.length_penalty": [.zh: "长度惩罚", .en: "length penalty"],
@@ -883,6 +937,10 @@ enum Copy {
         "help.appleSpeech": [.zh: "Apple 设备端语音模型在本机运行，首次使用某语言会按需下载对应模型。", .en: "Runs entirely on device. Required language models are downloaded on first use."],
         "translation.title": [.zh: "翻译字幕", .en: "Translate Subtitle"],
         "translation.translate": [.zh: "翻译", .en: "Translate"],
+        "translation.translateAndReplace": [.zh: "翻译并取代", .en: "Translate & Replace"],
+        "translation.translateAndCoexist": [.zh: "翻译并共存", .en: "Translate & Coexist"],
+        "translation.translateAndReplace.help": [.zh: "用翻译后的文字取代原字幕", .en: "Replace the original subtitle with the translation"],
+        "translation.translateAndCoexist.help": [.zh: "在原字幕下方追加翻译", .en: "Keep the original and append the translation below"],
         "translation.translateAllHelp": [.zh: "翻译全部字幕", .en: "Translate all cues"],
         "translation.targetLanguage": [.zh: "目标语言", .en: "Target language"],
         "translation.scope.whole": [.zh: "翻译当前文件的全部字幕。", .en: "Translates every cue in the current file."],
@@ -1011,6 +1069,10 @@ enum Copy {
         "menu.toggleTimeline": [.zh: "显示/隐藏时间轴", .en: "Show/Hide Timeline"],
         "menu.zoomTimelineIn": [.zh: "放大时间轴", .en: "Zoom In Timeline"],
         "menu.zoomTimelineOut": [.zh: "缩小时间轴", .en: "Zoom Out Timeline"],
+        "menu.findInSubtitles": [.zh: "在字幕中查找…", .en: "Find in Subtitles…"],
+        "menu.showSegmentsTab": [.zh: "显示分段", .en: "Show Segments"],
+        "menu.showOutputTab": [.zh: "显示输出", .en: "Show Output"],
+        "menu.showCueListTab": [.zh: "显示字幕列表", .en: "Show Cue List"],
         "help.homepage": [.zh: "项目主页", .en: "Project Homepage"],
         "help.reportIssue": [.zh: "反馈问题…", .en: "Report an Issue…"],
         "about.homepage": [.zh: "主页", .en: "Homepage"],

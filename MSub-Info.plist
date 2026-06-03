@@ -13,6 +13,17 @@
 	</array>
 	<key>CFBundleAllowMixedLocalizations</key>
 	<true/>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>local.msub.control</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>msub</string>
+			</array>
+		</dict>
+	</array>
 	<key>NSDesktopFolderUsageDescription</key>
 	<string>MSub 需要访问桌面上的影音文件以生成字幕。</string>
 	<key>NSDocumentsFolderUsageDescription</key>

@@ -15,6 +15,7 @@
 		000000000000000000000106 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000206 /* Models.swift */; };
 		000000000000000000000107 /* Settings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000207 /* Settings.swift */; };
 		000000000000000000000108 /* SubtitleDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000209 /* SubtitleDocument.swift */; };
+		00000000000000000000010A /* LocalizationCatalogReferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000020B /* LocalizationCatalogReferences.swift */; };
 		972EEEEB2FCE6E6C009F6645 /* AppLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 972EEEEA2FCE6E6C009F6645 /* AppLog.swift */; };
 		972EEEED2FCE8892009F6645 /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 972EEEEC2FCE8892009F6645 /* README.md */; };
 		973399062FBE32A400FDA459 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 973399052FBE32A400FDA459 /* AppIcon.icon */; };
@@ -26,6 +27,7 @@
 		9740751C2FCB43230019F9A1 /* FolderAuthorizationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9740751B2FCB43230019F9A1 /* FolderAuthorizationStore.swift */; };
 		974192942FBD973900E74858 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 974192942FBD973900E74857 /* Localizable.xcstrings */; };
 		978E671F2FC1B89C0054DBBA /* ffmpeg in Resources */ = {isa = PBXBuildFile; fileRef = 978E671E2FC1B89C0054DBBA /* ffmpeg */; };
+		97E76DA52FD06F5F0044D7D8 /* README.zh-CN.md in Resources */ = {isa = PBXBuildFile; fileRef = 97E76DA42FD06F5F0044D7D8 /* README.zh-CN.md */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -39,6 +41,7 @@
 		000000000000000000000208 /* package-backend.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "package-backend.sh"; sourceTree = "<group>"; };
 		000000000000000000000209 /* SubtitleDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubtitleDocument.swift; sourceTree = "<group>"; };
 		00000000000000000000020A /* MSub.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = MSub.entitlements; sourceTree = "<group>"; };
+		00000000000000000000020B /* LocalizationCatalogReferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalizationCatalogReferences.swift; sourceTree = "<group>"; };
 		000000000000000000000301 /* MSub.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MSub.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		972EEEEA2FCE6E6C009F6645 /* AppLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLog.swift; sourceTree = "<group>"; };
 		972EEEEC2FCE8892009F6645 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; name = README.md; path = /Users/august/Project/Huz/README.md; sourceTree = "<absolute>"; };
@@ -52,6 +55,7 @@
 		974192942FBD973900E74857 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; name = Localizable.xcstrings; path = Sources/MSub/Localizable.xcstrings; sourceTree = "<group>"; };
 		978E671E2FC1B89C0054DBBA /* ffmpeg */ = {isa = PBXFileReference; lastKnownFileType = text; path = ffmpeg; sourceTree = "<group>"; };
 		979A48422FBF74DD00FEF70A /* MSub-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "MSub-Info.plist"; sourceTree = SOURCE_ROOT; };
+		97E76DA42FD06F5F0044D7D8 /* README.zh-CN.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; name = "README.zh-CN.md"; path = "/Users/august/Project/Huz/README.zh-CN.md"; sourceTree = "<absolute>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -65,6 +69,7 @@
 				000000000000000000000012 /* Products */,
 				974192942FBD973900E74857 /* Localizable.xcstrings */,
 				972EEEEC2FCE8892009F6645 /* README.md */,
+				97E76DA42FD06F5F0044D7D8 /* README.zh-CN.md */,
 			);
 			sourceTree = "<group>";
 		};
@@ -77,6 +82,7 @@
 				000000000000000000000203 /* ContentView.swift */,
 				000000000000000000000204 /* HuzSubtitleMacApp.swift */,
 				000000000000000000000205 /* Localization.swift */,
+				00000000000000000000020B /* LocalizationCatalogReferences.swift */,
 				978E671E2FC1B89C0054DBBA /* ffmpeg */,
 				000000000000000000000206 /* Models.swift */,
 				000000000000000000000207 /* Settings.swift */,
@@ -167,6 +173,7 @@
 			files = (
 				974192942FBD973900E74858 /* Localizable.xcstrings in Resources */,
 				978E671F2FC1B89C0054DBBA /* ffmpeg in Resources */,
+				97E76DA52FD06F5F0044D7D8 /* README.zh-CN.md in Resources */,
 				972EEEED2FCE8892009F6645 /* README.md in Resources */,
 				973399062FBE32A400FDA459 /* AppIcon.icon in Resources */,
 			);
@@ -215,6 +222,7 @@
 				974075122FCAE5890019F9A1 /* NotificationsService.swift in Sources */,
 				000000000000000000000104 /* HuzSubtitleMacApp.swift in Sources */,
 				000000000000000000000105 /* Localization.swift in Sources */,
+				00000000000000000000010A /* LocalizationCatalogReferences.swift in Sources */,
 				000000000000000000000106 /* Models.swift in Sources */,
 				974075162FCAE6480019F9A1 /* AppleSpeechService.swift in Sources */,
 				000000000000000000000107 /* Settings.swift in Sources */,
@@ -355,7 +363,7 @@
 				CODE_SIGN_ENTITLEMENTS = MSub.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 14;
+				CURRENT_PROJECT_VERSION = 15;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -373,6 +381,7 @@
 				PRODUCT_NAME = MSub;
 				SDKROOT = macosx;
 				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 6.0;
 			};
 			name = Debug;
@@ -385,7 +394,7 @@
 				CODE_SIGN_ENTITLEMENTS = MSub.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 14;
+				CURRENT_PROJECT_VERSION = 15;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -403,6 +412,7 @@
 				PRODUCT_NAME = MSub;
 				SDKROOT = macosx;
 				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 6.0;
 			};
 			name = Release;
