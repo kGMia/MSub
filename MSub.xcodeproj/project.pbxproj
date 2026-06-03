@@ -17,7 +17,6 @@
 		000000000000000000000108 /* SubtitleDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000209 /* SubtitleDocument.swift */; };
 		00000000000000000000010A /* LocalizationCatalogReferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000020B /* LocalizationCatalogReferences.swift */; };
 		972EEEEB2FCE6E6C009F6645 /* AppLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 972EEEEA2FCE6E6C009F6645 /* AppLog.swift */; };
-		972EEEED2FCE8892009F6645 /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 972EEEEC2FCE8892009F6645 /* README.md */; };
 		973399062FBE32A400FDA459 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 973399052FBE32A400FDA459 /* AppIcon.icon */; };
 		974075122FCAE5890019F9A1 /* NotificationsService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 974075112FCAE5890019F9A1 /* NotificationsService.swift */; };
 		974075142FCAE5EE0019F9A1 /* AppIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 974075132FCAE5EE0019F9A1 /* AppIntents.swift */; };
@@ -27,7 +26,8 @@
 		9740751C2FCB43230019F9A1 /* FolderAuthorizationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9740751B2FCB43230019F9A1 /* FolderAuthorizationStore.swift */; };
 		974192942FBD973900E74858 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 974192942FBD973900E74857 /* Localizable.xcstrings */; };
 		978E671F2FC1B89C0054DBBA /* ffmpeg in Resources */ = {isa = PBXBuildFile; fileRef = 978E671E2FC1B89C0054DBBA /* ffmpeg */; };
-		97E76DA52FD06F5F0044D7D8 /* README.zh-CN.md in Resources */ = {isa = PBXBuildFile; fileRef = 97E76DA42FD06F5F0044D7D8 /* README.zh-CN.md */; };
+		97E76DA82FD0722E0044D7D8 /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 97E76DA62FD0722E0044D7D8 /* README.md */; };
+		97E76DA92FD0722E0044D7D8 /* README.zh-CN.md in Resources */ = {isa = PBXBuildFile; fileRef = 97E76DA72FD0722E0044D7D8 /* README.zh-CN.md */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -44,7 +44,6 @@
 		00000000000000000000020B /* LocalizationCatalogReferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalizationCatalogReferences.swift; sourceTree = "<group>"; };
 		000000000000000000000301 /* MSub.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MSub.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		972EEEEA2FCE6E6C009F6645 /* AppLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLog.swift; sourceTree = "<group>"; };
-		972EEEEC2FCE8892009F6645 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; name = README.md; path = /Users/august/Project/Huz/README.md; sourceTree = "<absolute>"; };
 		973399052FBE32A400FDA459 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 		974075112FCAE5890019F9A1 /* NotificationsService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationsService.swift; sourceTree = "<group>"; };
 		974075132FCAE5EE0019F9A1 /* AppIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppIntents.swift; sourceTree = "<group>"; };
@@ -55,7 +54,8 @@
 		974192942FBD973900E74857 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; name = Localizable.xcstrings; path = Sources/MSub/Localizable.xcstrings; sourceTree = "<group>"; };
 		978E671E2FC1B89C0054DBBA /* ffmpeg */ = {isa = PBXFileReference; lastKnownFileType = text; path = ffmpeg; sourceTree = "<group>"; };
 		979A48422FBF74DD00FEF70A /* MSub-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "MSub-Info.plist"; sourceTree = SOURCE_ROOT; };
-		97E76DA42FD06F5F0044D7D8 /* README.zh-CN.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; name = "README.zh-CN.md"; path = "/Users/august/Project/Huz/README.zh-CN.md"; sourceTree = "<absolute>"; };
+		97E76DA62FD0722E0044D7D8 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
+		97E76DA72FD0722E0044D7D8 /* README.zh-CN.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = "README.zh-CN.md"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -68,8 +68,8 @@
 				000000000000000000000011 /* Scripts */,
 				000000000000000000000012 /* Products */,
 				974192942FBD973900E74857 /* Localizable.xcstrings */,
-				972EEEEC2FCE8892009F6645 /* README.md */,
-				97E76DA42FD06F5F0044D7D8 /* README.zh-CN.md */,
+				97E76DA62FD0722E0044D7D8 /* README.md */,
+				97E76DA72FD0722E0044D7D8 /* README.zh-CN.md */,
 			);
 			sourceTree = "<group>";
 		};
@@ -171,10 +171,10 @@
 		000000000000000000000403 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			files = (
+				97E76DA82FD0722E0044D7D8 /* README.md in Resources */,
+				97E76DA92FD0722E0044D7D8 /* README.zh-CN.md in Resources */,
 				974192942FBD973900E74858 /* Localizable.xcstrings in Resources */,
 				978E671F2FC1B89C0054DBBA /* ffmpeg in Resources */,
-				97E76DA52FD06F5F0044D7D8 /* README.zh-CN.md in Resources */,
-				972EEEED2FCE8892009F6645 /* README.md in Resources */,
 				973399062FBE32A400FDA459 /* AppIcon.icon in Resources */,
 			);
 		};
