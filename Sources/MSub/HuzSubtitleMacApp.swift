@@ -6,6 +6,8 @@ import UniformTypeIdentifiers
 enum AppLinks {
     static let homepage = URL(string: "https://github.com/kGMia/MSub")!
     static let issues = URL(string: "https://github.com/kGMia/MSub/issues")!
+    static let releases = URL(string: "https://github.com/kGMia/MSub/releases")!
+    static let latestReleaseAPI = URL(string: "https://api.github.com/repos/kGMia/MSub/releases/latest")!
     static let copyrightHolder = "kGMia"
 }
 
@@ -32,6 +34,7 @@ struct MSubApp: App {
     @State private var backend = BackendService()
     @State private var settings = TranscriptionSettings()
     @State private var recentFiles = RecentFilesStore()
+    @State private var isCheckingForUpdates = false
 
     @AppStorage("huz.uiLanguage") private var languageRaw = AppLanguage.systemDefault.rawValue
     @AppStorage("huz.appearanceTheme") private var appearanceRaw = AppearanceTheme.system.rawValue
@@ -40,6 +43,7 @@ struct MSubApp: App {
         MSubCommandLine.handleLaunchArguments()
         AppLanguageBootstrap.applyStoredLanguageIfNeeded()
         BackendService.terminateRecordedBackendProcesses()
+        MediaProcessingCleanup.cleanupAfterLaunch()
     }
 
     private var language: AppLanguage {
@@ -70,6 +74,7 @@ struct MSubApp: App {
                     let stream = NotificationCenter.default.notifications(named: NSApplication.willTerminateNotification)
                     for await _ in stream {
                         backend.stop(waitForExit: true)
+                        MediaProcessingCleanup.cleanupBeforeTerminate()
                         break
                     }
                 }
@@ -215,6 +220,10 @@ struct MSubApp: App {
                 Button(String(format: Copy.text("menu.aboutApp", language: language), AppAbout.appName)) {
                     AppAbout.showPanel(language: language)
                 }
+                Button(Copy.text(isCheckingForUpdates ? "menu.checkingForUpdates" : "menu.checkForUpdates", language: language)) {
+                    Task { await checkForUpdates() }
+                }
+                .disabled(isCheckingForUpdates)
             }
 
             CommandGroup(replacing: .help) {
@@ -235,6 +244,14 @@ struct MSubApp: App {
                 .frame(width: 480, height: 360)
         }
         .windowResizability(.contentSize)
+    }
+
+    @MainActor
+    private func checkForUpdates() async {
+        guard !isCheckingForUpdates else { return }
+        isCheckingForUpdates = true
+        defer { isCheckingForUpdates = false }
+        await AppUpdateChecker.checkAndPresent(language: language)
     }
 }
 
@@ -292,7 +309,7 @@ enum AppAbout {
             ?? "MSub"
     }
 
-    private static var shortVersion: String {
+    static var shortVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
     }
 
@@ -351,6 +368,150 @@ enum AppAbout {
 
         NSApp.activate(ignoringOtherApps: true)
         NSApp.orderFrontStandardAboutPanel(options: options)
+    }
+}
+
+// MARK: - Updates
+
+enum AppUpdateChecker {
+    private struct GitHubRelease: Decodable {
+        let tagName: String
+        let name: String?
+        let htmlURL: URL
+
+        enum CodingKeys: String, CodingKey {
+            case tagName = "tag_name"
+            case name
+            case htmlURL = "html_url"
+        }
+    }
+
+    @MainActor
+    static func checkAndPresent(language: AppLanguage) async {
+        do {
+            let release = try await fetchLatestRelease()
+            present(release: release, currentVersion: AppAbout.shortVersion, language: language)
+        } catch {
+            presentError(error, language: language)
+        }
+    }
+
+    private static func fetchLatestRelease() async throws -> GitHubRelease {
+        var request = URLRequest(url: AppLinks.latestReleaseAPI)
+        request.timeoutInterval = 12
+        request.setValue("MSub", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw UpdateCheckError.invalidResponse
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw UpdateCheckError.httpStatus(http.statusCode)
+        }
+        return try JSONDecoder().decode(GitHubRelease.self, from: data)
+    }
+
+    @MainActor
+    private static func present(release: GitHubRelease, currentVersion: String, language: AppLanguage) {
+        let latestVersion = displayVersion(from: release.tagName)
+        let hasUpdate = compareVersions(latestVersion, currentVersion) == .orderedDescending
+        let alert = NSAlert()
+        alert.alertStyle = hasUpdate ? .informational : .informational
+        if hasUpdate {
+            alert.messageText = Copy.text("update.available.title", language: language)
+            alert.informativeText = String(
+                format: Copy.text("update.available.message", language: language),
+                latestVersion,
+                currentVersion
+            )
+            alert.addButton(withTitle: Copy.text("update.openRelease", language: language))
+            alert.addButton(withTitle: Copy.text("button.cancel", language: language))
+        } else {
+            alert.messageText = Copy.text("update.upToDate.title", language: language)
+            alert.informativeText = String(
+                format: Copy.text("update.upToDate.message", language: language),
+                currentVersion
+            )
+            alert.addButton(withTitle: Copy.text("button.ok", language: language))
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+        let response = alert.runModal()
+        if hasUpdate, response == .alertFirstButtonReturn {
+            NSWorkspace.shared.open(release.htmlURL)
+        }
+    }
+
+    @MainActor
+    private static func presentError(_ error: Error, language: AppLanguage) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = Copy.text("update.failed.title", language: language)
+        alert.informativeText = String(
+            format: Copy.text("update.failed.message", language: language),
+            readableMessage(for: error, language: language)
+        )
+        alert.addButton(withTitle: Copy.text("button.ok", language: language))
+        alert.addButton(withTitle: Copy.text("update.openReleases", language: language))
+
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertSecondButtonReturn {
+            NSWorkspace.shared.open(AppLinks.releases)
+        }
+    }
+
+    private static func readableMessage(for error: Error, language: AppLanguage) -> String {
+        if let updateError = error as? UpdateCheckError {
+            return updateError.localizedDescription(language: language)
+        }
+        return error.localizedDescription
+    }
+
+    private static func displayVersion(from tag: String) -> String {
+        let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.lowercased().hasPrefix("v") {
+            return String(trimmed.dropFirst())
+        }
+        return trimmed
+    }
+
+    private static func compareVersions(_ lhs: String, _ rhs: String) -> ComparisonResult {
+        let left = versionComponents(lhs)
+        let right = versionComponents(rhs)
+        guard !left.isEmpty, !right.isEmpty else { return .orderedSame }
+        let count = max(left.count, right.count)
+        for index in 0..<count {
+            let lValue = index < left.count ? left[index] : 0
+            let rValue = index < right.count ? right[index] : 0
+            if lValue > rValue { return .orderedDescending }
+            if lValue < rValue { return .orderedAscending }
+        }
+        return .orderedSame
+    }
+
+    private static func versionComponents(_ version: String) -> [Int] {
+        let pattern = #"\d+(?:\.\d+)*"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: version, range: NSRange(version.startIndex..., in: version)),
+              let range = Range(match.range, in: version) else {
+            return []
+        }
+        return version[range].split(separator: ".").compactMap { Int($0) }
+    }
+
+    private enum UpdateCheckError: Error {
+        case invalidResponse
+        case httpStatus(Int)
+
+        func localizedDescription(language: AppLanguage) -> String {
+            switch self {
+            case .invalidResponse:
+                return Copy.text("update.error.invalidResponse", language: language)
+            case .httpStatus(let status):
+                return String(format: Copy.text("update.error.httpStatus", language: language), status)
+            }
+        }
     }
 }
 
@@ -994,6 +1155,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     func applicationWillTerminate(_ notification: Notification) {
         BackendService.terminateRecordedBackendProcesses()
+        MediaProcessingCleanup.cleanupBeforeTerminate()
     }
 
     @MainActor

@@ -26,6 +26,7 @@
 		9740751C2FCB43230019F9A1 /* FolderAuthorizationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9740751B2FCB43230019F9A1 /* FolderAuthorizationStore.swift */; };
 		974192942FBD973900E74858 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 974192942FBD973900E74857 /* Localizable.xcstrings */; };
 		978E671F2FC1B89C0054DBBA /* ffmpeg in Resources */ = {isa = PBXBuildFile; fileRef = 978E671E2FC1B89C0054DBBA /* ffmpeg */; };
+		9798620E2FD1641A00D14772 /* README.zh-Hant.md in Resources */ = {isa = PBXBuildFile; fileRef = 9798620D2FD1641A00D14772 /* README.zh-Hant.md */; };
 		97E76DA82FD0722E0044D7D8 /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 97E76DA62FD0722E0044D7D8 /* README.md */; };
 		97E76DA92FD0722E0044D7D8 /* README.zh-CN.md in Resources */ = {isa = PBXBuildFile; fileRef = 97E76DA72FD0722E0044D7D8 /* README.zh-CN.md */; };
 /* End PBXBuildFile section */
@@ -53,6 +54,7 @@
 		9740751B2FCB43230019F9A1 /* FolderAuthorizationStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderAuthorizationStore.swift; sourceTree = "<group>"; };
 		974192942FBD973900E74857 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; name = Localizable.xcstrings; path = Sources/MSub/Localizable.xcstrings; sourceTree = "<group>"; };
 		978E671E2FC1B89C0054DBBA /* ffmpeg */ = {isa = PBXFileReference; lastKnownFileType = text; path = ffmpeg; sourceTree = "<group>"; };
+		9798620D2FD1641A00D14772 /* README.zh-Hant.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = "README.zh-Hant.md"; sourceTree = "<group>"; };
 		979A48422FBF74DD00FEF70A /* MSub-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "MSub-Info.plist"; sourceTree = SOURCE_ROOT; };
 		97E76DA62FD0722E0044D7D8 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 		97E76DA72FD0722E0044D7D8 /* README.zh-CN.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = "README.zh-CN.md"; sourceTree = "<group>"; };
@@ -69,6 +71,7 @@
 				000000000000000000000012 /* Products */,
 				974192942FBD973900E74857 /* Localizable.xcstrings */,
 				97E76DA62FD0722E0044D7D8 /* README.md */,
+				9798620D2FD1641A00D14772 /* README.zh-Hant.md */,
 				97E76DA72FD0722E0044D7D8 /* README.zh-CN.md */,
 			);
 			sourceTree = "<group>";
@@ -173,6 +176,7 @@
 			files = (
 				97E76DA82FD0722E0044D7D8 /* README.md in Resources */,
 				97E76DA92FD0722E0044D7D8 /* README.zh-CN.md in Resources */,
+				9798620E2FD1641A00D14772 /* README.zh-Hant.md in Resources */,
 				974192942FBD973900E74858 /* Localizable.xcstrings in Resources */,
 				978E671F2FC1B89C0054DBBA /* ffmpeg in Resources */,
 				973399062FBE32A400FDA459 /* AppIcon.icon in Resources */,

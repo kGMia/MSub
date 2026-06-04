@@ -1,8 +1,10 @@
 # MSub
 
-[中文说明](README.zh-CN.md)
+[简体中文](README.zh-CN.md) | [繁體中文](README.zh-Hant.md) | [Releases](https://github.com/kGMia/MSub/releases)
 
 MSub is a native macOS subtitle app for Apple Silicon Macs. It turns local video or audio into editable subtitles with MLX speech-recognition models.
+
+![MSub screenshot](screenshot.png)
 
 ## Main Features
 
@@ -26,9 +28,9 @@ MSub is a native macOS subtitle app for Apple Silicon Macs. It turns local video
 
 ## Install
 
-MSub does not yet have a notarized public installer. Use a packaged `MSub.app` from a trusted build, or build it locally.
+Download packaged builds from [GitHub Releases](https://github.com/kGMia/MSub/releases), or build MSub locally.
 
-If macOS says the app cannot be verified, Control-click `MSub.app`, choose **Open**, then confirm. This is expected for ad-hoc signed local builds.
+Current builds are ad-hoc signed and not notarized. If macOS says the app cannot be verified, Control-click `MSub.app`, choose **Open**, then confirm.
 
 ## Build From Source
 

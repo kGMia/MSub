@@ -1,8 +1,10 @@
 # MSub
 
-[English](README.md)
+[English](README.md) | [繁體中文](README.zh-Hant.md) | [发布页面](https://github.com/kGMia/MSub/releases)
 
 MSub 是一款面向 Apple Silicon Mac 的原生字幕工具。它可以把本地视频或音频转换成可编辑字幕，并使用 MLX 语音识别模型在本机运行。
+
+![MSub 界面截图](screenshot.png)
 
 ## 主要功能
 
@@ -26,9 +28,9 @@ MSub 是一款面向 Apple Silicon Mac 的原生字幕工具。它可以把本�
 
 ## 安装
 
-MSub 目前还没有经过 Apple 公证的公开安装包。请使用可信构建的 `MSub.app`，或在本地从源码构建。
+请从 [GitHub Releases](https://github.com/kGMia/MSub/releases) 下载打包版本，或在本地从源码构建。
 
-如果 macOS 提示无法验证开发者，请在 Finder 中按住 Control 点按 `MSub.app`，选择“打开”并确认。这是本地 ad-hoc 签名构建的正常现象。
+当前构建为 ad-hoc 签名，尚未经过 Apple 公证。如果 macOS 提示无法验证开发者，请在 Finder 中按住 Control 点按 `MSub.app`，选择“打开”并确认。
 
 ## 从源码构建
 

@@ -1,0 +1,24 @@
+# SwiftPM / Xcode build output
+.build/
+.swiftpm/
+.swift-module-cache/
+.xcode-derived/
+.xcode-derived-release/
+DerivedData/
+
+# Release/package output
+.release/
+*.dSYM/
+*.xcarchive
+*.dmg
+
+# Python/backend local state
+.uv-cache/
+.venv/
+__pycache__/
+*.py[cod]
+
+# macOS/editor noise
+.DS_Store
+*.xcuserstate
+xcuserdata/

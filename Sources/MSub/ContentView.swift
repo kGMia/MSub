@@ -735,10 +735,12 @@ struct ContentView: View {
                 }
             )
         case .thumbnail:
-            // Containers without a native video preview still need their audio
-            // wired into the timeline playback controller (which routes through
-            // AudioSource / ffmpeg so the audio is always playable).
-            UnsupportedMediaPreview(
+            // Containers AVFoundation can't demux. Try a fast stream-copy
+            // remux on the fly: when it succeeds we promote the preview to a
+            // full AVPlayer card; when it doesn't (incompatible codec) we
+            // keep the filmstrip-based preview. Either way audio routes
+            // through AudioSource/ffmpeg so the timeline always plays.
+            AdaptiveThumbnailMediaPreview(
                 url: slot.url,
                 title: t("preview.title"),
                 language: language,
@@ -5770,6 +5772,94 @@ private enum PreviewCardMetrics {
     static let cornerRadius: CGFloat = 14
 }
 
+/// Preview for containers AVFoundation can't natively play (MKV, AVI, …).
+///
+/// We always render the audio + filmstrip preview first. For modestly-sized
+/// files we also try a bounded background remux; large sources stay on the
+/// filmstrip path so opening them cannot silently write multi-GB caches.
+private struct AdaptiveThumbnailMediaPreview: View {
+    let url: URL
+    let title: String
+    let language: AppLanguage
+    let cues: [SubtitleCue]
+    let canCaptureFrame: Bool
+    let isCapturingFrame: Bool
+    let captureHelp: String
+    let nativePreviewHelp: String
+    let playback: PlaybackController
+    let onCaptureFrame: () -> Void
+    let onNativePreview: (URL) -> Void
+
+    @State private var playableURL: URL?
+
+    var body: some View {
+        Group {
+            if let playableURL {
+                MediaPreviewCard(
+                    url: playableURL,
+                    title: title,
+                    cues: cues,
+                    canCaptureFrame: canCaptureFrame,
+                    isCapturingFrame: isCapturingFrame,
+                    captureHelp: captureHelp,
+                    nativePreviewHelp: nativePreviewHelp,
+                    playback: playback,
+                    onCaptureFrame: onCaptureFrame,
+                    // Hand Quick Look the remuxed MP4 — the original
+                    // container often isn't playable by QuickLook's bundled
+                    // plugins, but the freshly-remuxed MP4 always is.
+                    onNativePreview: { onNativePreview(playableURL) }
+                )
+            } else {
+                UnsupportedMediaPreview(
+                    url: url,
+                    title: title,
+                    language: language,
+                    cues: cues,
+                    canCaptureFrame: canCaptureFrame,
+                    isCapturingFrame: isCapturingFrame,
+                    captureHelp: captureHelp,
+                    nativePreviewHelp: nativePreviewHelp,
+                    playback: playback,
+                    onCaptureFrame: onCaptureFrame,
+                    onNativePreview: onNativePreview
+                )
+            }
+        }
+        .task(id: url) {
+            playableURL = nil
+            let resolution = await VideoSource.resolveForAutomaticPreview(url)
+            guard !Task.isCancelled else { return }
+            // Only flip if the remux actually produced a new, playable file.
+            // `.directly` shouldn't happen here (this branch is for the
+            // thumbnail-only extension list) but if it did, the file is
+            // already playable so we'd upgrade. `.audioOnly` / `.unavailable`
+            // leave us on the filmstrip — same UX as before this feature.
+            switch resolution {
+            case .remuxed(let resolvedURL), .directly(let resolvedURL):
+                // Carry the user's listening position across the upgrade so
+                // we don't yank them back to t=0 when video kicks in.
+                // PlaybackController.load resets currentTime, so we capture
+                // the existing state first, perform the reload, then seek
+                // back and restore the play/pause state.
+                let resumeTime = playback.currentTime
+                let wasPlaying = playback.isPlaying
+                await playback.load(resolvedURL)
+                guard !Task.isCancelled else { return }
+                if resumeTime > 0 {
+                    playback.seek(to: resumeTime, pause: !wasPlaying)
+                }
+                if wasPlaying && !playback.isPlaying {
+                    playback.togglePlayPause()
+                }
+                playableURL = resolvedURL
+            case .audioOnly, .unavailable:
+                playableURL = nil
+            }
+        }
+    }
+}
+
 private struct UnsupportedMediaPreview: View {
     let url: URL
     let title: String
@@ -5876,9 +5966,53 @@ private struct UnsupportedMediaPreview: View {
                     .frame(width: proxy.size.width, height: proxy.size.height)
                 }
             }
+            .overlay(alignment: .leading) {
+                if filmstrip.count > 1 {
+                    glassPageButton(systemName: "chevron.left", action: showPreviousFrame)
+                        .padding(.leading, 10)
+                }
+            }
+            .overlay(alignment: .trailing) {
+                if filmstrip.count > 1 {
+                    glassPageButton(systemName: "chevron.right", action: showNextFrame)
+                        .padding(.trailing, 10)
+                }
+            }
         }
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .clipShape(RoundedRectangle(cornerRadius: 14))
         .animation(.easeInOut(duration: 0.25), value: cover)
+    }
+
+    private func glassPageButton(systemName: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.primary)
+                .frame(width: 28, height: 28)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.interactive(), in: Circle())
+    }
+
+    private func showPreviousFrame() {
+        guard !filmstrip.isEmpty else { return }
+        let current = selectedFrameIndex ?? 0
+        let next = (current - 1 + filmstrip.count) % filmstrip.count
+        withAnimation(.easeInOut(duration: 0.2)) {
+            selectedFrameIndex = next
+            cover = filmstrip[next]
+        }
+    }
+
+    private func showNextFrame() {
+        guard !filmstrip.isEmpty else { return }
+        let current = selectedFrameIndex ?? -1
+        let next = (current + 1) % filmstrip.count
+        withAnimation(.easeInOut(duration: 0.2)) {
+            selectedFrameIndex = next
+            cover = filmstrip[next]
+        }
     }
 
     private var filmstripRow: some View {
@@ -5898,12 +6032,12 @@ private struct UnsupportedMediaPreview: View {
                             .resizable()
                             .aspectRatio(contentMode: .fill)
                     )
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 4)
+                        RoundedRectangle(cornerRadius: 8)
                             .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 1.5)
                     )
-                    .contentShape(RoundedRectangle(cornerRadius: 4))
+                    .contentShape(RoundedRectangle(cornerRadius: 8))
                     .onTapGesture {
                         withAnimation(.easeInOut(duration: 0.2)) {
                             selectedFrameIndex = idx
@@ -6226,7 +6360,11 @@ private enum VideoFrameCapture {
     }
 
     private static func frameViaAVFoundation(source: URL, seconds: Double) async -> NSImage? {
-        let asset = AVURLAsset(url: source)
+        // If we already remuxed this container for playback, use the MP4 —
+        // AVFoundation succeeds on it where it would just fail on the
+        // original MKV/AVI/WMV and force us into the slower ffmpeg path.
+        let assetURL = VideoSource.cachedURL(for: source) ?? source
+        let asset = AVURLAsset(url: assetURL)
         guard let tracks = try? await asset.loadTracks(withMediaType: .video), !tracks.isEmpty else {
             return nil
         }

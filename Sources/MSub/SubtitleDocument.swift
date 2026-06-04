@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import CryptoKit
+import Darwin
 import NaturalLanguage
 import SwiftUI
 
@@ -746,7 +747,12 @@ final class PlaybackController {
 
         // For containers AVFoundation can't natively play (MKV, etc.) the player
         // would stall or stop early. Resolve to a clean extraction up front
-        // so playback always traverses the full audio.
+        // so playback always traverses the full audio. We deliberately route
+        // through `AudioSource` (audio-only) here instead of `VideoSource`:
+        // making audio loading depend on the slower video remux would block
+        // the timeline while ffmpeg runs. The video-aware upgrade happens
+        // separately in the preview layer when (and only when) a remuxed file
+        // is genuinely playable.
         let playbackURL = await AudioSource.resolve(url)
         guard currentURL == url else { return }
 
@@ -5985,6 +5991,336 @@ enum AudioSource {
     }
 }
 
+/// Resolves a media URL to one whose video stream AVPlayer can render. For
+/// directly-playable containers (mp4/mov/…) it returns the original. For
+/// containers AVFoundation can't demux (MKV, AVI, WMV…) it tries a fast
+/// stream-copy remux into an MP4 — that's usually a few seconds even for hour-
+/// long files because no decoding happens. If the copy fails (incompatible
+/// codec or stream layout), it falls back to `AudioSource.resolve` so audio
+/// playback still works end-to-end.
+enum VideoSource {
+    private static let cache = VideoRemuxCache()
+    private static let maxAutomaticRemuxBytes: Int64 = 750 * 1024 * 1024
+    private static let directlyPlayableExtensions: Set<String> = [
+        "mp4", "mov", "m4v", "qt", "3gp", "3g2",
+        "m4a", "mp3", "wav", "aac", "aiff", "aif", "flac", "caf"
+    ]
+
+    /// Result of a resolution attempt, so callers can distinguish "we got a
+    /// playable video" from "we only got audio" without comparing URLs.
+    enum Resolution {
+        case directly(URL)            // original URL is already playable
+        case remuxed(URL)             // ffmpeg produced a new playable file
+        case audioOnly(URL)           // remux failed; audio-only fallback
+        case unavailable(URL)         // nothing worked; original returned as-is
+
+        var url: URL {
+            switch self {
+            case .directly(let u), .remuxed(let u), .audioOnly(let u), .unavailable(let u):
+                return u
+            }
+        }
+
+        var hasVideo: Bool {
+            switch self {
+            case .directly, .remuxed: return true
+            case .audioOnly, .unavailable: return false
+            }
+        }
+    }
+
+    static func resolve(_ url: URL) async -> Resolution {
+        await resolve(url, maxRemuxBytes: nil)
+    }
+
+    static func resolveForAutomaticPreview(_ url: URL) async -> Resolution {
+        await resolve(url, maxRemuxBytes: maxAutomaticRemuxBytes)
+    }
+
+    private static func resolve(_ url: URL, maxRemuxBytes: Int64?) async -> Resolution {
+        let ext = url.pathExtension.lowercased()
+        if directlyPlayableExtensions.contains(ext) {
+            return .directly(url)
+        }
+        if let maxRemuxBytes,
+           let sourceBytes = sourceFileSize(url),
+           sourceBytes > maxRemuxBytes {
+            let audio = await AudioSource.resolve(url)
+            return audio == url ? .unavailable(url) : .audioOnly(audio)
+        }
+        if let remuxed = await cache.remuxed(for: url) {
+            return .remuxed(remuxed)
+        }
+        let audio = await AudioSource.resolve(url)
+        return audio == url ? .unavailable(url) : .audioOnly(audio)
+    }
+
+    private static func sourceFileSize(_ url: URL) -> Int64? {
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey])
+        return values?.fileSize.map(Int64.init)
+    }
+
+    /// Convenience for call sites that only need the resolved URL — preserves
+    /// the old `AudioSource.resolve` signature so PlaybackController and the
+    /// waveform path can stay terse.
+    static func resolveURL(_ url: URL) async -> URL {
+        await resolve(url).url
+    }
+
+    /// Returns a previously-cached remuxed MP4 for `source` if one exists on
+    /// disk, without ever triggering a new remux. Synchronous so capture-frame
+    /// and Quick Look paths can opportunistically prefer the already-playable
+    /// file without paying any extraction cost. Returns nil when no cache
+    /// entry exists yet.
+    static func cachedURL(for source: URL) -> URL? {
+        VideoRemuxCache.cachedURL(for: source)
+    }
+}
+
+private actor VideoRemuxCache {
+    private var inflight: [String: Task<URL?, Never>] = [:]
+
+    func remuxed(for source: URL) async -> URL? {
+        let key = Self.identifier(for: source)
+        let dest = Self.destinationURL(for: key)
+
+        if FileManager.default.fileExists(atPath: dest.path) {
+            if await Self.isUsable(dest) {
+                return dest
+            }
+            NSLog("[MSub] Discarding unusable cached remux at %@", dest.path)
+            try? FileManager.default.removeItem(at: dest)
+        }
+        if let task = inflight[key] {
+            return await task.value
+        }
+        let task = Task<URL?, Never> {
+            // Probe the source codec before remuxing so HEVC streams get the
+            // `hvc1` tag — without it the copied MP4 carries the raw `hev1`
+            // tag and AVPlayer refuses to show video (audio still works).
+            let codec = await FFmpegRunner.probeVideoCodec(of: source)
+            guard let produced = await FFmpegRunner.remuxToMP4(
+                from: source, to: dest, videoCodec: codec
+            ) else {
+                return nil
+            }
+            // Same playability gate the cache hit path uses — otherwise the
+            // very first remux of a file whose codec tag AVPlayer can't read
+            // would slip through and present a "video player" with no image.
+            if await Self.isUsable(produced) {
+                return produced
+            }
+            NSLog("[MSub] Remuxed MP4 at %@ is not playable; discarding.", produced.path)
+            try? FileManager.default.removeItem(at: produced)
+            return nil
+        }
+        inflight[key] = task
+        let result = await task.value
+        inflight[key] = nil
+        return result
+    }
+
+    /// Synchronous accessor for the cached file path, used by capture-frame
+    /// and Quick Look paths that want the remuxed MP4 only if it already
+    /// exists. Never triggers extraction.
+    nonisolated static func cachedURL(for source: URL) -> URL? {
+        let key = identifier(for: source)
+        let dest = destinationURL(for: key)
+        return FileManager.default.fileExists(atPath: dest.path) ? dest : nil
+    }
+
+    /// A remuxed MP4 only counts as "usable" if AVFoundation will actually
+    /// render its video on the player surface. Stream-copy can produce an MP4
+    /// whose codec tag (e.g. raw `hev1` instead of `hvc1`) or pixel format
+    /// AVPlayer refuses — we don't want to flip the UI into a "video" preview
+    /// in that case, because the user would see only audio with a black frame.
+    private static func isUsable(_ url: URL) async -> Bool {
+        guard let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value,
+              size > 1024 else {
+            return false
+        }
+        let asset = AVURLAsset(url: url)
+        guard let duration = try? await asset.load(.duration),
+              duration.seconds.isFinite,
+              duration.seconds > 0.3 else {
+            return false
+        }
+        let isPlayable = (try? await asset.load(.isPlayable)) ?? false
+        guard isPlayable else { return false }
+        guard let videoTrack = (try? await asset.loadTracks(withMediaType: .video))?.first else {
+            return false
+        }
+        let trackPlayable = (try? await videoTrack.load(.isPlayable)) ?? false
+        guard trackPlayable else { return false }
+        if let size = try? await videoTrack.load(.naturalSize),
+           size.width > 0, size.height > 0 {
+            return true
+        }
+        return false
+    }
+
+    private static func identifier(for url: URL) -> String {
+        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+        let modified = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
+        let size = values?.fileSize ?? 0
+        let input = "\(url.standardizedFileURL.path)#\(modified)#\(size)"
+        let digest = SHA256.hash(data: Data(input.utf8))
+        return digest.prefix(16).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func destinationURL(for identifier: String) -> URL {
+        let base: URL
+        if let dir = try? FileManager.default.url(
+            for: .cachesDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        ) {
+            base = dir
+        } else {
+            base = FileManager.default.temporaryDirectory
+        }
+        let dir = base.appendingPathComponent("MSub-remuxed-video-v1", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("\(identifier).mp4")
+    }
+}
+
+/// Background sweeper that keeps the on-disk media caches from growing
+/// unbounded. Each extracted/remuxed file is ~the size of the source's
+/// audio (or full video) track, so over many sessions these directories can
+/// silently consume gigabytes of caches.
+///
+/// Eviction is least-recently-used by `contentAccessDate` (falling back to
+/// `contentModificationDate`). We run on app launch from a background task;
+/// per-write pruning is intentionally skipped to keep extraction paths simple.
+enum MediaCachePruner {
+    /// Conservative defaults — large enough that frequently-revisited files
+    /// stay hot, small enough to bound disk usage to a few GB total.
+    static let videoCacheLimit: Int64 = 5 * 1024 * 1024 * 1024  // 5 GB
+    static let audioCacheLimit: Int64 = 1 * 1024 * 1024 * 1024  // 1 GB
+
+    static func enforceLimitsInBackground() {
+        Task.detached(priority: .utility) {
+            enforceLimitsNow()
+        }
+    }
+
+    static func enforceLimitsNow() {
+        prune(directoryName: "MSub-remuxed-video-v1", maxBytes: videoCacheLimit)
+        prune(directoryName: "MSub-extracted-audio-v2", maxBytes: audioCacheLimit)
+    }
+
+    static func removeTransientCaches() {
+        removeCacheDirectory(named: "MSub-cue-clips")
+        removeCacheDirectory(named: "MSub-selected-ranges")
+    }
+
+    private static func prune(directoryName: String, maxBytes: Int64) {
+        guard let cachesDir = try? FileManager.default.url(
+            for: .cachesDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: false
+        ) else { return }
+        let dir = cachesDir.appendingPathComponent(directoryName, isDirectory: true)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            return
+        }
+
+        let resourceKeys: Set<URLResourceKey> = [
+            .fileSizeKey, .contentAccessDateKey, .contentModificationDateKey
+        ]
+        guard let items = try? FileManager.default.contentsOfDirectory(
+            at: dir,
+            includingPropertiesForKeys: Array(resourceKeys),
+            options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
+        ) else { return }
+
+        struct Entry {
+            let url: URL
+            let size: Int64
+            let lastUsed: Date
+        }
+        let entries: [Entry] = items.compactMap { url in
+            guard let values = try? url.resourceValues(forKeys: resourceKeys),
+                  let size = values.fileSize else { return nil }
+            let lastUsed = values.contentAccessDate
+                ?? values.contentModificationDate
+                ?? .distantPast
+            return Entry(url: url, size: Int64(size), lastUsed: lastUsed)
+        }
+
+        var total = entries.reduce(0) { $0 + $1.size }
+        guard total > maxBytes else { return }
+        // Oldest first. Stop once we're under the cap.
+        let sorted = entries.sorted { $0.lastUsed < $1.lastUsed }
+        var removedCount = 0
+        var removedBytes: Int64 = 0
+        for entry in sorted {
+            guard total > maxBytes else { break }
+            do {
+                try FileManager.default.removeItem(at: entry.url)
+                total -= entry.size
+                removedCount += 1
+                removedBytes += entry.size
+            } catch {
+                NSLog(
+                    "[MSub] Cache prune failed for %@: %@",
+                    entry.url.lastPathComponent, "\(error)"
+                )
+            }
+        }
+        if removedCount > 0 {
+            NSLog(
+                "[MSub] Pruned %d files (%lld bytes) from %@",
+                removedCount, removedBytes, directoryName
+            )
+        }
+    }
+
+    private static func removeCacheDirectory(named directoryName: String) {
+        for base in cacheBaseDirectories() {
+            let dir = base.appendingPathComponent(directoryName, isDirectory: true)
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDirectory),
+                  isDirectory.boolValue else {
+                continue
+            }
+            try? FileManager.default.removeItem(at: dir)
+        }
+    }
+
+    private static func cacheBaseDirectories() -> [URL] {
+        var directories: [URL] = []
+        if let cachesDir = try? FileManager.default.url(
+            for: .cachesDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: false
+        ) {
+            directories.append(cachesDir)
+        }
+        directories.append(FileManager.default.temporaryDirectory)
+        return directories
+    }
+}
+
+enum MediaProcessingCleanup {
+    static func cleanupAfterLaunch() {
+        MediaCachePruner.removeTransientCaches()
+        MediaCachePruner.enforceLimitsInBackground()
+    }
+
+    static func cleanupBeforeTerminate() {
+        FFmpegRunner.terminateActiveProcesses()
+        MediaCachePruner.removeTransientCaches()
+        MediaCachePruner.enforceLimitsNow()
+    }
+}
+
 private actor AudioExtractionCache {
     private var inflight: [String: Task<URL?, Never>] = [:]
 
@@ -6137,6 +6473,10 @@ enum FFmpegRunner {
 
     static var isAvailable: Bool { binary != nil }
 
+    static func terminateActiveProcesses() {
+        FFmpegProcessRegistry.shared.terminateAll()
+    }
+
     /// Extracts the audio track of `source` to `dest` as AAC-in-m4a. When `start`
     /// and `duration` are provided, only that slice is exported.
     static func extractAudio(
@@ -6182,6 +6522,8 @@ enum FFmpegRunner {
         let stderr = Pipe()
         process.standardError = stderr
         process.standardOutput = Pipe()  // discard; prevents inherited stdout
+        let waiter = ProcessExitWaiter()
+        waiter.install(on: process)
 
         do {
             try process.run()
@@ -6190,12 +6532,17 @@ enum FFmpegRunner {
             return nil
         }
 
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            process.terminationHandler = { _ in cont.resume() }
-        }
+        FFmpegProcessRegistry.shared.register(process)
+        await waitForManagedProcess(process, waiter: waiter)
+        FFmpegProcessRegistry.shared.unregister(process)
+        process.terminationHandler = nil
 
         let elapsed = Date().timeIntervalSince(started)
         let exitCode = process.terminationStatus
+        if Task.isCancelled {
+            try? FileManager.default.removeItem(at: dest)
+            return nil
+        }
         if exitCode != 0 {
             let data = (try? stderr.fileHandleForReading.readToEnd()) ?? Data()
             let text = (String(data: data, encoding: .utf8) ?? "")
@@ -6221,6 +6568,78 @@ enum FFmpegRunner {
             source.lastPathComponent, elapsed
         )
         return nil
+    }
+
+    /// Stream-copies the video and audio of `source` into an MP4 at `dest`.
+    /// No decoding/encoding happens — this is the fast path that turns an MKV/
+    /// AVI whose codecs AVFoundation already supports into a container it can
+    /// actually play. Returns nil when the source's codecs aren't compatible
+    /// with the MP4 container (or any other ffmpeg error). Callers should
+    /// treat nil as "fall back to filmstrip preview" rather than retrying with
+    /// a costly transcode.
+    ///
+    /// `videoCodec` is the lowercase codec name from `probeVideoCodec` (e.g.
+    /// `"hevc"`, `"h264"`). When supplied for HEVC we add `-tag:v hvc1` so
+    /// the resulting MP4 carries the FOURCC AVPlayer/QuickTime accept —
+    /// without the retag, copied HEVC streams keep the raw `hev1` tag and
+    /// the player will show audio only, even though the file is structurally
+    /// valid.
+    static func remuxToMP4(
+        from source: URL,
+        to dest: URL,
+        videoCodec: String? = nil
+    ) async -> URL? {
+        guard binary != nil else { return nil }
+        try? FileManager.default.removeItem(at: dest)
+        var args: [String] = [
+            "-y", "-nostdin", "-loglevel", "error",
+            "-i", source.path,
+            "-map", "0:v:0?",
+            "-map", "0:a:0?",
+            "-c", "copy"
+        ]
+        if let videoCodec, ["hevc", "h265"].contains(videoCodec) {
+            args.append(contentsOf: ["-tag:v", "hvc1"])
+        }
+        args.append(contentsOf: [
+            "-movflags", "+faststart",
+            "-avoid_negative_ts", "make_zero",
+            dest.path
+        ])
+        if await runFFmpeg(args, source: source, dest: dest, operation: "video remux") {
+            return dest
+        }
+        return nil
+    }
+
+    /// Reads the primary video codec name from ffmpeg's banner output. Returns
+    /// a lowercased token like `"h264"`, `"hevc"`, `"vp9"`, or nil when the
+    /// source has no video stream / probing fails. Cost is one short ffmpeg
+    /// process (~0.3–0.8s) — we run it once per container in the remux path
+    /// to decide whether HEVC retagging is needed.
+    static func probeVideoCodec(of source: URL) async -> String? {
+        guard let binary else { return nil }
+        let process = Process()
+        process.executableURL = binary
+        process.arguments = ["-nostdin", "-hide_banner", "-i", source.path]
+        let stderr = Pipe()
+        process.standardError = stderr
+        process.standardOutput = Pipe()
+        let waiter = ProcessExitWaiter()
+        waiter.install(on: process)
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+        FFmpegProcessRegistry.shared.register(process)
+        await waitForManagedProcess(process, waiter: waiter)
+        FFmpegProcessRegistry.shared.unregister(process)
+        process.terminationHandler = nil
+        guard !Task.isCancelled else { return nil }
+        let data = (try? stderr.fileHandleForReading.readToEnd()) ?? Data()
+        guard let text = String(data: data, encoding: .utf8) else { return nil }
+        return parseFFmpegVideoCodec(text)
     }
 
     static func clipMedia(
@@ -6290,17 +6709,35 @@ enum FFmpegRunner {
         let stderr = Pipe()
         process.standardError = stderr
         process.standardOutput = Pipe()
+        let waiter = ProcessExitWaiter()
+        waiter.install(on: process)
         do {
             try process.run()
         } catch {
             return nil
         }
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            process.terminationHandler = { _ in cont.resume() }
-        }
+        FFmpegProcessRegistry.shared.register(process)
+        await waitForManagedProcess(process, waiter: waiter)
+        FFmpegProcessRegistry.shared.unregister(process)
+        process.terminationHandler = nil
+        guard !Task.isCancelled else { return nil }
         let data = (try? stderr.fileHandleForReading.readToEnd()) ?? Data()
         guard let text = String(data: data, encoding: .utf8) else { return nil }
         return parseFFmpegDuration(text)
+    }
+
+    /// Pulls the first video stream's codec name out of ffmpeg's banner.
+    /// Matches lines like `Stream #0:0(eng): Video: hevc (Main 10), …` and
+    /// returns `"hevc"`. Returns nil when there is no video stream line.
+    private static func parseFFmpegVideoCodec(_ output: String) -> String? {
+        let pattern = #"Stream\s*#\d+:\d+(?:\([^)]*\))?(?:\[[^\]]*\])?\s*:\s*Video:\s*([A-Za-z0-9_]+)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: output, range: NSRange(output.startIndex..., in: output)),
+              match.numberOfRanges >= 2,
+              let codecRange = Range(match.range(at: 1), in: output) else {
+            return nil
+        }
+        return String(output[codecRange]).lowercased()
     }
 
     private static func parseFFmpegDuration(_ output: String) -> Double? {
@@ -6341,6 +6778,8 @@ enum FFmpegRunner {
         let stderr = Pipe()
         process.standardError = stderr
         process.standardOutput = Pipe()
+        let waiter = ProcessExitWaiter()
+        waiter.install(on: process)
         do {
             try process.run()
         } catch {
@@ -6348,12 +6787,17 @@ enum FFmpegRunner {
             return false
         }
 
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            process.terminationHandler = { _ in cont.resume() }
-        }
+        FFmpegProcessRegistry.shared.register(process)
+        await waitForManagedProcess(process, waiter: waiter)
+        FFmpegProcessRegistry.shared.unregister(process)
+        process.terminationHandler = nil
 
         let elapsed = Date().timeIntervalSince(started)
         let exitCode = process.terminationStatus
+        if Task.isCancelled {
+            try? FileManager.default.removeItem(at: dest)
+            return false
+        }
         guard exitCode == 0, FileManager.default.fileExists(atPath: dest.path) else {
             let data = (try? stderr.fileHandleForReading.readToEnd()) ?? Data()
             let text = (String(data: data, encoding: .utf8) ?? "")
@@ -6404,19 +6848,128 @@ enum FFmpegRunner {
         process.arguments = args
         process.standardError = Pipe()
         process.standardOutput = Pipe()
+        let waiter = ProcessExitWaiter()
+        waiter.install(on: process)
         do {
             try process.run()
         } catch {
             return nil
         }
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            process.terminationHandler = { _ in cont.resume() }
+        FFmpegProcessRegistry.shared.register(process)
+        await waitForManagedProcess(process, waiter: waiter)
+        FFmpegProcessRegistry.shared.unregister(process)
+        process.terminationHandler = nil
+        guard !Task.isCancelled else {
+            try? FileManager.default.removeItem(at: dest)
+            return nil
         }
         if process.terminationStatus == 0, FileManager.default.fileExists(atPath: dest.path) {
             return dest
         }
         try? FileManager.default.removeItem(at: dest)
         return nil
+    }
+
+    private static func waitForManagedProcess(_ process: Process, waiter: ProcessExitWaiter) async {
+        let box = ManagedProcessBox(process)
+        await withTaskCancellationHandler {
+            await waiter.wait()
+        } onCancel: {
+            FFmpegProcessRegistry.shared.terminate(box.process)
+        }
+    }
+}
+
+private final class ManagedProcessBox: @unchecked Sendable {
+    let process: Process
+
+    init(_ process: Process) {
+        self.process = process
+    }
+}
+
+private final class ProcessExitWaiter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var didExit = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func install(on process: Process) {
+        process.terminationHandler = { [weak self] _ in
+            self?.signal()
+        }
+    }
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if didExit {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                self.continuation = continuation
+                lock.unlock()
+            }
+        }
+    }
+
+    private func signal() {
+        lock.lock()
+        didExit = true
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume()
+    }
+}
+
+private final class FFmpegProcessRegistry: @unchecked Sendable {
+    static let shared = FFmpegProcessRegistry()
+
+    private let lock = NSLock()
+    private var processes: [pid_t: Process] = [:]
+
+    func register(_ process: Process) {
+        guard process.isRunning else { return }
+        lock.lock()
+        processes[process.processIdentifier] = process
+        lock.unlock()
+    }
+
+    func unregister(_ process: Process) {
+        let pid = process.processIdentifier
+        lock.lock()
+        processes.removeValue(forKey: pid)
+        lock.unlock()
+    }
+
+    func terminate(_ process: Process) {
+        terminate(process, wait: false)
+    }
+
+    func terminateAll() {
+        lock.lock()
+        let running = Array(processes.values)
+        processes.removeAll()
+        lock.unlock()
+
+        for process in running {
+            terminate(process, wait: true)
+        }
+    }
+
+    private func terminate(_ process: Process, wait: Bool) {
+        guard process.isRunning else { return }
+        let pid = process.processIdentifier
+        process.terminate()
+        guard wait else { return }
+        let deadline = Date().addingTimeInterval(1.5)
+        while process.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        if process.isRunning {
+            kill(pid, SIGKILL)
+            process.waitUntilExit()
+        }
     }
 }
 
