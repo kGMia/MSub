@@ -2788,6 +2788,7 @@ struct SubtitleEditorPanel: View {
         case .yue: return Locale(identifier: "zh-HK")
         case .ja: return Locale(identifier: "ja-JP")
         case .ko: return Locale(identifier: "ko-KR")
+        default: return Locale.current
         }
     }
 

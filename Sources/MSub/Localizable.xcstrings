@@ -375,6 +375,17 @@
         }
       }
     },
+    "help.mega" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Mega-ASR routes each utterance internally. Auto language usually works, and known media languages can be set manually. It defaults to greedy decoding and a high token limit."
+          }
+        }
+      }
+    },
     "help.minSegment" : {
       "localizations" : {
         "en" : {
@@ -428,13 +439,35 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Hugging Face model id or local model directory. FireRed defaults to the local FireRedASR2-AED-mlx path; SenseVoice defaults to models/SenseVoiceSmall, or loads from Hugging Face if it is not downloaded."
+            "value" : "Hugging Face model id or local model directory. FireRed, SenseVoice, MiMo, and Mega-ASR prefer local directories under models, then use remote or cached models if needed."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Hugging Face 模型 ID 或本地模型目录。FireRed 默认使用本地 FireRedASR2-AED-mlx；SenseVoice 默认使用 models/SenseVoiceSmall，未下载时会尝试从 Hugging Face 加载。"
+            "value" : "Hugging Face 模型 ID 或本地模型目录。FireRed、SenseVoice、MiMo 和 Mega-ASR 都会优先使用 models 下的本地目录，未下载时会尝试使用远端或缓存模型。"
+          }
+        }
+      }
+    },
+    "help.model.mega" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Mega-ASR BF16 supports recognition in 30 languages and internal utterance routing. Language hints, max tokens, temperature, top-p, and top-k apply; FireRed AED controls do not."
+          }
+        }
+      }
+    },
+    "help.noNativeSpeakerLabels" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "For speaker labels, use pyannote diarization or ERes2NetV2 embedding clustering."
           }
         }
       }
@@ -1240,6 +1273,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "高级参数"
+          }
+        }
+      }
+    },
+    "settings.asrEngine.mega" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Mega-ASR"
           }
         }
       }

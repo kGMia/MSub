@@ -9,6 +9,7 @@ private struct BackendManifest: Decodable {
     let sourceSenseVoiceModelPath: String?
     let sourceMiMoModelPath: String?
     let sourceMiMoTokenizerPath: String?
+    let sourceMegaModelPath: String?
     let sourceFireRedVADModelPath: String?
     let sourceDiarizationModelPath: String?
     let sourceSpeakerRecognitionModelPath: String?
@@ -39,6 +40,7 @@ final class BackendService {
     private let fireRedRemoteModelID = "mlx-community/FireRedASR2-AED-mlx"
     private let fireRedModelPathKey = "msub.modelPath.fireredasr2"
     private let fireRedModelDownloadConsentKey = "msub.modelDownloadConsent.fireredasr2"
+    private let megaModelDirectoryName = "Mega-ASR-bf16"
     private let emotionModelDirectoryName = "emotion2vec_plus_base"
     private let emotionRemoteModelID = "emotion2vec/emotion2vec_plus_base"
     private let emotionModelPathKey = "msub.modelPath.emotion2vecPlusBase"
@@ -92,6 +94,9 @@ final class BackendService {
         }
         if let mimoModelPath = bundledOrWorkspaceMiMoModel(in: workspace, allowAuthorizationPrompt: false) {
             environment["MSUB_MIMO_MODEL"] = mimoModelPath.path
+        }
+        if let megaModelPath = bundledOrWorkspaceMegaModel(in: workspace, allowAuthorizationPrompt: false) {
+            environment["MSUB_MEGA_MODEL"] = megaModelPath.path
         }
         if let diarizationModelPath = bundledOrWorkspaceDiarizationModel(in: workspace) {
             environment["MSUB_DIARIZATION_MODEL"] = diarizationModelPath.path
@@ -197,6 +202,7 @@ final class BackendService {
         let expectedModelPath = expectedModelPath()
         let expectedSenseVoiceModelPath = expectedSenseVoiceModelPath()
         let expectedMiMoModelPath = expectedMiMoModelPath()
+        let expectedMegaModelPath = expectedMegaModelPath()
         let expectedBackendFingerprint = expectedBackendSourceFingerprint()
         if await healthCheck(
             url: baseURL,
@@ -204,6 +210,7 @@ final class BackendService {
             expectedModelPath: expectedModelPath,
             expectedSenseVoiceModelPath: expectedSenseVoiceModelPath,
             expectedMiMoModelPath: expectedMiMoModelPath,
+            expectedMegaModelPath: expectedMegaModelPath,
             expectedBackendFingerprint: expectedBackendFingerprint
         ) {
             isRunning = true
@@ -226,6 +233,7 @@ final class BackendService {
         let expectedModelPath = expectedModelPath()
         let expectedSenseVoiceModelPath = expectedSenseVoiceModelPath()
         let expectedMiMoModelPath = expectedMiMoModelPath()
+        let expectedMegaModelPath = expectedMegaModelPath()
         let expectedBackendFingerprint = expectedBackendSourceFingerprint()
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
@@ -235,6 +243,7 @@ final class BackendService {
                 expectedModelPath: expectedModelPath,
                 expectedSenseVoiceModelPath: expectedSenseVoiceModelPath,
                 expectedMiMoModelPath: expectedMiMoModelPath,
+                expectedMegaModelPath: expectedMegaModelPath,
                 expectedBackendFingerprint: expectedBackendFingerprint
             ) {
                 return true
@@ -430,6 +439,7 @@ final class BackendService {
         expectedModelPath: String?,
         expectedSenseVoiceModelPath: String?,
         expectedMiMoModelPath: String?,
+        expectedMegaModelPath: String?,
         expectedBackendFingerprint: String?
     ) async -> Bool {
         do {
@@ -458,7 +468,8 @@ final class BackendService {
                 baseURL: baseURL,
                 expectedModelPath: expectedModelPath,
                 expectedSenseVoiceModelPath: expectedSenseVoiceModelPath,
-                expectedMiMoModelPath: expectedMiMoModelPath
+                expectedMiMoModelPath: expectedMiMoModelPath,
+                expectedMegaModelPath: expectedMegaModelPath
             )
         } catch {
             return false
@@ -469,9 +480,13 @@ final class BackendService {
         baseURL: URL,
         expectedModelPath: String?,
         expectedSenseVoiceModelPath: String?,
-        expectedMiMoModelPath: String?
+        expectedMiMoModelPath: String?,
+        expectedMegaModelPath: String?
     ) async -> Bool {
-        guard expectedModelPath != nil || expectedSenseVoiceModelPath != nil || expectedMiMoModelPath != nil else { return true }
+        guard expectedModelPath != nil
+            || expectedSenseVoiceModelPath != nil
+            || expectedMiMoModelPath != nil
+            || expectedMegaModelPath != nil else { return true }
         do {
             let url = baseURL.appending(path: "/api/config")
             var request = URLRequest(url: url)
@@ -504,6 +519,14 @@ final class BackendService {
                     return false
                 }
             }
+            if let expectedMegaModelPath {
+                guard let models = object["models"] as? [[String: Any]],
+                      let mega = models.first(where: { ($0["engine"] as? String) == "mega" }),
+                      let defaultModel = mega["defaultModel"] as? String,
+                      pathsReferToSameFile(defaultModel, expectedMegaModelPath) else {
+                    return false
+                }
+            }
             return true
         } catch {
             return false
@@ -527,6 +550,14 @@ final class BackendService {
     private func expectedMiMoModelPath() -> String? {
         guard let workspace = findWorkspaceRoot(),
               let modelURL = bundledOrWorkspaceMiMoModel(in: workspace, allowAuthorizationPrompt: false) else {
+            return nil
+        }
+        return modelURL.standardizedFileURL.path
+    }
+
+    private func expectedMegaModelPath() -> String? {
+        guard let workspace = findWorkspaceRoot(),
+              let modelURL = bundledOrWorkspaceMegaModel(in: workspace, allowAuthorizationPrompt: false) else {
             return nil
         }
         return modelURL.standardizedFileURL.path
@@ -878,6 +909,40 @@ final class BackendService {
                allowPrompt: allowAuthorizationPrompt
            ),
            isValidMiMoTokenizerPathFromManifest(in: workspace, modelURL: sourceModelPath) {
+            return authorizedModelPath
+        }
+
+        return nil
+    }
+
+    private func bundledOrWorkspaceMegaModel(in workspace: URL, allowAuthorizationPrompt: Bool = true) -> URL? {
+        if let value = ProcessInfo.processInfo.environment["MSUB_MEGA_MODEL"], !value.isEmpty {
+            let modelURL = URL(fileURLWithPath: value).standardizedFileURL
+            if isValidModelDirectory(modelURL) {
+                return modelURL
+            }
+        }
+
+        let modelPath = workspace.appending(path: "models/\(megaModelDirectoryName)")
+        if isValidModelDirectory(modelPath) {
+            return modelPath
+        }
+        if !isBundledBackend(workspace),
+           let authorizedModelPath = authorizedSourceModelDirectory(
+               modelPath,
+               displayName: "Mega-ASR BF16",
+               allowPrompt: allowAuthorizationPrompt
+           ) {
+            return authorizedModelPath
+        }
+
+        if isBundledBackend(workspace),
+           let sourceModelPath = sourceMegaModelPathFromManifest(in: workspace),
+           let authorizedModelPath = authorizedSourceModelDirectory(
+               sourceModelPath,
+               displayName: "Mega-ASR BF16",
+               allowPrompt: allowAuthorizationPrompt
+           ) {
             return authorizedModelPath
         }
 
@@ -1449,6 +1514,17 @@ final class BackendService {
         guard let data = try? Data(contentsOf: manifestURL),
               let manifest = try? JSONDecoder().decode(BackendManifest.self, from: data),
               let path = manifest.sourceMiMoModelPath,
+              !path.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: path).standardizedFileURL
+    }
+
+    private func sourceMegaModelPathFromManifest(in workspace: URL) -> URL? {
+        let manifestURL = workspace.appending(path: "backend-manifest.json")
+        guard let data = try? Data(contentsOf: manifestURL),
+              let manifest = try? JSONDecoder().decode(BackendManifest.self, from: data),
+              let path = manifest.sourceMegaModelPath,
               !path.isEmpty else {
             return nil
         }

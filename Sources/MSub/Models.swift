@@ -5,6 +5,7 @@ enum ASREngine: String, CaseIterable, Codable, Identifiable {
     case fireredasr2
     case sensevoice
     case mimo
+    case mega
     case apple
 
     var id: String { rawValue }
@@ -22,8 +23,33 @@ enum RecognitionLanguage: String, CaseIterable, Codable, Identifiable {
     case zh
     case en
     case yue
+    case ar
+    case de
+    case fr
+    case es
+    case pt
+    case indonesian = "id"
+    case it
     case ja
     case ko
+    case ru
+    case th
+    case vi
+    case tr
+    case hi
+    case ms
+    case nl
+    case sv
+    case da
+    case fi
+    case pl
+    case cs
+    case fil
+    case fa
+    case el
+    case ro
+    case hu
+    case mk
     case nospeech
 
     var id: String { rawValue }

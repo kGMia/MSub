@@ -6,6 +6,14 @@ import Observation
 final class TranscriptionSettings {
     private static let persistedSettingsKey = "msub.transcriptionSettings.v1"
     private static let customPresetsKey = "msub.customRecognitionPresets.v1"
+    private static let mimoDefaultMaxTokens = 256
+    private static let mimoDefaultTemperature = 0.0
+    private static let mimoDefaultTopP = 0.95
+    private static let mimoDefaultTopK = 0
+    private static let megaDefaultMaxTokens = 8192
+    private static let megaDefaultTemperature = 0.0
+    private static let megaDefaultTopP = 1.0
+    private static let megaDefaultTopK = 0
 
     var model = ""
     var asrEngine: ASREngine = .fireredasr2
@@ -88,6 +96,11 @@ final class TranscriptionSettings {
         if lowercasedModel.contains("mimo") {
             return .mimo
         }
+        if lowercasedModel.contains("mega-asr")
+            || lowercasedModel.contains("mega_asr")
+            || lowercasedModel.contains("qwen3-asr") {
+            return .mega
+        }
         return .fireredasr2
     }
 
@@ -110,6 +123,18 @@ final class TranscriptionSettings {
         effectiveASREngine == .mimo
     }
 
+    var isMegaASRActive: Bool {
+        effectiveASREngine == .mega
+    }
+
+    var usesQwenGenerationControls: Bool {
+        isMiMoActive || isMegaASRActive
+    }
+
+    var generationMaxTokensRange: ClosedRange<Int> {
+        isMegaASRActive ? 1...8192 : 1...4096
+    }
+
     var isFireRedVADActive: Bool {
         segmentMode == .vad && effectiveVADEngine == .firered
     }
@@ -125,9 +150,43 @@ final class TranscriptionSettings {
     var supportedRecognitionLanguages: [RecognitionLanguage] {
         switch effectiveASREngine {
         case .sensevoice:
-            return RecognitionLanguage.allCases
+            return [.auto, .zh, .en, .yue, .ja, .ko, .nospeech]
         case .mimo:
             return [.zh, .en]
+        case .mega:
+            return [
+                .auto,
+                .zh,
+                .en,
+                .yue,
+                .ar,
+                .de,
+                .fr,
+                .es,
+                .pt,
+                .indonesian,
+                .it,
+                .ko,
+                .ru,
+                .th,
+                .vi,
+                .ja,
+                .tr,
+                .hi,
+                .ms,
+                .nl,
+                .sv,
+                .da,
+                .fi,
+                .pl,
+                .cs,
+                .fil,
+                .fa,
+                .el,
+                .ro,
+                .hu,
+                .mk,
+            ]
         case .apple:
             return [.zh, .en, .yue, .ja, .ko]
         case .fireredasr2, .auto:
@@ -181,11 +240,18 @@ final class TranscriptionSettings {
         case .sensevoice:
             senseVoiceUseITN = true
         case .mimo:
-            mimoTemperature = 0.0
-            mimoTopP = 0.95
-            mimoTopK = 0
+            mimoTemperature = Self.mimoDefaultTemperature
+            mimoTopP = Self.mimoDefaultTopP
+            mimoTopK = Self.mimoDefaultTopK
             if mimoMaxTokens < 1 {
-                mimoMaxTokens = 256
+                mimoMaxTokens = Self.mimoDefaultMaxTokens
+            }
+        case .mega:
+            mimoTemperature = Self.megaDefaultTemperature
+            mimoTopP = Self.megaDefaultTopP
+            mimoTopK = Self.megaDefaultTopK
+            if mimoMaxTokens < 1024 || mimoMaxTokens == Self.mimoDefaultMaxTokens {
+                mimoMaxTokens = Self.megaDefaultMaxTokens
             }
         case .apple:
             senseVoiceRichInfo = false
@@ -201,10 +267,17 @@ final class TranscriptionSettings {
         recognitionLanguage = .auto
         senseVoiceUseITN = true
         senseVoiceRichInfo = false
-        mimoMaxTokens = 256
-        mimoTemperature = 0.0
-        mimoTopP = 0.95
-        mimoTopK = 0
+        if effectiveASREngine == .mega {
+            mimoMaxTokens = Self.megaDefaultMaxTokens
+            mimoTemperature = Self.megaDefaultTemperature
+            mimoTopP = Self.megaDefaultTopP
+            mimoTopK = Self.megaDefaultTopK
+        } else {
+            mimoMaxTokens = Self.mimoDefaultMaxTokens
+            mimoTemperature = Self.mimoDefaultTemperature
+            mimoTopP = Self.mimoDefaultTopP
+            mimoTopK = Self.mimoDefaultTopK
+        }
         vadThreshold = -38.0
         fireRedVADThreshold = 0.4
         fireRedVADSmoothWindow = 5
@@ -386,7 +459,8 @@ final class TranscriptionSettings {
         }
         format = snapshot.format
         asrEngine = sanitizedASREngine(snapshot.asrEngine)
-        model = snapshot.model.isEmpty ? model : snapshot.model
+        let restoredModel = snapshot.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        model = restoredModel.isEmpty ? model : restoredModel
         recognitionLanguage = snapshot.recognitionLanguage
         senseVoiceUseITN = snapshot.senseVoiceUseITN
         senseVoiceRichInfo = snapshot.senseVoiceRichInfo
@@ -434,7 +508,7 @@ final class TranscriptionSettings {
 
     func formFields(includeOutput: Bool) -> [(String, String)] {
         var fields: [(String, String)] = [
-            ("model", model),
+            ("model", submittedModel),
             ("asr_engine", asrEngine.rawValue),
             ("language", recognitionLanguage.rawValue),
             ("use_itn", senseVoiceUseITN ? "true" : "false"),
@@ -478,6 +552,14 @@ final class TranscriptionSettings {
         }
 
         return fields
+    }
+
+    private var submittedModel: String {
+        let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            return trimmed
+        }
+        return currentModelInfo?.defaultModel ?? trimmed
     }
 }
 
@@ -687,6 +769,11 @@ struct RecognitionPresetSnapshot: Codable, Equatable {
             }
         case .sensevoice:
             senseVoiceUseITN = true
+        case .mega:
+            mimoMaxTokens = 8192
+            mimoTemperature = 0.0
+            mimoTopP = 1.0
+            mimoTopK = 0
         case .fireredasr2, .auto, .apple:
             break
         }
@@ -739,7 +826,7 @@ private struct PersistedTranscriptionSettings: Codable {
     init(settings: TranscriptionSettings) {
         format = settings.format
         asrEngine = settings.asrEngine
-        model = settings.model
+        model = settings.model.trimmingCharacters(in: .whitespacesAndNewlines)
         recognitionLanguage = settings.recognitionLanguage
         senseVoiceUseITN = settings.senseVoiceUseITN
         senseVoiceRichInfo = settings.senseVoiceRichInfo

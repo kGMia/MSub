@@ -150,7 +150,7 @@ struct ContentView: View {
     private static let unsavedCustomPresetTag = "custom:unsaved"
     private static let builtInPresetTagPrefix = "builtin:"
     private static let savedCustomPresetTagPrefix = "custom:"
-    private let visibleASREngines: [ASREngine] = [.fireredasr2, .sensevoice, .mimo, .apple]
+    private let visibleASREngines: [ASREngine] = [.fireredasr2, .sensevoice, .mimo, .mega, .apple]
     private let visibleVADEngines: [VADEngine] = [.firered, .energy]
     private let visibleSpeakerClusteringMethods: [SpeakerClusteringMethod] = [.spectral, .incremental]
 
@@ -1280,7 +1280,7 @@ struct ContentView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                } else if settings.isMiMoActive {
+                } else if settings.usesQwenGenerationControls {
                     stackedField(t("settings.recognitionLanguage"), help: t("help.recognitionLanguage")) {
                         Picker("", selection: $settings.recognitionLanguage) {
                             ForEach(settings.supportedRecognitionLanguages) { option in
@@ -1291,12 +1291,12 @@ struct ContentView: View {
                         .pickerStyle(.menu)
                     }
 
-                    stepperField(t("settings.mimoMaxTokens"), value: $settings.mimoMaxTokens, in: 1...4096, help: t("help.mimoMaxTokens"))
+                    stepperField(t("settings.mimoMaxTokens"), value: $settings.mimoMaxTokens, in: settings.generationMaxTokensRange, help: t("help.mimoMaxTokens"))
                     numericField(t("settings.mimoTemperature"), value: $settings.mimoTemperature, suffix: "", help: t("help.mimoTemperature"))
                     numericField(t("settings.mimoTopP"), value: $settings.mimoTopP, suffix: "", help: t("help.mimoTopP"))
                     stepperField(t("settings.mimoTopK"), value: $settings.mimoTopK, in: 0...1000, help: t("help.mimoTopK"))
 
-                    Text(t("help.mimo"))
+                    Text(settings.isMegaASRActive ? t("help.mega") : t("help.mimo"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1372,8 +1372,8 @@ struct ContentView: View {
                     }
                     .toggleStyle(.switch)
                 }
-                if settings.isMiMoActive {
-                    Text(t("help.mimoNoNativeSpeaker"))
+                if settings.isMiMoActive || settings.isMegaASRActive {
+                    Text(t("help.noNativeSpeakerLabels"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -4004,6 +4004,7 @@ struct ContentView: View {
         case .yue: return Locale(identifier: "zh-HK")
         case .ja: return Locale(identifier: "ja-JP")
         case .ko: return Locale(identifier: "ko-KR")
+        default: return Locale.current
         }
     }
 

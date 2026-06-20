@@ -799,7 +799,7 @@ struct PreferencesView: View {
     @State private var pendingRelaunchLanguage: AppLanguage?
     @State private var editingPresetID: UUID?
     @State private var editingPresetName = ""
-    private let visibleASREngines: [ASREngine] = [.fireredasr2, .sensevoice, .mimo, .apple]
+    private let visibleASREngines: [ASREngine] = [.fireredasr2, .sensevoice, .mimo, .mega, .apple]
     private let visibleVADEngines: [VADEngine] = [.firered, .energy]
 
     private var language: AppLanguage {
