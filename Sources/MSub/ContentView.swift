@@ -7,6 +7,12 @@ import SwiftUI
 import Translation
 import UniformTypeIdentifiers
 
+private struct ASRModelProfile {
+    let speed: String
+    let quality: String
+    let scenario: String
+}
+
 struct ContentView: View {
     @Environment(APIClient.self) private var api
     @Environment(BackendService.self) private var backend
@@ -41,6 +47,7 @@ struct ContentView: View {
     @State private var backendStatusBadgeFrame: CGRect = .zero
     @State private var isStatusDetailHovered = false
     @State private var statusDetailDismissTask: Task<Void, Never>?
+    @State private var processingStartedAt: Date?
     @State private var cueListSelection: Set<SubtitleCue.ID> = []
     @State private var cueListColumnCustomization = TableColumnCustomization<SubtitleCue>()
     @State private var isCueListTimingAdjustmentPresented = false
@@ -53,6 +60,7 @@ struct ContentView: View {
     @State private var isTranslationSheetPresented = false
     @State private var translationSheetSlotID: FileSlot.ID?
     @State private var translationSheetCueIDs: Set<SubtitleCue.ID> = []
+    @State private var translationSourceLanguage: TranslationLanguageChoice = .automatic
     @State private var translationTargetLanguage: TranslationLanguageChoice = .common[2]
     @State private var translationMode: TranslationOutputMode = .replace
     @State private var translationErrorMessage: String?
@@ -153,6 +161,8 @@ struct ContentView: View {
     private let visibleASREngines: [ASREngine] = [.fireredasr2, .sensevoice, .mimo, .mega, .apple]
     private let visibleVADEngines: [VADEngine] = [.firered, .energy]
     private let visibleSpeakerClusteringMethods: [SpeakerClusteringMethod] = [.spectral, .incremental]
+    private let visibleAudioEventFilterTypes: [AudioEventFilterType] = [.all, .nonLexical, .nonSpeech, .repetition, .lowSpeech]
+    private let visibleAudioEventFilterPresets: [AudioEventFilterPreset] = [.balanced, .strict, .broad]
 
     private func percentageText(_ ratio: Double) -> String {
         localizedPercentageText(ratio, language: language)
@@ -232,6 +242,7 @@ struct ContentView: View {
         .sheet(isPresented: $isTranslationSheetPresented) {
             TranslationSheet(
                 language: language,
+                sourceLanguage: $translationSourceLanguage,
                 targetLanguage: $translationTargetLanguage,
                 mode: $translationMode,
                 isWholeSlot: translationSheetCueIDs.isEmpty,
@@ -1115,14 +1126,9 @@ struct ContentView: View {
                         settings.selectASREngine(newValue)
                     }
                 }
+                modelProfileStrip(for: settings.effectiveASREngine)
 
-                if settings.effectiveASREngine == .apple {
-                    Text(modelHelpText())
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
+                if settings.effectiveASREngine != .apple {
                     stackedField(t("settings.model"), help: modelHelpText()) {
                         HStack(spacing: 6) {
                             TextField("", text: $settings.model)
@@ -1233,6 +1239,35 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
+                Toggle(isOn: $settings.audioEventFilter) {
+                    parameterLabel(t("settings.audioEventFilter"), help: t("help.audioEventFilter"))
+                }
+                .toggleStyle(.switch)
+                if settings.audioEventFilter {
+                    stackedField(t("settings.audioEventFilterType"), help: t("help.audioEventFilterType")) {
+                        Picker("", selection: $settings.audioEventFilterType) {
+                            ForEach(visibleAudioEventFilterTypes) { type in
+                                Text(audioEventFilterTypeTitle(type)).tag(type)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                    }
+                    stackedField(t("settings.audioEventPreset"), help: t("help.audioEventPreset")) {
+                        Picker("", selection: $settings.audioEventPreset) {
+                            ForEach(visibleAudioEventFilterPresets) { preset in
+                                Text(audioEventFilterPresetTitle(preset)).tag(preset)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .onChange(of: settings.audioEventPreset) { _, newValue in
+                            settings.audioEventThreshold = newValue.defaultThreshold
+                        }
+                    }
+                    numericField(t("settings.audioEventThreshold"), value: $settings.audioEventThreshold, suffix: "", help: t("help.audioEventThreshold"))
+                }
+
                 Button {
                     settings.resetRecognitionDefaults()
                 } label: {
@@ -1275,11 +1310,6 @@ struct ContentView: View {
                         parameterLabel(t("settings.useITN"), help: t("help.useITN"))
                     }
                     .toggleStyle(.switch)
-
-                    Text(t("help.senseVoice"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
                 } else if settings.usesQwenGenerationControls {
                     stackedField(t("settings.recognitionLanguage"), help: t("help.recognitionLanguage")) {
                         Picker("", selection: $settings.recognitionLanguage) {
@@ -1295,11 +1325,6 @@ struct ContentView: View {
                     numericField(t("settings.mimoTemperature"), value: $settings.mimoTemperature, suffix: "", help: t("help.mimoTemperature"))
                     numericField(t("settings.mimoTopP"), value: $settings.mimoTopP, suffix: "", help: t("help.mimoTopP"))
                     stepperField(t("settings.mimoTopK"), value: $settings.mimoTopK, in: 0...1000, help: t("help.mimoTopK"))
-
-                    Text(settings.isMegaASRActive ? t("help.mega") : t("help.mimo"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
                 } else if settings.effectiveASREngine == .apple {
                     stackedField(t("settings.recognitionLanguage"), help: t("help.recognitionLanguage")) {
                         Picker("", selection: $settings.recognitionLanguage) {
@@ -1320,11 +1345,6 @@ struct ContentView: View {
                         parameterLabel(t("settings.appleSpeechEtiquette"), help: t("help.appleSpeechEtiquette"))
                     }
                     .toggleStyle(.switch)
-
-                    Text(t("help.appleSpeech"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
                 } else {
                     stepperField(t("settings.beam"), value: $settings.beamSize, in: 1...8, help: t("help.beam"))
                 }
@@ -1371,12 +1391,6 @@ struct ContentView: View {
                         parameterLabel(t("settings.diarizeSpeakers"), help: t("help.diarizeSpeakers"))
                     }
                     .toggleStyle(.switch)
-                }
-                if settings.isMiMoActive || settings.isMegaASRActive {
-                    Text(t("help.noNativeSpeakerLabels"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if settings.diarizeSpeakers {
                     stackedField(t("settings.speakerLabelingEngine"), help: t("help.speakerLabelingEngine")) {
@@ -1661,6 +1675,13 @@ struct ContentView: View {
 
             if hasAnyStatusBadge {
                 HStack(spacing: 6) {
+                    if let remaining = estimatedRemainingText {
+                        statusCapsuleDetail(
+                            icon: "clock.fill",
+                            value: remaining,
+                            helpText: t("status.detail.remaining")
+                        )
+                    }
                     if let slot = activeSlot, slot.chunkTotal > 0 {
                         statusCapsuleDetail(
                             icon: "square.stack.3d.up.fill",
@@ -1708,6 +1729,7 @@ struct ContentView: View {
     }
 
     private var hasAnyStatusBadge: Bool {
+        if estimatedRemainingText != nil { return true }
         if let slot = activeSlot, slot.chunkTotal > 0 { return true }
         if files.count > 1 { return true }
         if let slot = activeSlot, !slot.segments.isEmpty { return true }
@@ -1732,6 +1754,50 @@ struct ContentView: View {
 
     private var progressPercentText: String {
         percentageText(aggregateProgress)
+    }
+
+    private var estimatedRemainingText: String? {
+        guard isProcessing, !isProcessingPaused, let processingStartedAt else { return nil }
+        let progress = min(max(aggregateProgress, 0), 0.999)
+        guard progress > 0.025 else { return t("status.remaining.calculating") }
+        let elapsed = Date().timeIntervalSince(processingStartedAt)
+        guard elapsed >= 4 else { return t("status.remaining.calculating") }
+        let remaining = elapsed * (1 - progress) / progress
+        guard remaining.isFinite, remaining > 0 else { return nil }
+        return "~\(compactDurationText(remaining))"
+    }
+
+    private func compactDurationText(_ seconds: TimeInterval) -> String {
+        let totalSeconds = max(1, Int(ceil(seconds)))
+        let secondUnit = t("duration.secondShort")
+        let minuteUnit = t("duration.minuteShort")
+        let hourUnit = t("duration.hourShort")
+        let dayUnit = t("duration.dayShort")
+        if totalSeconds < 60 {
+            return "\(totalSeconds)\(secondUnit)"
+        }
+        let totalMinutes = totalSeconds / 60
+        let remainingSeconds = totalSeconds % 60
+        if totalMinutes < 60 {
+            if remainingSeconds == 0 {
+                return "\(totalMinutes)\(minuteUnit)"
+            }
+            return "\(totalMinutes)\(minuteUnit) \(remainingSeconds)\(secondUnit)"
+        }
+        let totalHours = totalMinutes / 60
+        let remainingMinutes = totalMinutes % 60
+        if totalHours < 24 {
+            if remainingMinutes == 0 {
+                return "\(totalHours)\(hourUnit)"
+            }
+            return "\(totalHours)\(hourUnit) \(remainingMinutes)\(minuteUnit)"
+        }
+        let days = totalHours / 24
+        let remainingHours = totalHours % 24
+        if remainingHours == 0 {
+            return "\(days)\(dayUnit)"
+        }
+        return "\(days)\(dayUnit) \(remainingHours)\(hourUnit)"
     }
 
     private var compactStatusText: String {
@@ -1943,11 +2009,26 @@ struct ContentView: View {
         let segments = slot?.segments ?? []
         let duration = timelineDuration(for: slot)
         let clipRange = slot.flatMap { normalizedClipRange(for: $0) }
+        let flaggedSegmentCount = segments.filter(\.flagged).count
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text(t("segments.title"))
                     .font(.headline)
                 Spacer()
+                if flaggedSegmentCount > 0 {
+                    Button(role: .destructive) {
+                        deleteFlaggedSegments()
+                    } label: {
+                        Label(
+                            String(format: t("segments.deleteMarked"), flaggedSegmentCount),
+                            systemImage: "trash"
+                        )
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .disabled(isProcessing)
+                    .help(t("segments.deleteMarked.help"))
+                }
                 Text(segments.isEmpty ? t("segments.noPreview") : "\(segments.count) \(t("segments.count"))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -1983,21 +2064,56 @@ struct ContentView: View {
                                 Text("#\(segment.index)")
                                     .font(.caption.monospacedDigit().bold())
                                     .frame(width: 44, alignment: .leading)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(segment.flagged ? .orange : .secondary)
                                 Text(timeRange(segment))
                                     .font(.caption.monospacedDigit())
+                                let labelText = segmentLabelText(segment)
+                                if !labelText.isEmpty {
+                                    Text(labelText)
+                                        .font(.caption2)
+                                        .foregroundStyle(segment.flagged ? .orange : .secondary)
+                                        .lineLimit(1)
+                                }
                                 Spacer()
                                 Text("\(segment.duration, specifier: "%.2f")s")
                                     .font(.caption.monospacedDigit())
                                     .foregroundStyle(.secondary)
+                                Button {
+                                    toggleSegmentFlag(segment)
+                                } label: {
+                                    Image(systemName: segment.flagged ? "flag.fill" : "flag")
+                                        .frame(width: 16, height: 16)
+                                }
+                                .buttonStyle(.borderless)
+                                .controlSize(.small)
+                                .help(segment.flagged ? t("segments.unmark") : t("segments.mark"))
+                                Button {
+                                    previewSegment(segment)
+                                } label: {
+                                    Image(systemName: "play.circle")
+                                        .frame(width: 16, height: 16)
+                                }
+                                .buttonStyle(.borderless)
+                                .controlSize(.small)
+                                .help(t("segments.previewSegment"))
+                                Button(role: .destructive) {
+                                    deleteSegment(segment)
+                                } label: {
+                                    Image(systemName: "trash")
+                                        .frame(width: 16, height: 16)
+                                }
+                                .buttonStyle(.borderless)
+                                .controlSize(.small)
+                                .disabled(isProcessing || segments.count <= 1)
+                                .help(t("segments.delete"))
                             }
                             .padding(.horizontal, 10)
                             .padding(.vertical, 6)
+                            .background(segment.flagged ? Color.orange.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 6))
                             .background(.quinary, in: RoundedRectangle(cornerRadius: 6))
                             .contentShape(RoundedRectangle(cornerRadius: 6))
                             .onTapGesture {
-                                playback.seek(to: segment.start)
-                                playback.player.play()
+                                previewSegment(segment)
                             }
                             .help(t("segments.tapToPlay"))
                         }
@@ -2010,6 +2126,85 @@ struct ContentView: View {
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func segmentLabelText(_ segment: SubtitleSegment) -> String {
+        guard let label = segment.audioLabel, !label.isEmpty else {
+            return segment.flagged ? t("segments.marked") : ""
+        }
+        if label.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "speech" {
+            return segment.flagged ? t("segments.marked") : ""
+        }
+        if let score = segment.audioScore {
+            return "\(label) \(Int((score * 100).rounded()))%"
+        }
+        return label
+    }
+
+    private func previewSegment(_ segment: SubtitleSegment) {
+        playback.playRange(start: segment.start, end: segment.end)
+    }
+
+    private func toggleSegmentFlag(_ segment: SubtitleSegment) {
+        guard files.indices.contains(activeIndex),
+              let segmentIndex = files[activeIndex].segments.firstIndex(where: { $0.id == segment.id }) else { return }
+        withAnimation(.easeInOut(duration: 0.16)) {
+            files[activeIndex].segments[segmentIndex] = files[activeIndex].segments[segmentIndex]
+                .withFlagged(!files[activeIndex].segments[segmentIndex].flagged)
+        }
+        syncPreviewSegmentsForActiveSlot()
+    }
+
+    private func deleteSegment(_ segment: SubtitleSegment) {
+        guard files.indices.contains(activeIndex),
+              files[activeIndex].segments.count > 1 else { return }
+        withAnimation(.easeInOut(duration: 0.16)) {
+            files[activeIndex].segments.removeAll { $0.id == segment.id }
+            files[activeIndex].segments = reindexedSegments(files[activeIndex].segments)
+            files[activeIndex].statusDetail = "\(files[activeIndex].segments.count) \(t("segments.count"))"
+        }
+        syncPreviewSegmentsForActiveSlot()
+    }
+
+    private func deleteFlaggedSegments() {
+        guard files.indices.contains(activeIndex) else { return }
+        let flaggedCount = files[activeIndex].segments.filter(\.flagged).count
+        guard flaggedCount > 0 else { return }
+        guard files[activeIndex].segments.count > flaggedCount else {
+            errorMessage = t("segments.deleteMarked.emptyError")
+            return
+        }
+        withAnimation(.easeInOut(duration: 0.18)) {
+            files[activeIndex].segments.removeAll(where: \.flagged)
+            files[activeIndex].segments = reindexedSegments(files[activeIndex].segments)
+            files[activeIndex].statusDetail = "\(files[activeIndex].segments.count) \(t("segments.count"))"
+        }
+        syncPreviewSegmentsForActiveSlot()
+    }
+
+    private func reindexedSegments(_ segments: [SubtitleSegment]) -> [SubtitleSegment] {
+        segments.enumerated().map { offset, segment in
+            segment.reindexed(offset + 1)
+        }
+    }
+
+    private func syncPreviewSegmentsForActiveSlot() {
+        guard files.indices.contains(activeIndex),
+              let previewID = files[activeIndex].previewID else { return }
+        let segments = files[activeIndex].segments
+        let timeOffset = files[activeIndex].previewTimeOffset
+        Task {
+            do {
+                try await api.updatePreviewSegments(
+                    previewID: previewID,
+                    segments: segments,
+                    timeOffset: timeOffset
+                )
+            } catch {
+                AppLog.api.error("updatePreviewSegments failed: \(error.localizedDescription, privacy: .public)")
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     private func clipRangeRow(_ clipRange: MediaClipRange?) -> some View {
@@ -2686,9 +2881,7 @@ struct ContentView: View {
     }
 
     private func modelHelpText() -> String {
-        let key = "help.model.\(settings.effectiveASREngine.rawValue)"
-        let localized = t(key)
-        return localized == key ? t("help.model") : localized
+        t("help.model")
     }
 
     private func modelStatusText() -> String? {
@@ -2696,6 +2889,85 @@ struct ContentView: View {
         let availability = info.localModelAvailable ? t("model.localAvailable") : t("model.localMissing")
         let supports = info.supports.map(supportTitle).joined(separator: t("list.separator"))
         return String(format: t("model.status"), info.title, availability, supports)
+    }
+
+    private func modelProfileStrip(for engine: ASREngine) -> some View {
+        let profile = modelProfile(for: engine)
+        let columns = [GridItem(.adaptive(minimum: 100), spacing: 6, alignment: .leading)]
+        return LazyVGrid(columns: columns, alignment: .leading, spacing: 6) {
+            modelProfileChip(
+                title: t("model.profile.speed"),
+                value: profile.speed,
+                systemImage: "bolt.fill",
+                tint: .orange
+            )
+            modelProfileChip(
+                title: t("model.profile.quality"),
+                value: profile.quality,
+                systemImage: "sparkles",
+                tint: .blue
+            )
+            modelProfileChip(
+                title: t("model.profile.scenario"),
+                value: profile.scenario,
+                systemImage: "scope",
+                tint: .purple
+            )
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func modelProfileChip(title: String, value: String, systemImage: String, tint: Color) -> some View {
+        Label {
+            Text("\(title) \(value)")
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+        } icon: {
+            Image(systemName: systemImage)
+                .foregroundStyle(tint)
+        }
+        .font(.caption2.weight(.medium))
+        .padding(.horizontal, 7)
+        .padding(.vertical, 4)
+        .background(tint.opacity(0.1), in: Capsule())
+        .help("\(title) \(value)")
+    }
+
+    private func modelProfile(for engine: ASREngine) -> ASRModelProfile {
+        switch engine {
+        case .auto:
+            return modelProfile(for: settings.effectiveASREngine == .auto ? .fireredasr2 : settings.effectiveASREngine)
+        case .fireredasr2:
+            return ASRModelProfile(
+                speed: t("model.profile.speed.medium"),
+                quality: t("model.profile.quality.high"),
+                scenario: t("model.profile.scenario.fireredasr2")
+            )
+        case .sensevoice:
+            return ASRModelProfile(
+                speed: t("model.profile.speed.fast"),
+                quality: t("model.profile.quality.good"),
+                scenario: t("model.profile.scenario.sensevoice")
+            )
+        case .mimo:
+            return ASRModelProfile(
+                speed: t("model.profile.speed.slow"),
+                quality: t("model.profile.quality.high"),
+                scenario: t("model.profile.scenario.mimo")
+            )
+        case .mega:
+            return ASRModelProfile(
+                speed: t("model.profile.speed.slow"),
+                quality: t("model.profile.quality.veryHigh"),
+                scenario: t("model.profile.scenario.mega")
+            )
+        case .apple:
+            return ASRModelProfile(
+                speed: t("model.profile.speed.veryFast"),
+                quality: t("model.profile.quality.good"),
+                scenario: t("model.profile.scenario.apple")
+            )
+        }
     }
 
     private func modelStatusCard(_ info: ASRModelInfo) -> some View {
@@ -2788,6 +3060,14 @@ struct ContentView: View {
         t("settings.vadEngine.\(engine.rawValue)")
     }
 
+    private func audioEventFilterTypeTitle(_ type: AudioEventFilterType) -> String {
+        t("settings.audioEventFilterType.\(type.rawValue)")
+    }
+
+    private func audioEventFilterPresetTitle(_ preset: AudioEventFilterPreset) -> String {
+        t("settings.audioEventPreset.\(preset.rawValue)")
+    }
+
     private func speakerLabelingEngineTitle(_ engine: SpeakerLabelingEngine) -> String {
         t("settings.speakerLabelingEngine.\(engine.rawValue)")
     }
@@ -2846,15 +3126,26 @@ struct ContentView: View {
     }
 
     private func stepperField(_ title: String, value: Binding<Int>, in range: ClosedRange<Int>, help: String) -> some View {
-        HStack(spacing: 6) {
+        let clampedValue = Binding<Int>(
+            get: {
+                min(max(value.wrappedValue, range.lowerBound), range.upperBound)
+            },
+            set: { newValue in
+                value.wrappedValue = min(max(newValue, range.lowerBound), range.upperBound)
+            }
+        )
+        return HStack(spacing: 6) {
             parameterLabel(title, help: help)
             Spacer(minLength: 4)
-            Text("\(value.wrappedValue)")
-                .font(.caption.monospacedDigit().bold())
-                .frame(minWidth: 26, alignment: .trailing)
+            TextField("", value: clampedValue, format: .number)
+                .textFieldStyle(.roundedBorder)
+                .font(.caption.monospacedDigit())
+                .multilineTextAlignment(.trailing)
+                .labelsHidden()
+                .frame(width: 64)
                 .contentTransition(.numericText())
                 .animation(.smooth(duration: 0.18), value: value.wrappedValue)
-            Stepper("", value: value, in: range)
+            Stepper("", value: clampedValue, in: range)
                 .labelsHidden()
                 .controlSize(.mini)
         }
@@ -2939,18 +3230,20 @@ struct ContentView: View {
 
     func translateCues(in slotID: FileSlot.ID, cueIDs: Set<SubtitleCue.ID>, to target: TranslationLanguageChoice, mode: TranslationOutputMode = .replace) {
         guard !cueIDs.isEmpty else { return }
+        guard let targetLanguage = target.language else { return }
         translationTargetLanguage = target
         startTranslation(
             job: TranslationJob(
                 scope: .cues(slotID: slotID, cueIDs: cueIDs, mode: mode),
                 source: nil,
-                target: target.language
+                target: targetLanguage
             )
         )
     }
 
     private func startTranslationFromSheet() {
         guard let slotID = translationSheetSlotID else { return }
+        guard let targetLanguage = translationTargetLanguage.language else { return }
         let scope: TranslationJob.Scope
         if translationSheetCueIDs.isEmpty {
             scope = .wholeSlot(slotID: slotID, mode: translationMode)
@@ -2960,8 +3253,8 @@ struct ContentView: View {
         startTranslation(
             job: TranslationJob(
                 scope: scope,
-                source: nil,
-                target: translationTargetLanguage.language
+                source: translationSourceLanguage.language,
+                target: targetLanguage
             )
         )
     }
@@ -2997,7 +3290,7 @@ struct ContentView: View {
     private func translateWholeSlot(slotID: FileSlot.ID, mode: TranslationOutputMode, session: TranslationSession) async throws {
         guard let index = files.firstIndex(where: { $0.id == slotID }) else { return }
         let originals = files[index].cues.map(\.text)
-        let translated = try await TranslationUtility.translateBatch(originals, using: session)
+        let translated = try await TranslationUtility.translateBatch(originals, using: session, contextual: true)
         guard files.indices.contains(index), files[index].id == slotID else { return }
         applyTranslation(originals: originals, translated: translated, to: index, mode: mode, restrictTo: nil)
     }
@@ -3574,10 +3867,12 @@ struct ContentView: View {
     private func previewAll() async {
         guard hasFiles, !isProcessing else { return }
         isProcessing = true
+        processingStartedAt = Date()
         guard await ensureBackendReady() else {
             if isProcessing {
                 errorMessage = backend.message
                 isProcessing = false
+                processingStartedAt = nil
             }
             return
         }
@@ -3588,6 +3883,7 @@ struct ContentView: View {
             defer {
                 isProcessing = false
                 isProcessingPaused = false
+                processingStartedAt = nil
                 processingTask = nil
             }
             for index in files.indices {
@@ -3604,11 +3900,13 @@ struct ContentView: View {
     private func transcribeAll() async {
         guard hasFiles, !isProcessing else { return }
         isProcessing = true
+        processingStartedAt = Date()
         if !settings.effectiveASREngine.isLocal {
             guard await ensureBackendReady() else {
                 if isProcessing {
                     errorMessage = backend.message
                     isProcessing = false
+                    processingStartedAt = nil
                 }
                 return
             }
@@ -3623,6 +3921,7 @@ struct ContentView: View {
             defer {
                 isProcessing = false
                 isProcessingPaused = false
+                processingStartedAt = nil
                 processingTask = nil
             }
             for index in files.indices {
@@ -3760,6 +4059,7 @@ struct ContentView: View {
             }
         }
         isProcessing = false
+        processingStartedAt = nil
     }
 
     private func preparedMediaInput(for slot: FileSlot, clipRange: MediaClipRange?) async throws -> PreparedMediaInput {
@@ -3807,6 +4107,9 @@ struct ContentView: View {
             $0.statusKey = clipRange == nil ? "status.detecting" : "status.clippingMedia"
             $0.statusDetail = clipRange.map { clipRangeSummary($0) } ?? url.lastPathComponent
             $0.progress = 0
+            $0.chunkCurrent = 0
+            $0.chunkTotal = 0
+            $0.jobID = nil
             $0.failureMessage = nil
             $0.failureTrace = nil
             $0.failureLogText = nil
@@ -3822,42 +4125,51 @@ struct ContentView: View {
                     $0.statusDetail = clipRange.map { clipRangeSummary($0) } ?? url.lastPathComponent
                 }
             }
-            let payload = try await api.preview(fileURL: preparedInput.uploadURL, settings: settings)
-            let segments = shiftedSegments(payload.segments, by: preparedInput.timeOffset)
             update(at: index) {
-                $0.duration = preparedInput.clipRange == nil
-                    ? max($0.duration, payload.duration)
-                    : max($0.duration, displayDuration, preparedInput.clipRange?.end ?? 0, segments.map(\.end).max() ?? 0)
-                if preparedInput.clipRange == nil {
-                    $0.mediaInfo = payload.mediaInfo ?? $0.mediaInfo
-                }
-                $0.segments = segments
-                $0.previewID = payload.previewId ?? payload.id
-                $0.previewSettingsKey = reuseKey
-                $0.previewTimeOffset = preparedInput.timeOffset
-                $0.statusKey = "status.previewReady"
-                $0.statusDetail = "\(payload.count) \(t("segments.count"))"
-                $0.processingState = .done
-                $0.progress = 1
+                $0.progress = max($0.progress, 0.02)
+                $0.statusKey = "status.detecting"
             }
-        } catch {
-            let details = recordFailureDetails(
+            let created = try await api.createPreviewJob(fileURL: preparedInput.uploadURL, settings: settings)
+            update(at: index) {
+                $0.jobID = created.id
+                $0.progress = max($0.progress, 0.02)
+                $0.statusKey = "status.detecting"
+            }
+            try await pollPreview(
+                jobID: created.id,
                 fileIndex: index,
-                jobID: nil,
-                message: error.localizedDescription,
-                trace: nil,
-                logText: nil,
-                logFilename: nil
+                timeOffset: preparedInput.timeOffset,
+                reuseKey: reuseKey,
+                displayDuration: displayDuration,
+                clipRange: preparedInput.clipRange
             )
-            update(at: index) {
-                $0.statusKey = "status.previewFailed"
-                $0.statusDetail = error.localizedDescription
-                $0.processingState = .failed
-                $0.progress = 0
-                $0.previewID = nil
-                $0.previewSettingsKey = nil
+        } catch {
+            if Task.isCancelled {
+                update(at: index) {
+                    $0.processingState = .cancelled
+                    $0.statusKey = "status.cancelled"
+                    $0.statusDetail = ""
+                }
+            } else {
+                let existingDetails = files.indices.contains(index) ? failureDetails(for: files[index]) : nil
+                let details = existingDetails ?? recordFailureDetails(
+                    fileIndex: index,
+                    jobID: files.indices.contains(index) ? files[index].jobID : nil,
+                    message: error.localizedDescription,
+                    trace: nil,
+                    logText: nil,
+                    logFilename: nil
+                )
+                update(at: index) {
+                    $0.statusKey = "status.previewFailed"
+                    $0.statusDetail = error.localizedDescription
+                    $0.processingState = .failed
+                    $0.progress = 0
+                    $0.previewID = nil
+                    $0.previewSettingsKey = nil
+                }
+                failureDetails = details
             }
-            failureDetails = details
         }
     }
 
@@ -4008,12 +4320,104 @@ struct ContentView: View {
         }
     }
 
+    private func pollPreview(
+        jobID: String,
+        fileIndex: Int,
+        timeOffset: Double,
+        reuseKey: String,
+        displayDuration: Double,
+        clipRange: MediaClipRange?
+    ) async throws {
+        while !Task.isCancelled {
+            let job = try await api.jobStatus(id: jobID)
+            let total = max(job.total ?? 100, 1)
+            let current = max(job.current ?? 0, 0)
+            let progress = min(max(Double(current) / Double(total), 0), 0.99)
+            let progressText = job.progressText ?? ""
+
+            update(at: fileIndex) {
+                $0.progress = progress
+                $0.chunkCurrent = 0
+                $0.chunkTotal = 0
+                if job.status == "paused" {
+                    $0.statusKey = "status.paused"
+                    $0.statusDetail = progressText
+                } else if job.pauseRequested == true {
+                    $0.statusKey = "status.pausePending"
+                    $0.statusDetail = progressText
+                } else if job.status == "queued" || job.status == "waiting" {
+                    $0.statusKey = "status.starting"
+                    $0.statusDetail = progressText.isEmpty ? job.status : progressText
+                } else {
+                    $0.statusKey = progressText.localizedCaseInsensitiveContains("loading")
+                        ? "status.loading"
+                        : "status.detecting"
+                    $0.statusDetail = progressText
+                }
+            }
+
+            if job.status == "done" {
+                guard let payloadSegments = job.segments else {
+                    throw NSError(
+                        domain: "MSub.Preview",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: t("status.previewFailed")]
+                    )
+                }
+                let segments = shiftedSegments(payloadSegments, by: timeOffset)
+                update(at: fileIndex) {
+                    $0.duration = clipRange == nil
+                        ? max($0.duration, job.duration ?? 0)
+                        : max($0.duration, displayDuration, clipRange?.end ?? 0, segments.map(\.end).max() ?? 0)
+                    if clipRange == nil {
+                        $0.mediaInfo = job.mediaInfo ?? $0.mediaInfo
+                    }
+                    $0.segments = segments
+                    $0.previewID = job.previewId ?? job.id
+                    $0.previewSettingsKey = job.settingsKey ?? reuseKey
+                    $0.previewTimeOffset = timeOffset
+                    $0.statusKey = "status.previewReady"
+                    $0.statusDetail = "\(job.count ?? segments.count) \(t("segments.count"))"
+                    $0.processingState = .done
+                    $0.progress = 1
+                }
+                return
+            }
+            if job.status == "cancelled" {
+                update(at: fileIndex) {
+                    $0.processingState = .cancelled
+                    $0.statusKey = "status.cancelled"
+                    $0.statusDetail = ""
+                    $0.progress = 0
+                }
+                return
+            }
+            if job.status == "error" {
+                let message = job.error ?? t("status.previewFailed")
+                let log = try? await api.fetchJobLog(jobID: jobID)
+                let logText = log.flatMap { String(data: $0.data, encoding: .utf8) }
+                let details = recordFailureDetails(
+                    fileIndex: fileIndex,
+                    jobID: jobID,
+                    message: message,
+                    trace: job.errorTrace,
+                    logText: logText,
+                    logFilename: log?.filename
+                )
+                failureDetails = details
+                throw JobFailureError(message: message)
+            }
+            try await Task.sleep(for: .milliseconds(500))
+        }
+    }
+
     private func poll(jobID: String, fileIndex: Int, timeOffset: Double) async throws {
         while !Task.isCancelled {
             let job = try await api.jobStatus(id: jobID)
             let total = max(job.total ?? 0, 0)
             let current = max(job.current ?? 0, 0)
-            let progress = total > 0 ? Double(current) / Double(total) : 0
+            let fractionalCurrent = min(max(job.fractionalCurrent ?? Double(current), 0), Double(max(total, 0)))
+            let progress = total > 0 ? fractionalCurrent / Double(total) : 0
 
             update(at: fileIndex) {
                 $0.progress = progress
@@ -4027,7 +4431,7 @@ struct ContentView: View {
                     $0.statusDetail = job.progressText ?? ""
                 } else if job.status == "running", total > 0 {
                     $0.statusKey = "status.transcribing"
-                    $0.statusDetail = "\(current) / \(total)"
+                    $0.statusDetail = job.progressText ?? "\(current) / \(total)"
                 } else if job.status == "running" {
                     let progressText = job.progressText ?? ""
                     $0.statusKey = progressText == "Loading model" ? "status.loading" : "status.transcribing"
@@ -4458,12 +4862,22 @@ struct ContentView: View {
             let start = max(segment.start, range.start)
             let end = min(segment.end, range.end)
             guard end - start > 0.05 else { return nil }
-            return SubtitleSegment(index: 0, start: start - range.start, end: end - range.start, duration: end - start)
+            return SubtitleSegment(
+                index: 0,
+                start: start - range.start,
+                end: end - range.start,
+                duration: end - start,
+                audioLabel: segment.audioLabel,
+                audioScore: segment.audioScore,
+                speechScore: segment.speechScore,
+                repetitionScore: segment.repetitionScore,
+                flagged: segment.flagged
+            )
         }
         return clipped
         .enumerated()
         .map { offset, segment in
-            SubtitleSegment(index: offset + 1, start: segment.start, end: segment.end, duration: segment.duration)
+            segment.reindexed(offset + 1)
         }
     }
 
@@ -4487,7 +4901,12 @@ struct ContentView: View {
                 index: $0.index,
                 start: $0.start + offset,
                 end: $0.end + offset,
-                duration: $0.duration
+                duration: $0.duration,
+                audioLabel: $0.audioLabel,
+                audioScore: $0.audioScore,
+                speechScore: $0.speechScore,
+                repetitionScore: $0.repetitionScore,
+                flagged: $0.flagged
             )
         }
     }
@@ -4701,7 +5120,6 @@ private struct FileChipView: View {
                 .allowsHitTesting(isHovering)
             }
             .frame(width: 14, height: 14)
-            .animation(.easeInOut(duration: 0.18), value: isHovering)
 
             Text(slot.url.lastPathComponent)
                 .font(.caption)
@@ -4730,15 +5148,17 @@ private struct FileChipView: View {
             )
         )
         .scaleEffect(isDropTarget ? 1.04 : 1)
+        .geometryGroup()
         .animation(.easeInOut(duration: 0.18), value: isDropTarget)
-        .animation(.easeInOut(duration: 0.22), value: isHovering)
-        .animation(.easeInOut(duration: 0.22), value: nameMaxWidth)
+        .animation(.spring(response: 0.36, dampingFraction: 0.86), value: nameMaxWidth)
         .contentShape(Capsule())
         .onTapGesture {
             onSelect()
         }
         .onHover { hovering in
-            isHovering = hovering
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                isHovering = hovering
+            }
         }
         .help(statusHelp)
         .contextMenu {

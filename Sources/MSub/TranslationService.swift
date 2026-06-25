@@ -12,16 +12,27 @@ enum TranslationOutputMode: String, CaseIterable, Identifiable {
 /// A common target language identifier the user can pick.
 struct TranslationLanguageChoice: Identifiable, Hashable {
     let id: String
-    let language: Locale.Language
+    let language: Locale.Language?
 
     init(_ identifier: String) {
         self.id = identifier
         self.language = Locale.Language(identifier: identifier)
     }
 
+    private init(id: String, language: Locale.Language?) {
+        self.id = id
+        self.language = language
+    }
+
+    var isAutomatic: Bool {
+        language == nil
+    }
+
     var localizedTitle: String {
         Locale.current.localizedString(forIdentifier: id) ?? id
     }
+
+    static let automatic = TranslationLanguageChoice(id: "auto", language: nil)
 
     static let common: [TranslationLanguageChoice] = [
         TranslationLanguageChoice("zh-Hans"),
@@ -41,6 +52,8 @@ struct TranslationLanguageChoice: Identifiable, Hashable {
         TranslationLanguageChoice("th"),
         TranslationLanguageChoice("vi")
     ]
+
+    static let sourceChoices: [TranslationLanguageChoice] = [.automatic] + common
 }
 
 /// Describes a pending translation request. The view layer uses this to set up
@@ -73,21 +86,177 @@ final class TranslationUndoCoordinator {
 }
 
 enum TranslationUtility {
+    private static let contextualBatchMaxCues = 24
+    private static let contextualBatchMaxCharacters = 3_600
+
     /// Translates an array of strings preserving order. Empty strings are
     /// returned untouched without contacting the session.
     @MainActor
     static func translateBatch(
         _ sources: [String],
-        using session: TranslationSession
+        using session: TranslationSession,
+        contextual: Bool = false
     ) async throws -> [String] {
+        if contextual {
+            return await translateContextualBatch(sources, using: session)
+        }
+        return await translateIndividually(sources, using: session)
+    }
+
+    @MainActor
+    private static func translateIndividually(
+        _ sources: [String],
+        using session: TranslationSession
+    ) async -> [String] {
         var results = sources
         for (index, text) in sources.enumerated() {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
-            let response = try await session.translate(text)
-            results[index] = response.targetText
+            do {
+                let response = try await session.translate(text)
+                results[index] = response.targetText
+            } catch {
+                continue
+            }
         }
         return results
+    }
+
+    @MainActor
+    private static func translateContextualBatch(
+        _ sources: [String],
+        using session: TranslationSession
+    ) async -> [String] {
+        var results = sources
+        for group in contextualGroups(for: sources) {
+            let packet = makeContextualPacket(sources: sources, indices: group)
+            do {
+                let response = try await session.translate(packet)
+                let parsed = parseContextualPacket(response.targetText)
+                let missing = apply(parsed: parsed, to: &results, indices: group)
+                if !missing.isEmpty {
+                    let recovered = await translateMissingIndividually(
+                        missing,
+                        sources: sources,
+                        using: session
+                    )
+                    for (index, translated) in recovered {
+                        results[index] = translated
+                    }
+                }
+            } catch {
+                let recovered = await translateMissingIndividually(
+                    group,
+                    sources: sources,
+                    using: session
+                )
+                for (index, translated) in recovered {
+                    results[index] = translated
+                }
+            }
+        }
+        return results
+    }
+
+    private static func contextualGroups(for sources: [String]) -> [[Int]] {
+        var groups: [[Int]] = []
+        var current: [Int] = []
+        var characterCount = 0
+        for index in sources.indices {
+            let trimmed = sources[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let nextCount = characterCount + trimmed.count + 12
+            if !current.isEmpty,
+               (current.count >= contextualBatchMaxCues || nextCount > contextualBatchMaxCharacters) {
+                groups.append(current)
+                current = []
+                characterCount = 0
+            }
+            current.append(index)
+            characterCount += trimmed.count + 12
+        }
+        if !current.isEmpty {
+            groups.append(current)
+        }
+        return groups
+    }
+
+    private static func makeContextualPacket(sources: [String], indices: [Int]) -> String {
+        indices.enumerated().map { offset, sourceIndex in
+            let marker = String(format: "#%03d:", offset + 1)
+            let text = sources[sourceIndex]
+                .replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return "\(marker) \(text)"
+        }
+        .joined(separator: "\n")
+    }
+
+    private static func parseContextualPacket(_ text: String) -> [Int: String] {
+        var parsed: [Int: String] = [:]
+        var currentNumber: Int?
+        let pattern = #"^\s*(?:#|＃)?\s*(\d{1,4})\s*[:：.)、-]?\s*(.*)$"#
+        let regex = try? NSRegularExpression(pattern: pattern)
+        for line in text.components(separatedBy: .newlines) {
+            let range = NSRange(line.startIndex..<line.endIndex, in: line)
+            if let match = regex?.firstMatch(in: line, range: range),
+               let numberRange = Range(match.range(at: 1), in: line),
+               let number = Int(line[numberRange]) {
+                let body: String
+                if let bodyRange = Range(match.range(at: 2), in: line) {
+                    body = String(line[bodyRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+                } else {
+                    body = ""
+                }
+                parsed[number] = body
+                currentNumber = number
+            } else if let currentNumber {
+                let continuation = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !continuation.isEmpty else { continue }
+                let existing = parsed[currentNumber] ?? ""
+                parsed[currentNumber] = existing.isEmpty ? continuation : "\(existing)\n\(continuation)"
+            }
+        }
+        return parsed
+    }
+
+    @MainActor
+    private static func translateMissingIndividually(
+        _ indices: [Int],
+        sources: [String],
+        using session: TranslationSession
+    ) async -> [Int: String] {
+        var recovered: [Int: String] = [:]
+        for index in indices {
+            let text = sources[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { continue }
+            do {
+                let response = try await session.translate(sources[index])
+                recovered[index] = response.targetText
+            } catch {
+                continue
+            }
+        }
+        return recovered
+    }
+
+    private static func apply(
+        parsed: [Int: String],
+        to results: inout [String],
+        indices: [Int]
+    ) -> [Int] {
+        var missing: [Int] = []
+        for (offset, sourceIndex) in indices.enumerated() {
+            let markerNumber = offset + 1
+            guard let translated = parsed[markerNumber]?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !translated.isEmpty else {
+                missing.append(sourceIndex)
+                continue
+            }
+            results[sourceIndex] = translated
+        }
+        return missing
     }
 
     static func combine(original: String, translated: String, mode: TranslationOutputMode) -> String {

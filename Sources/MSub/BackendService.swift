@@ -14,6 +14,7 @@ private struct BackendManifest: Decodable {
     let sourceDiarizationModelPath: String?
     let sourceSpeakerRecognitionModelPath: String?
     let sourceEmotionModelPath: String?
+    let sourceAudioEventModelPath: String?
 }
 
 @MainActor
@@ -45,6 +46,8 @@ final class BackendService {
     private let emotionRemoteModelID = "emotion2vec/emotion2vec_plus_base"
     private let emotionModelPathKey = "msub.modelPath.emotion2vecPlusBase"
     private let emotionModelDownloadConsentKey = "msub.modelDownloadConsent.emotion2vecPlusBase"
+    private let audioEventModelDirectoryName = "ast-finetuned-audioset-10-10-0.4593"
+    private let audioEventModelPathKey = "msub.modelPath.astAudioSet"
     private let speakerRecognitionModelDirectoryName = "speech_eres2netv2_sv_zh-cn_16k-common"
     private let speakerRecognitionRemoteModelID = "iic/speech_eres2netv2_sv_zh-cn_16k-common"
     private let speakerRecognitionModelPathKey = "msub.modelPath.eres2netv2Speaker"
@@ -110,6 +113,9 @@ final class BackendService {
             environment["MSUB_EMOTION_MODEL"] = emotionModelPath.path
         } else if UserDefaults.standard.bool(forKey: emotionModelDownloadConsentKey) {
             environment["MSUB_EMOTION_MODEL"] = emotionRemoteModelID
+        }
+        if let audioEventModelPath = bundledOrWorkspaceAudioEventModel(in: workspace) {
+            environment["MSUB_AUDIO_EVENT_MODEL"] = audioEventModelPath.path
         }
         if let fireRedVADModelPath = bundledOrWorkspaceFireRedVADModel(in: workspace) {
             environment["MSUB_FIRERED_VAD_MODEL"] = fireRedVADModelPath.path
@@ -1029,6 +1035,17 @@ final class BackendService {
         )
     }
 
+    private func bundledOrWorkspaceAudioEventModel(in workspace: URL) -> URL? {
+        bundledOrWorkspaceAuxiliaryModel(
+            in: workspace,
+            environmentKey: "MSUB_AUDIO_EVENT_MODEL",
+            modelDirectoryName: audioEventModelDirectoryName,
+            manifestPath: sourceAudioEventModelPathFromManifest(in: workspace),
+            persistedPathKey: audioEventModelPathKey,
+            validator: isValidAudioEventModelDirectory
+        )
+    }
+
     private func bundledOrWorkspaceAuxiliaryModel(
         in workspace: URL,
         environmentKey: String,
@@ -1590,6 +1607,17 @@ final class BackendService {
         return URL(fileURLWithPath: path).standardizedFileURL
     }
 
+    private func sourceAudioEventModelPathFromManifest(in workspace: URL) -> URL? {
+        let manifestURL = workspace.appending(path: "backend-manifest.json")
+        guard let data = try? Data(contentsOf: manifestURL),
+              let manifest = try? JSONDecoder().decode(BackendManifest.self, from: data),
+              let path = manifest.sourceAudioEventModelPath,
+              !path.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: path).standardizedFileURL
+    }
+
     private func sourceFireRedVADModelPathFromManifest(in workspace: URL) -> URL? {
         let manifestURL = workspace.appending(path: "backend-manifest.json")
         guard let data = try? Data(contentsOf: manifestURL),
@@ -1640,6 +1668,22 @@ final class BackendService {
 
     private func isValidSpeakerRecognitionModelDirectory(_ url: URL) -> Bool {
         isNonEmptyDirectory(url)
+    }
+
+    private func isValidAudioEventModelDirectory(_ url: URL) -> Bool {
+        guard isNonEmptyDirectory(url),
+              FileManager.default.fileExists(atPath: url.appending(path: "config.json").path),
+              let contents = try? FileManager.default.contentsOfDirectory(
+                  at: url,
+                  includingPropertiesForKeys: nil
+              ) else {
+            return false
+        }
+        return contents.contains { file in
+            let name = file.lastPathComponent.lowercased()
+            let ext = file.pathExtension.lowercased()
+            return ext == "safetensors" || name == "pytorch_model.bin" || ext == "bin"
+        }
     }
 
     private func isValidFireRedVADModelDirectory(_ url: URL) -> Bool {

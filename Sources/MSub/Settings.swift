@@ -10,7 +10,7 @@ final class TranscriptionSettings {
     private static let mimoDefaultTemperature = 0.0
     private static let mimoDefaultTopP = 0.95
     private static let mimoDefaultTopK = 0
-    private static let megaDefaultMaxTokens = 8192
+    private static let megaDefaultMaxTokens = 512
     private static let megaDefaultTemperature = 0.0
     private static let megaDefaultTopP = 1.0
     private static let megaDefaultTopK = 0
@@ -39,6 +39,12 @@ final class TranscriptionSettings {
     var vadPadding = 0.12
     var vadMinSegment = 0.8
     var chunkSeconds = 20.0
+    var audioEventFilter = false
+    var audioEventModel = ""
+    var audioEventModelAvailable = false
+    var audioEventThreshold = 0.45
+    var audioEventFilterType: AudioEventFilterType = .all
+    var audioEventPreset: AudioEventFilterPreset = .balanced
     var beamSize = 3
     var minConfidence = 0.0
     var lineChars = 18
@@ -76,6 +82,8 @@ final class TranscriptionSettings {
         model = config.defaultModel
         emotionModel = config.defaultEmotionModel ?? "emotion2vec/emotion2vec_plus_base"
         emotionModelAvailable = config.emotionModelAvailable ?? false
+        audioEventModel = config.defaultAudioEventModel ?? "MIT/ast-finetuned-audioset-10-10-0.4593"
+        audioEventModelAvailable = config.audioEventModelAvailable ?? false
         speakerLabelingEngine = config.defaultSpeakerLabelingEngine ?? .pyannote
         speakerClusteringMethod = sanitizedSpeakerClusteringMethod(config.defaultSpeakerClusteringMethod ?? .spectral)
         speakerRecognitionModel = config.defaultSpeakerRecognitionModel ?? "iic/speech_eres2netv2_sv_zh-cn_16k-common"
@@ -250,7 +258,7 @@ final class TranscriptionSettings {
             mimoTemperature = Self.megaDefaultTemperature
             mimoTopP = Self.megaDefaultTopP
             mimoTopK = Self.megaDefaultTopK
-            if mimoMaxTokens < 1024 || mimoMaxTokens == Self.mimoDefaultMaxTokens {
+            if mimoMaxTokens < 1 || mimoMaxTokens == Self.mimoDefaultMaxTokens || mimoMaxTokens == 8192 {
                 mimoMaxTokens = Self.megaDefaultMaxTokens
             }
         case .apple:
@@ -288,6 +296,10 @@ final class TranscriptionSettings {
         vadPadding = 0.12
         vadMinSegment = 0.8
         chunkSeconds = 20.0
+        audioEventFilter = false
+        audioEventThreshold = 0.45
+        audioEventFilterType = .all
+        audioEventPreset = .balanced
         beamSize = 3
         minConfidence = 0.0
         lineChars = 18
@@ -334,6 +346,10 @@ final class TranscriptionSettings {
         vadPadding = snapshot.vadPadding
         vadMinSegment = snapshot.vadMinSegment
         chunkSeconds = snapshot.chunkSeconds
+        audioEventFilter = snapshot.audioEventFilter ?? false
+        audioEventThreshold = snapshot.audioEventThreshold ?? 0.45
+        audioEventFilterType = snapshot.audioEventFilterType ?? .all
+        audioEventPreset = snapshot.audioEventPreset ?? .balanced
         beamSize = snapshot.beamSize
         minConfidence = snapshot.minConfidence
         lineChars = snapshot.lineChars
@@ -480,6 +496,14 @@ final class TranscriptionSettings {
         vadPadding = snapshot.vadPadding
         vadMinSegment = snapshot.vadMinSegment
         chunkSeconds = snapshot.chunkSeconds
+        audioEventFilter = snapshot.audioEventFilter ?? false
+        if let audioEventModel = snapshot.audioEventModel?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !audioEventModel.isEmpty {
+            self.audioEventModel = audioEventModel
+        }
+        audioEventThreshold = snapshot.audioEventThreshold ?? 0.45
+        audioEventFilterType = snapshot.audioEventFilterType ?? .all
+        audioEventPreset = snapshot.audioEventPreset ?? .balanced
         beamSize = snapshot.beamSize
         minConfidence = snapshot.minConfidence
         lineChars = snapshot.lineChars
@@ -524,6 +548,11 @@ final class TranscriptionSettings {
             ("vad_min_speech_seconds", "\(vadMinSpeech)"),
             ("vad_padding_seconds", "\(vadPadding)"),
             ("vad_min_segment_seconds", "\(vadMinSegment)"),
+            ("audio_event_filter", audioEventFilter ? "true" : "false"),
+            ("audio_event_model", audioEventModel.trimmingCharacters(in: .whitespacesAndNewlines)),
+            ("audio_event_threshold", "\(audioEventThreshold)"),
+            ("audio_event_filter_type", audioEventFilterType.rawValue),
+            ("audio_event_preset", audioEventPreset.rawValue),
             ("chunk_seconds", "\(chunkSeconds)")
         ]
 
@@ -589,6 +618,10 @@ struct RecognitionPresetSnapshot: Codable, Equatable {
     var vadPadding: Double
     var vadMinSegment: Double
     var chunkSeconds: Double
+    var audioEventFilter: Bool?
+    var audioEventThreshold: Double?
+    var audioEventFilterType: AudioEventFilterType?
+    var audioEventPreset: AudioEventFilterPreset?
     var beamSize: Int
     var minConfidence: Double
     var lineChars: Int
@@ -623,6 +656,10 @@ struct RecognitionPresetSnapshot: Codable, Equatable {
         vadPadding = settings.vadPadding
         vadMinSegment = settings.vadMinSegment
         chunkSeconds = settings.chunkSeconds
+        audioEventFilter = settings.audioEventFilter
+        audioEventThreshold = settings.audioEventThreshold
+        audioEventFilterType = settings.audioEventFilterType
+        audioEventPreset = settings.audioEventPreset
         beamSize = settings.beamSize
         minConfidence = settings.minConfidence
         lineChars = settings.lineChars
@@ -663,6 +700,10 @@ struct RecognitionPresetSnapshot: Codable, Equatable {
         vadPadding = 0.12
         vadMinSegment = 0.8
         chunkSeconds = 20.0
+        audioEventFilter = false
+        audioEventThreshold = 0.45
+        audioEventFilterType = .all
+        audioEventPreset = .balanced
         beamSize = 3
         minConfidence = 0.0
         lineChars = 18
@@ -803,6 +844,11 @@ private struct PersistedTranscriptionSettings: Codable {
     var vadPadding: Double
     var vadMinSegment: Double
     var chunkSeconds: Double
+    var audioEventFilter: Bool?
+    var audioEventModel: String?
+    var audioEventThreshold: Double?
+    var audioEventFilterType: AudioEventFilterType?
+    var audioEventPreset: AudioEventFilterPreset?
     var beamSize: Int
     var minConfidence: Double
     var lineChars: Int
@@ -846,6 +892,11 @@ private struct PersistedTranscriptionSettings: Codable {
         vadPadding = settings.vadPadding
         vadMinSegment = settings.vadMinSegment
         chunkSeconds = settings.chunkSeconds
+        audioEventFilter = settings.audioEventFilter
+        audioEventModel = settings.audioEventModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        audioEventThreshold = settings.audioEventThreshold
+        audioEventFilterType = settings.audioEventFilterType
+        audioEventPreset = settings.audioEventPreset
         beamSize = settings.beamSize
         minConfidence = settings.minConfidence
         lineChars = settings.lineChars

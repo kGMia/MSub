@@ -3,6 +3,7 @@ import SwiftUI
 /// Sheet for selecting target language + output mode before running a full-text translation.
 struct TranslationSheet: View {
     let language: AppLanguage
+    @Binding var sourceLanguage: TranslationLanguageChoice
     @Binding var targetLanguage: TranslationLanguageChoice
     @Binding var mode: TranslationOutputMode
     let isWholeSlot: Bool
@@ -24,6 +25,18 @@ struct TranslationSheet: View {
             Text(isWholeSlot ? t("translation.scope.whole") : t("translation.scope.partial"))
                 .font(.callout)
                 .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(t("translation.sourceLanguage"))
+                    .font(.callout.weight(.medium))
+                Picker("", selection: $sourceLanguage) {
+                    ForEach(TranslationLanguageChoice.sourceChoices) { choice in
+                        Text(choice.isAutomatic ? t("translation.source.auto") : choice.localizedTitle).tag(choice)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+            }
 
             VStack(alignment: .leading, spacing: 6) {
                 Text(t("translation.targetLanguage"))
@@ -63,6 +76,6 @@ struct TranslationSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 380)
+        .frame(width: 400)
     }
 }

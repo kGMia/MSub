@@ -5,10 +5,11 @@ import Observation
 @Observable
 final class APIClient {
     var baseURL = URL(string: "http://127.0.0.1:7860")!
+    @ObservationIgnored private let session = APIClient.makeSession()
 
     func fetchConfig() async throws -> AppConfig {
         let url = baseURL.appending(path: "/api/config")
-        let (data, response) = try await URLSession.shared.data(from: url)
+        let (data, response) = try await session.data(from: url)
         try validate(response: response, data: data)
         return try JSONDecoder().decode(AppConfig.self, from: data)
     }
@@ -16,9 +17,17 @@ final class APIClient {
     func preview(fileURL: URL, settings: TranscriptionSettings) async throws -> SegmentPreview {
         let (request, bodyURL) = try multipartRequest(path: "/api/preview", fileURL: fileURL, settings: settings, includeOutput: false)
         defer { try? FileManager.default.removeItem(at: bodyURL) }
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         try validate(response: response, data: data)
         return try JSONDecoder().decode(SegmentPreview.self, from: data)
+    }
+
+    func createPreviewJob(fileURL: URL, settings: TranscriptionSettings) async throws -> JobCreated {
+        let (request, bodyURL) = try multipartRequest(path: "/api/preview/jobs", fileURL: fileURL, settings: settings, includeOutput: false)
+        defer { try? FileManager.default.removeItem(at: bodyURL) }
+        let (data, response) = try await session.data(for: request)
+        try validate(response: response, data: data)
+        return try JSONDecoder().decode(JobCreated.self, from: data)
     }
 
     func createJob(
@@ -37,7 +46,7 @@ final class APIClient {
             extraFields: extraFields
         )
         defer { try? FileManager.default.removeItem(at: bodyURL) }
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         try validate(response: response, data: data)
         return try JSONDecoder().decode(JobCreated.self, from: data)
     }
@@ -45,35 +54,48 @@ final class APIClient {
     func createJobFromPreview(previewID: String, settings: TranscriptionSettings) async throws -> JobCreated {
         let (request, bodyURL) = try multipartRequest(path: "/api/jobs", fileURL: nil, settings: settings, includeOutput: true, extraFields: [("preview_id", previewID)])
         defer { try? FileManager.default.removeItem(at: bodyURL) }
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         try validate(response: response, data: data)
         return try JSONDecoder().decode(JobCreated.self, from: data)
+    }
+
+    func updatePreviewSegments(previewID: String, segments: [SubtitleSegment], timeOffset: Double) async throws {
+        struct Payload: Encodable {
+            let timeOffset: Double
+            let segments: [SubtitleSegment]
+        }
+        var request = URLRequest(url: baseURL.appending(path: "/api/preview/\(previewID)/segments"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(Payload(timeOffset: timeOffset, segments: segments))
+        let (data, response) = try await session.data(for: request)
+        try validate(response: response, data: data)
     }
 
     func cancelJob(id: String) async throws {
         var request = URLRequest(url: baseURL.appending(path: "/api/jobs/\(id)/cancel"))
         request.httpMethod = "POST"
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         try validate(response: response, data: data)
     }
 
     func pauseJob(id: String) async throws {
         var request = URLRequest(url: baseURL.appending(path: "/api/jobs/\(id)/pause"))
         request.httpMethod = "POST"
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         try validate(response: response, data: data)
     }
 
     func resumeJob(id: String) async throws {
         var request = URLRequest(url: baseURL.appending(path: "/api/jobs/\(id)/resume"))
         request.httpMethod = "POST"
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         try validate(response: response, data: data)
     }
 
     func jobStatus(id: String) async throws -> JobStatus {
         let url = baseURL.appending(path: "/api/jobs/\(id)")
-        let (data, response) = try await URLSession.shared.data(from: url)
+        let (data, response) = try await session.data(from: url)
         try validate(response: response, data: data)
         return try JSONDecoder().decode(JobStatus.self, from: data)
     }
@@ -84,7 +106,7 @@ final class APIClient {
 
     func fetchOutput(jobID: String) async throws -> DownloadedOutput {
         let url = downloadURL(jobID: jobID)
-        let (data, response) = try await URLSession.shared.data(from: url)
+        let (data, response) = try await session.data(from: url)
         try validate(response: response, data: data)
         let filename = filename(from: response) ?? "subtitle.srt"
         return DownloadedOutput(data: data, filename: filename)
@@ -92,10 +114,18 @@ final class APIClient {
 
     func fetchJobLog(jobID: String) async throws -> DownloadedOutput {
         let url = baseURL.appending(path: "/api/jobs/\(jobID)/log")
-        let (data, response) = try await URLSession.shared.data(from: url)
+        let (data, response) = try await session.data(from: url)
         try validate(response: response, data: data)
         let filename = filename(from: response) ?? "\(jobID).log"
         return DownloadedOutput(data: data, filename: filename)
+    }
+
+    private static func makeSession() -> URLSession {
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = 30 * 60
+        configuration.timeoutIntervalForResource = 60 * 60
+        configuration.waitsForConnectivity = true
+        return URLSession(configuration: configuration)
     }
 
     private func multipartRequest(
@@ -109,6 +139,7 @@ final class APIClient {
         let boundary = "Boundary-\(UUID().uuidString)"
         var request = URLRequest(url: baseURL.appending(path: path))
         request.httpMethod = "POST"
+        request.timeoutInterval = path.hasPrefix("/api/preview") ? 30 * 60 : 10 * 60
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
         let bodyURL = FileManager.default.temporaryDirectory

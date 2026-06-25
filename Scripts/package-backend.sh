@@ -17,6 +17,7 @@ FIRERED_VAD_MODEL_SOURCE="$REPO_ROOT/models/FireRedVAD"
 DIARIZATION_MODEL_SOURCE="$REPO_ROOT/models/pyannote-speaker-diarization-community-1"
 SPEAKER_RECOGNITION_MODEL_SOURCE="$REPO_ROOT/models/speech_eres2netv2_sv_zh-cn_16k-common"
 EMOTION_MODEL_SOURCE="$REPO_ROOT/models/emotion2vec_plus_base"
+AUDIO_EVENT_MODEL_SOURCE="$REPO_ROOT/models/ast-finetuned-audioset-10-10-0.4593"
 
 mkdir -p "$DEST"
 rm -rf "$DEST/.uv-cache"
@@ -48,6 +49,7 @@ INCLUDE_FIRERED_VAD_MODEL="${MSUB_INCLUDE_FIRERED_VAD_MODEL:-1}"
 INCLUDE_DIARIZATION_MODEL="${MSUB_INCLUDE_DIARIZATION_MODEL:-0}"
 INCLUDE_SPEAKER_RECOGNITION_MODEL="${MSUB_INCLUDE_SPEAKER_RECOGNITION_MODEL:-0}"
 INCLUDE_EMOTION_MODEL="${MSUB_INCLUDE_EMOTION_MODEL:-0}"
+INCLUDE_AUDIO_EVENT_MODEL="${MSUB_INCLUDE_AUDIO_EVENT_MODEL:-0}"
 INCLUDE_VENV="${MSUB_INCLUDE_VENV:-1}"
 INCLUDE_PYTHON_RUNTIME="${MSUB_INCLUDE_PYTHON_RUNTIME:-$INCLUDE_VENV}"
 SOURCE_MODEL_JSON="null"
@@ -59,6 +61,7 @@ SOURCE_FIRERED_VAD_MODEL_JSON="null"
 SOURCE_DIARIZATION_MODEL_JSON="null"
 SOURCE_SPEAKER_RECOGNITION_MODEL_JSON="null"
 SOURCE_EMOTION_MODEL_JSON="null"
+SOURCE_AUDIO_EVENT_MODEL_JSON="null"
 
 if [ -f "$MODEL_SOURCE/model.safetensors" ] && [ -f "$MODEL_SOURCE/config.json" ]; then
     SOURCE_MODEL_JSON="\"$MODEL_SOURCE\""
@@ -94,6 +97,10 @@ fi
 
 if [ -d "$EMOTION_MODEL_SOURCE" ] && [ "$(find "$EMOTION_MODEL_SOURCE" -mindepth 1 -maxdepth 1 | head -n 1)" ]; then
     SOURCE_EMOTION_MODEL_JSON="\"$EMOTION_MODEL_SOURCE\""
+fi
+
+if [ -f "$AUDIO_EVENT_MODEL_SOURCE/config.json" ] && { ls "$AUDIO_EVENT_MODEL_SOURCE"/*.safetensors >/dev/null 2>&1 || [ -f "$AUDIO_EVENT_MODEL_SOURCE/pytorch_model.bin" ]; }; then
+    SOURCE_AUDIO_EVENT_MODEL_JSON="\"$AUDIO_EVENT_MODEL_SOURCE\""
 fi
 
 if [ "$INCLUDE_VENV" = "1" ]; then
@@ -273,6 +280,22 @@ else
     echo "Skipping emotion2vec model copy. Set MSUB_INCLUDE_EMOTION_MODEL=1 to embed local emotion weights."
 fi
 
+if [ "$INCLUDE_AUDIO_EVENT_MODEL" = "1" ]; then
+    if [ "$SOURCE_AUDIO_EVENT_MODEL_JSON" = "null" ]; then
+        echo "MSUB_INCLUDE_AUDIO_EVENT_MODEL=1 but $AUDIO_EVENT_MODEL_SOURCE is not a valid AST AudioSet model directory." >&2
+        exit 1
+    fi
+    mkdir -p "$DEST/models"
+    rsync -a --delete --delete-excluded \
+        --exclude ".incomplete" \
+        --exclude ".DS_Store" \
+        --exclude "__pycache__" \
+        "$AUDIO_EVENT_MODEL_SOURCE" \
+        "$DEST/models/"
+else
+    echo "Skipping AST AudioSet model copy. Set MSUB_INCLUDE_AUDIO_EVENT_MODEL=1 to embed local audio event weights."
+fi
+
 cat > "$DEST/backend-manifest.json" <<EOF
 {
   "name": "MSub backend",
@@ -284,6 +307,7 @@ cat > "$DEST/backend-manifest.json" <<EOF
   "includeDiarizationModel": "$INCLUDE_DIARIZATION_MODEL",
   "includeSpeakerRecognitionModel": "$INCLUDE_SPEAKER_RECOGNITION_MODEL",
   "includeEmotionModel": "$INCLUDE_EMOTION_MODEL",
+  "includeAudioEventModel": "$INCLUDE_AUDIO_EVENT_MODEL",
   "includeVenv": "$INCLUDE_VENV",
   "includePythonRuntime": "$INCLUDE_PYTHON_RUNTIME",
   "sourceModelPath": $SOURCE_MODEL_JSON,
@@ -295,6 +319,7 @@ cat > "$DEST/backend-manifest.json" <<EOF
   "sourceDiarizationModelPath": $SOURCE_DIARIZATION_MODEL_JSON,
   "sourceSpeakerRecognitionModelPath": $SOURCE_SPEAKER_RECOGNITION_MODEL_JSON,
   "sourceEmotionModelPath": $SOURCE_EMOTION_MODEL_JSON,
+  "sourceAudioEventModelPath": $SOURCE_AUDIO_EVENT_MODEL_JSON,
   "modelPath": "models/FireRedASR2-AED-mlx",
   "senseVoiceModelPath": "models/SenseVoiceSmall",
   "mimoModelPath": "models/MiMo-V2.5-ASR-MLX-4bit",
@@ -304,6 +329,7 @@ cat > "$DEST/backend-manifest.json" <<EOF
   "diarizationModelPath": "models/pyannote-speaker-diarization-community-1",
   "speakerRecognitionModelPath": "models/speech_eres2netv2_sv_zh-cn_16k-common",
   "emotionModelPath": "models/emotion2vec_plus_base",
+  "audioEventModelPath": "models/ast-finetuned-audioset-10-10-0.4593",
   "entrypoint": "msub-web"
 }
 EOF

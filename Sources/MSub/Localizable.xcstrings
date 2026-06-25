@@ -263,6 +263,70 @@
         }
       }
     },
+    "duration.dayShort" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "d"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "天"
+          }
+        }
+      }
+    },
+    "duration.hourShort" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "h"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "时"
+          }
+        }
+      }
+    },
+    "duration.minuteShort" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "m"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "分"
+          }
+        }
+      }
+    },
+    "duration.secondShort" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "s"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "秒"
+          }
+        }
+      }
+    },
     "error.title" : {
       "localizations" : {
         "en" : {
@@ -275,6 +339,50 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "错误"
+          }
+        }
+      }
+    },
+    "help.audioEventFilter" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Uses AST AudioSet during segment preview to mark likely laughter, shouting, breathing, and other non-lexical voice; first use may download the model."
+          }
+        }
+      }
+    },
+    "help.audioEventFilterType" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Choose which candidates are marked automatically, then delete marked segments from the segment list."
+          }
+        }
+      }
+    },
+    "help.audioEventPreset" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Strict reduces false marks; Broad keeps more suspicious candidates for manual review."
+          }
+        }
+      }
+    },
+    "help.audioEventThreshold" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Marking threshold. Higher reduces false marks, lower keeps more candidates; 0.45 is a reasonable starting point."
           }
         }
       }
@@ -439,13 +547,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Hugging Face model id or local model directory. FireRed, SenseVoice, MiMo, and Mega-ASR prefer local directories under models, then use remote or cached models if needed."
+            "value" : "Enter a Hugging Face model id or a local model folder."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Hugging Face 模型 ID 或本地模型目录。FireRed、SenseVoice、MiMo 和 Mega-ASR 都会优先使用 models 下的本地目录，未下载时会尝试使用远端或缓存模型。"
+            "value" : "可填写 Hugging Face 模型 ID 或本地模型目录。"
           }
         }
       }
@@ -654,6 +762,246 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在检查更新…"
+          }
+        }
+      }
+    },
+    "model.profile.quality" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Quality"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "质量"
+          }
+        }
+      }
+    },
+    "model.profile.quality.good" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Good"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "中高"
+          }
+        }
+      }
+    },
+    "model.profile.quality.high" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "High"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "高"
+          }
+        }
+      }
+    },
+    "model.profile.quality.veryHigh" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Very high"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "很高"
+          }
+        }
+      }
+    },
+    "model.profile.scenario" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Use"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "场景"
+          }
+        }
+      }
+    },
+    "model.profile.scenario.apple" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Light local use"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "轻量本机"
+          }
+        }
+      }
+    },
+    "model.profile.scenario.fireredasr2" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Chinese video"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "中文/长视频"
+          }
+        }
+      }
+    },
+    "model.profile.scenario.mega" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Multilingual"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "多语种长片"
+          }
+        }
+      }
+    },
+    "model.profile.scenario.mimo" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ZH/EN speech"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "中英文口播"
+          }
+        }
+      }
+    },
+    "model.profile.scenario.sensevoice" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Fast draft"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "快速草稿"
+          }
+        }
+      }
+    },
+    "model.profile.speed" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Speed"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "速度"
+          }
+        }
+      }
+    },
+    "model.profile.speed.fast" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Fast"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "快"
+          }
+        }
+      }
+    },
+    "model.profile.speed.medium" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Medium"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "中"
+          }
+        }
+      }
+    },
+    "model.profile.speed.slow" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Slow"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "慢"
+          }
+        }
+      }
+    },
+    "model.profile.speed.veryFast" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Very fast"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "很快"
           }
         }
       }
@@ -1181,6 +1529,50 @@
         }
       }
     },
+    "segments.delete" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Delete segment"
+          }
+        }
+      }
+    },
+    "segments.deleteMarked" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Delete marked %d"
+          }
+        }
+      }
+    },
+    "segments.deleteMarked.emptyError" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "At least one segment must remain."
+          }
+        }
+      }
+    },
+    "segments.deleteMarked.help" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Delete all automatically or manually marked segments and sync this preview plan."
+          }
+        }
+      }
+    },
     "segments.empty" : {
       "localizations" : {
         "en" : {
@@ -1193,6 +1585,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "先预览分段，时间轴会显示在这里。"
+          }
+        }
+      }
+    },
+    "segments.mark" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Mark segment"
+          }
+        }
+      }
+    },
+    "segments.marked" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Marked"
           }
         }
       }
@@ -1229,6 +1643,17 @@
         }
       }
     },
+    "segments.previewSegment" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Preview segment"
+          }
+        }
+      }
+    },
     "segments.speech" : {
       "localizations" : {
         "en" : {
@@ -1261,6 +1686,17 @@
         }
       }
     },
+    "segments.unmark" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Unmark segment"
+          }
+        }
+      }
+    },
     "settings.advanced" : {
       "localizations" : {
         "en" : {
@@ -1284,6 +1720,138 @@
           "stringUnit" : {
             "state" : "new",
             "value" : "Mega-ASR"
+          }
+        }
+      }
+    },
+    "settings.audioEventFilter" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Mark non-lexical voice"
+          }
+        }
+      }
+    },
+    "settings.audioEventFilterType" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Filter type"
+          }
+        }
+      }
+    },
+    "settings.audioEventFilterType.all" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "All"
+          }
+        }
+      }
+    },
+    "settings.audioEventFilterType.low_speech" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Low speech probability"
+          }
+        }
+      }
+    },
+    "settings.audioEventFilterType.non_lexical" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Non-lexical voice"
+          }
+        }
+      }
+    },
+    "settings.audioEventFilterType.non_speech" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Non-speech events"
+          }
+        }
+      }
+    },
+    "settings.audioEventFilterType.repetition" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Repetition"
+          }
+        }
+      }
+    },
+    "settings.audioEventPreset" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Filter preset"
+          }
+        }
+      }
+    },
+    "settings.audioEventPreset.balanced" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Balanced"
+          }
+        }
+      }
+    },
+    "settings.audioEventPreset.broad" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Broad"
+          }
+        }
+      }
+    },
+    "settings.audioEventPreset.strict" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Strict"
+          }
+        }
+      }
+    },
+    "settings.audioEventThreshold" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audio event threshold"
           }
         }
       }
@@ -1660,6 +2228,22 @@
         }
       }
     },
+    "status.detail.remaining" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Estimated remaining time"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "预计剩余时间"
+          }
+        }
+      }
+    },
     "status.done" : {
       "localizations" : {
         "en" : {
@@ -1752,6 +2336,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "就绪"
+          }
+        }
+      }
+    },
+    "status.remaining.calculating" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Calculating"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "计算中"
           }
         }
       }
@@ -1868,6 +2468,38 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "分段"
+          }
+        }
+      }
+    },
+    "translation.source.auto" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Auto-detect"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "自动检测"
+          }
+        }
+      }
+    },
+    "translation.sourceLanguage" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Source language"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "原文语言"
           }
         }
       }
