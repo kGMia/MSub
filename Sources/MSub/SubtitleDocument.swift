@@ -7464,6 +7464,14 @@ private enum WaveformLoader {
                 return downsample(cached.samples, targetSamples: targetSamples)
             }
 
+            // Disk layer: decoded waveforms persist across sessions, so
+            // reopening a file shows its waveform without re-decoding audio.
+            if let diskSamples = loadFromDisk(key: key, targetSamples: targetSamples) {
+                entries[key] = Entry(samples: diskSamples, sampleCount: diskSamples.count, lastAccess: Date())
+                trimIfNeeded()
+                return downsample(diskSamples, targetSamples: targetSamples)
+            }
+
             let samples = await WaveformLoader.readSamples(for: url, targetSamples: targetSamples)
             guard !samples.isEmpty else { return [] }
 
@@ -7474,7 +7482,64 @@ private enum WaveformLoader {
 
             entries[key] = Entry(samples: samples, sampleCount: samples.count, lastAccess: Date())
             trimIfNeeded()
+            storeToDisk(key: key, samples: samples)
             return samples
+        }
+
+        private static let diskCacheURL: URL? = {
+            guard let base = FileManager.default.urls(
+                for: .applicationSupportDirectory, in: .userDomainMask
+            ).first else { return nil }
+            let dir = base.appendingPathComponent("MSub/WaveformCache", isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            return dir
+        }()
+        private let maxDiskCacheFiles = 50
+
+        private func diskCacheFile(forKey key: String) -> URL? {
+            guard let dir = Self.diskCacheURL else { return nil }
+            let digest = SHA256.hash(data: Data(key.utf8))
+            let name = digest.map { String(format: "%02x", $0) }.joined()
+            return dir.appendingPathComponent(name + ".wave")
+        }
+
+        private func loadFromDisk(key: String, targetSamples: Int) -> [CGFloat]? {
+            guard let file = diskCacheFile(forKey: key),
+                  let data = try? Data(contentsOf: file),
+                  data.count >= targetSamples * MemoryLayout<Float32>.size,
+                  data.count % MemoryLayout<Float32>.size == 0 else { return nil }
+            let floats = data.withUnsafeBytes { Array($0.bindMemory(to: Float32.self)) }
+            return floats.map { CGFloat($0) }
+        }
+
+        private func storeToDisk(key: String, samples: [CGFloat]) {
+            guard samples.count >= 720, let file = diskCacheFile(forKey: key) else { return }
+            if let existingSize = (try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize,
+               existingSize >= samples.count * MemoryLayout<Float32>.size {
+                return
+            }
+            let floats = samples.map { Float32($0) }
+            let data = floats.withUnsafeBufferPointer { Data(buffer: $0) }
+            try? data.write(to: file, options: .atomic)
+            trimDiskCacheIfNeeded()
+        }
+
+        private func trimDiskCacheIfNeeded() {
+            guard let dir = Self.diskCacheURL,
+                  let files = try? FileManager.default.contentsOfDirectory(
+                      at: dir,
+                      includingPropertiesForKeys: [.contentModificationDateKey],
+                      options: .skipsHiddenFiles
+                  ),
+                  files.count > maxDiskCacheFiles else { return }
+            let sorted = files.sorted { lhs, rhs in
+                let lhsDate = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+                let rhsDate = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+                return lhsDate < rhsDate
+            }
+            for file in sorted.prefix(files.count - maxDiskCacheFiles) {
+                try? FileManager.default.removeItem(at: file)
+            }
         }
 
         private func cacheKey(for url: URL) -> String {

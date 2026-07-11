@@ -13,6 +13,8 @@
 	</array>
 	<key>CFBundleAllowMixedLocalizations</key>
 	<true/>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -90,6 +92,19 @@
 		</dict>
 		<dict>
 			<key>CFBundleTypeName</key>
+			<string>ASS Subtitle</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.ass</string>
+				<string>public.plain-text</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
 			<string>WebVTT Subtitle</string>
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
@@ -123,6 +138,23 @@
 				<key>public.mime-type</key>
 				<array>
 					<string>application/x-subrip</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>public.ass</string>
+			<key>UTTypeDescription</key>
+			<string>ASS Subtitle</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.plain-text</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>ass</string>
 				</array>
 			</dict>
 		</dict>

@@ -48,8 +48,9 @@ final class APIClient {
     }
 
     /// Zero-copy first: the backend runs on this machine, so hand it the local
-    /// path and only stream the file when the backend cannot read that path
-    /// (HTTP 409, e.g. sandboxed packaged builds).
+    /// path and only stream the file when that fails — 409 when the backend
+    /// cannot read the path (sandboxed packaged builds), or any other 4xx
+    /// (e.g. an older backend without input_path support returns 400/422).
     private func sendMediaRequest(
         path: String,
         fileURL: URL,
@@ -67,7 +68,7 @@ final class APIClient {
                 fieldOverrides: fieldOverrides,
                 extraFields: extraFields + [("input_path", fileURL.path)]
             )
-        } catch let error as NSError where error.domain == "MSub.API" && error.code == 409 {
+        } catch let error as NSError where error.domain == "MSub.API" && (400..<500).contains(error.code) {
             return try await sendMultipart(
                 path: path,
                 fileURL: fileURL,
