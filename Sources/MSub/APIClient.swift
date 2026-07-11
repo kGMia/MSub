@@ -15,18 +15,12 @@ final class APIClient {
     }
 
     func preview(fileURL: URL, settings: TranscriptionSettings) async throws -> SegmentPreview {
-        let (request, bodyURL) = try multipartRequest(path: "/api/preview", fileURL: fileURL, settings: settings, includeOutput: false)
-        defer { try? FileManager.default.removeItem(at: bodyURL) }
-        let (data, response) = try await session.data(for: request)
-        try validate(response: response, data: data)
+        let data = try await sendMediaRequest(path: "/api/preview", fileURL: fileURL, settings: settings, includeOutput: false)
         return try JSONDecoder().decode(SegmentPreview.self, from: data)
     }
 
     func createPreviewJob(fileURL: URL, settings: TranscriptionSettings) async throws -> JobCreated {
-        let (request, bodyURL) = try multipartRequest(path: "/api/preview/jobs", fileURL: fileURL, settings: settings, includeOutput: false)
-        defer { try? FileManager.default.removeItem(at: bodyURL) }
-        let (data, response) = try await session.data(for: request)
-        try validate(response: response, data: data)
+        let data = try await sendMediaRequest(path: "/api/preview/jobs", fileURL: fileURL, settings: settings, includeOutput: false)
         return try JSONDecoder().decode(JobCreated.self, from: data)
     }
 
@@ -37,7 +31,7 @@ final class APIClient {
         fieldOverrides: [(String, String)] = []
     ) async throws -> JobCreated {
         let extraFields = previewID.map { [("preview_id", $0)] } ?? []
-        let (request, bodyURL) = try multipartRequest(
+        let data = try await sendMediaRequest(
             path: "/api/jobs",
             fileURL: fileURL,
             settings: settings,
@@ -45,18 +39,66 @@ final class APIClient {
             fieldOverrides: fieldOverrides,
             extraFields: extraFields
         )
-        defer { try? FileManager.default.removeItem(at: bodyURL) }
-        let (data, response) = try await session.data(for: request)
-        try validate(response: response, data: data)
         return try JSONDecoder().decode(JobCreated.self, from: data)
     }
 
     func createJobFromPreview(previewID: String, settings: TranscriptionSettings) async throws -> JobCreated {
-        let (request, bodyURL) = try multipartRequest(path: "/api/jobs", fileURL: nil, settings: settings, includeOutput: true, extraFields: [("preview_id", previewID)])
+        let data = try await sendMultipart(path: "/api/jobs", fileURL: nil, settings: settings, includeOutput: true, extraFields: [("preview_id", previewID)])
+        return try JSONDecoder().decode(JobCreated.self, from: data)
+    }
+
+    /// Zero-copy first: the backend runs on this machine, so hand it the local
+    /// path and only stream the file when the backend cannot read that path
+    /// (HTTP 409, e.g. sandboxed packaged builds).
+    private func sendMediaRequest(
+        path: String,
+        fileURL: URL,
+        settings: TranscriptionSettings,
+        includeOutput: Bool,
+        fieldOverrides: [(String, String)] = [],
+        extraFields: [(String, String)] = []
+    ) async throws -> Data {
+        do {
+            return try await sendMultipart(
+                path: path,
+                fileURL: nil,
+                settings: settings,
+                includeOutput: includeOutput,
+                fieldOverrides: fieldOverrides,
+                extraFields: extraFields + [("input_path", fileURL.path)]
+            )
+        } catch let error as NSError where error.domain == "MSub.API" && error.code == 409 {
+            return try await sendMultipart(
+                path: path,
+                fileURL: fileURL,
+                settings: settings,
+                includeOutput: includeOutput,
+                fieldOverrides: fieldOverrides,
+                extraFields: extraFields
+            )
+        }
+    }
+
+    private func sendMultipart(
+        path: String,
+        fileURL: URL?,
+        settings: TranscriptionSettings,
+        includeOutput: Bool,
+        fieldOverrides: [(String, String)] = [],
+        extraFields: [(String, String)] = []
+    ) async throws -> Data {
+        let (request, bodyURL) = try multipartRequest(
+            path: path,
+            fileURL: fileURL,
+            settings: settings,
+            includeOutput: includeOutput,
+            fieldOverrides: fieldOverrides,
+            extraFields: extraFields
+        )
         defer { try? FileManager.default.removeItem(at: bodyURL) }
         let (data, response) = try await session.data(for: request)
         try validate(response: response, data: data)
-        return try JSONDecoder().decode(JobCreated.self, from: data)
+        return data
     }
 
     func updatePreviewSegments(previewID: String, segments: [SubtitleSegment], timeOffset: Double) async throws {
@@ -100,6 +142,55 @@ final class APIClient {
         return try JSONDecoder().decode(JobStatus.self, from: data)
     }
 
+    /// Streams job status updates over server-sent events, falling back to
+    /// interval polling when the event stream is unavailable or interrupted.
+    func jobStatusStream(id: String, pollInterval: Duration = .milliseconds(500)) -> AsyncThrowingStream<JobStatus, Error> {
+        let url = baseURL.appending(path: "/api/jobs/\(id)/events")
+        let session = self.session
+        return AsyncThrowingStream { continuation in
+            let task = Task { [weak self] in
+                var sawStreamedTerminal = false
+                do {
+                    let (bytes, response) = try await session.bytes(from: url)
+                    if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
+                        let decoder = JSONDecoder()
+                        for try await line in bytes.lines {
+                            guard line.hasPrefix("data:") else { continue }
+                            let payload = String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+                            guard let data = payload.data(using: .utf8),
+                                  let status = try? decoder.decode(JobStatus.self, from: data) else { continue }
+                            continuation.yield(status)
+                            if ["done", "error", "cancelled"].contains(status.status) {
+                                sawStreamedTerminal = true
+                            }
+                        }
+                    }
+                } catch {
+                    // Stream unavailable or interrupted; fall back to polling below.
+                }
+                if sawStreamedTerminal || Task.isCancelled {
+                    continuation.finish()
+                    return
+                }
+                do {
+                    while !Task.isCancelled {
+                        guard let self else { break }
+                        let status = try await self.jobStatus(id: id)
+                        continuation.yield(status)
+                        if ["done", "error", "cancelled"].contains(status.status) {
+                            break
+                        }
+                        try await Task.sleep(for: pollInterval)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
     func downloadURL(jobID: String) -> URL {
         baseURL.appending(path: "/api/jobs/\(jobID)/download")
     }
@@ -110,6 +201,32 @@ final class APIClient {
         try validate(response: response, data: data)
         let filename = filename(from: response) ?? "subtitle.srt"
         return DownloadedOutput(data: data, filename: filename)
+    }
+
+    func fetchModels() async throws -> ManagedModelList {
+        let url = baseURL.appending(path: "/api/models")
+        let (data, response) = try await session.data(from: url)
+        try validate(response: response, data: data)
+        return try JSONDecoder().decode(ManagedModelList.self, from: data)
+    }
+
+    func downloadModel(named name: String) async throws {
+        try await postModelAction(path: "/api/models/download", name: name)
+    }
+
+    func deleteModel(named name: String) async throws {
+        try await postModelAction(path: "/api/models/delete", name: name)
+    }
+
+    private func postModelAction(path: String, name: String) async throws {
+        var request = URLRequest(url: baseURL.appending(path: path))
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        var components = URLComponents()
+        components.queryItems = [URLQueryItem(name: "name", value: name)]
+        request.httpBody = Data((components.percentEncodedQuery ?? "").utf8)
+        let (data, response) = try await session.data(for: request)
+        try validate(response: response, data: data)
     }
 
     func fetchJobLog(jobID: String) async throws -> DownloadedOutput {
@@ -182,7 +299,8 @@ final class APIClient {
     private func validate(response: URLResponse, data: Data) throws {
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             let text = responseErrorMessage(from: data) ?? String(data: data, encoding: .utf8) ?? "Request failed"
-            throw NSError(domain: "MSub.API", code: 1, userInfo: [NSLocalizedDescriptionKey: text])
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 1
+            throw NSError(domain: "MSub.API", code: code, userInfo: [NSLocalizedDescriptionKey: text])
         }
     }
 

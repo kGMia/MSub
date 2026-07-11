@@ -9,6 +9,7 @@ CONFIGURATION="${MSUB_CONFIGURATION:-Release}"
 INCLUDE_MODEL="${MSUB_INCLUDE_MODEL:-0}"
 INCLUDE_VENV="${MSUB_INCLUDE_VENV:-1}"
 INCLUDE_PYTHON_RUNTIME="${MSUB_INCLUDE_PYTHON_RUNTIME:-$INCLUDE_VENV}"
+BACKEND_BUNDLE_PROFILE="${MSUB_BACKEND_BUNDLE_PROFILE:-core}"
 ARCHS="${MSUB_ARCHS:-arm64}"
 RUN_PREFLIGHT="${MSUB_RUN_PREFLIGHT:-1}"
 RUN_VALIDATE="${MSUB_RUN_VALIDATE:-1}"
@@ -21,6 +22,15 @@ export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$REPO_ROOT/.swift-mod
 export MSUB_INCLUDE_MODEL="$INCLUDE_MODEL"
 export MSUB_INCLUDE_VENV="$INCLUDE_VENV"
 export MSUB_INCLUDE_PYTHON_RUNTIME="$INCLUDE_PYTHON_RUNTIME"
+export MSUB_BACKEND_BUNDLE_PROFILE="$BACKEND_BUNDLE_PROFILE"
+
+if [ -z "${MSUB_REQUIRE_OPTIONAL_DEPS+x}" ]; then
+    if [ "$BACKEND_BUNDLE_PROFILE" = "full" ]; then
+        export MSUB_REQUIRE_OPTIONAL_DEPS=1
+    else
+        export MSUB_REQUIRE_OPTIONAL_DEPS=0
+    fi
+fi
 
 if [ "$RUN_PREFLIGHT" = "1" ]; then
     "$SCRIPT_DIR/release-preflight.sh"
@@ -91,4 +101,8 @@ fi
 
 if [ "$INCLUDE_VENV" != "1" ]; then
     echo "Backend dependencies were not embedded. Re-run with MSUB_INCLUDE_VENV=1 for a self-contained backend."
+fi
+
+if [ "$BACKEND_BUNDLE_PROFILE" != "full" ]; then
+    echo "Torch-based optional backend features were excluded. Re-run with MSUB_BACKEND_BUNDLE_PROFILE=full for a larger all-features bundle."
 fi

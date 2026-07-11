@@ -55,6 +55,16 @@
     "%lld" : {
 
     },
+    "%lld/%lld" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$lld/%2$lld"
+          }
+        }
+      }
+    },
     "action.copy" : {
       "localizations" : {
         "en" : {
@@ -263,6 +273,61 @@
         }
       }
     },
+    "cueList.reason" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Flag"
+          }
+        }
+      }
+    },
+    "cueList.reason.empty" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Empty"
+          }
+        }
+      }
+    },
+    "cueList.reason.interjection" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Filler"
+          }
+        }
+      }
+    },
+    "cueList.reason.repetition" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Repeat"
+          }
+        }
+      }
+    },
+    "cueList.reason.symbols" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Symbols"
+          }
+        }
+      }
+    },
     "duration.dayShort" : {
       "localizations" : {
         "en" : {
@@ -349,7 +414,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Uses AST AudioSet during segment preview to mark likely laughter, shouting, breathing, and other non-lexical voice; first use may download the model."
+            "value" : "Marks likely repeated non-lexical sounds during segment preview with PANNs MLX when available. Without a local model it falls back to lightweight repetition detection; AST remains an optional torch path."
           }
         }
       }
@@ -489,7 +554,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Mega-ASR routes each utterance internally. Auto language usually works, and known media languages can be set manually. It defaults to greedy decoding and a high token limit."
+            "value" : "Mega-ASR routes each utterance internally. Auto language usually works, and known media languages can be set manually. It uses greedy decoding and a dynamic token limit."
           }
         }
       }
@@ -656,6 +721,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "语音能量阈值。数值越高越严格，噪声更少但可能漏掉轻声；数值越低越灵敏。"
+          }
+        }
+      }
+    },
+    "help.vadEngine.pyannote_mlx" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Pyannote Segmentation 3.0 MLX estimates speech probability with a speaker segmentation model and is a light, higher-quality fallback VAD."
           }
         }
       }
@@ -1497,6 +1573,17 @@
     "s" : {
 
     },
+    "segments.audioTopLabels" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audio labels"
+          }
+        }
+      }
+    },
     "segments.avg" : {
       "localizations" : {
         "en" : {
@@ -1589,6 +1676,17 @@
         }
       }
     },
+    "segments.lowSpeechProbability" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Low speech probability"
+          }
+        }
+      }
+    },
     "segments.mark" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
@@ -1654,6 +1752,39 @@
         }
       }
     },
+    "segments.remark" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Re-mark"
+          }
+        }
+      }
+    },
+    "segments.remark.help" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Reapply the current filter type, preset, and threshold to existing audio-event scores without rerunning segmentation."
+          }
+        }
+      }
+    },
+    "segments.repetitionScore" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Repetition"
+          }
+        }
+      }
+    },
     "segments.speech" : {
       "localizations" : {
         "en" : {
@@ -1670,6 +1801,17 @@
         }
       }
     },
+    "segments.speechScore" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Speech"
+          }
+        }
+      }
+    },
     "segments.title" : {
       "localizations" : {
         "en" : {
@@ -1682,6 +1824,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "分段"
+          }
+        }
+      }
+    },
+    "segments.tuning.marked" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$d/%2$d marked"
           }
         }
       }
@@ -2160,6 +2313,17 @@
         }
       }
     },
+    "settings.vadEngine.pyannote_mlx" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Pyannote MLX"
+          }
+        }
+      }
+    },
     "Start Transcription" : {
       "localizations" : {
         "zh-Hans" : {
@@ -2212,22 +2376,6 @@
         }
       }
     },
-    "status.detecting" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Detecting speech segments"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "正在检测语音分段"
-          }
-        }
-      }
-    },
     "status.detail.remaining" : {
       "localizations" : {
         "en" : {
@@ -2240,6 +2388,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "预计剩余时间"
+          }
+        }
+      }
+    },
+    "status.detecting" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Detecting speech segments"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在检测语音分段"
           }
         }
       }
@@ -2660,6 +2824,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "已是最新版本"
+          }
+        }
+      }
+    },
+    "vad.status.pyannoteMissing" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Pyannote MLX is missing its local model; choose Auto fallback or switch to Energy."
           }
         }
       }

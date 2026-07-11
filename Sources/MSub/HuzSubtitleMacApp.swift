@@ -108,6 +108,10 @@ struct MSubApp: App {
                 }
                 .keyboardShortcut("i", modifiers: [.command, .shift])
 
+                Button(Copy.text("menu.importSubtitleFromClipboard", language: language)) {
+                    NotificationCenter.default.post(name: .msubImportSubtitleFromClipboardRequested, object: nil)
+                }
+
                 Button(Copy.text("menu.authorizeSidecarFolder", language: language)) {
                     NotificationCenter.default.post(name: .msubAuthorizeSidecarFolderRequested, object: nil)
                 }
@@ -239,9 +243,10 @@ struct MSubApp: App {
         Settings {
             PreferencesView()
                 .environment(settings)
+                .environment(api)
                 .environment(\.locale, language.locale)
                 .preferredColorScheme(appearance.colorScheme)
-                .frame(width: 480, height: 360)
+                .frame(width: 480, height: 400)
         }
         .windowResizability(.contentSize)
     }
@@ -252,6 +257,173 @@ struct MSubApp: App {
         isCheckingForUpdates = true
         defer { isCheckingForUpdates = false }
         await AppUpdateChecker.checkAndPresent(language: language)
+    }
+}
+
+// MARK: - Model manager (Settings pane)
+
+struct ModelManagerView: View {
+    @Environment(APIClient.self) private var api
+    let language: AppLanguage
+
+    @State private var modelList: ManagedModelList?
+    @State private var errorMessage: String?
+    @State private var busyModels: Set<String> = []
+    @State private var pendingDeletion: ManagedModel?
+    @State private var refreshTrigger = 0
+
+    private func t(_ key: String) -> String { Copy.text(key, language: language) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+            }
+            if let modelList {
+                ScrollView {
+                    VStack(spacing: 6) {
+                        ForEach(modelList.models) { model in
+                            modelRow(model)
+                        }
+                    }
+                }
+                Text(modelList.modelsDir)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            } else if errorMessage == nil {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            }
+        }
+        .padding(14)
+        .task(id: refreshTrigger) { await refreshLoop() }
+        .confirmationDialog(
+            t("models.deleteConfirmTitle"),
+            isPresented: deleteConfirmBinding,
+            presenting: pendingDeletion
+        ) { model in
+            Button(t("models.delete"), role: .destructive) {
+                pendingDeletion = nil
+                performAction(model.name) { try await api.deleteModel(named: $0) }
+            }
+            Button(t("models.deleteCancel"), role: .cancel) {
+                pendingDeletion = nil
+            }
+        } message: { model in
+            Text("\(model.name) · \(formattedSize(model.sizeBytes))")
+        }
+    }
+
+    private var deleteConfirmBinding: Binding<Bool> {
+        Binding(
+            get: { pendingDeletion != nil },
+            set: { if !$0 { pendingDeletion = nil } }
+        )
+    }
+
+    private func modelRow(_ model: ManagedModel) -> some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(model.name)
+                    .font(.callout.weight(.medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                HStack(spacing: 6) {
+                    Text(t("models.feature.\(model.feature)"))
+                        .font(.caption2)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(.quaternary, in: Capsule())
+                    if model.isDownloading {
+                        if let fraction = model.downloadFraction {
+                            Text("\(t("models.downloading")) \(Int(fraction * 100))%")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text(t("models.downloading"))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else if model.installed {
+                        Text(formattedSize(model.sizeBytes))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text(t("models.notInstalled"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let downloadError = model.downloadError, !downloadError.isEmpty {
+                        Text(downloadError)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            Spacer(minLength: 8)
+            if model.isDownloading, let fraction = model.downloadFraction {
+                ProgressView(value: fraction)
+                    .controlSize(.small)
+                    .frame(width: 72)
+            } else if model.isDownloading || busyModels.contains(model.name) {
+                ProgressView()
+                    .controlSize(.small)
+            } else if model.installed {
+                Button(t("models.delete"), role: .destructive) {
+                    pendingDeletion = model
+                }
+                .controlSize(.small)
+            } else if model.downloadable {
+                Button(t("models.download")) {
+                    performAction(model.name) { try await api.downloadModel(named: $0) }
+                }
+                .controlSize(.small)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func refreshLoop() async {
+        while !Task.isCancelled {
+            do {
+                let list = try await api.fetchModels()
+                modelList = list
+                errorMessage = nil
+                guard list.models.contains(where: { $0.isDownloading }) else { return }
+            } catch {
+                if modelList == nil {
+                    errorMessage = t("models.backendUnavailable")
+                }
+                return
+            }
+            try? await Task.sleep(for: .seconds(2))
+        }
+    }
+
+    private func performAction(
+        _ name: String,
+        _ operation: @escaping (String) async throws -> Void
+    ) {
+        busyModels.insert(name)
+        Task {
+            do {
+                try await operation(name)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            busyModels.remove(name)
+            refreshTrigger += 1
+        }
+    }
+
+    private func formattedSize(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 }
 
@@ -800,7 +972,7 @@ struct PreferencesView: View {
     @State private var editingPresetID: UUID?
     @State private var editingPresetName = ""
     private let visibleASREngines: [ASREngine] = [.fireredasr2, .sensevoice, .mimo, .mega, .apple]
-    private let visibleVADEngines: [VADEngine] = [.firered, .energy]
+    private let visibleVADEngines: [VADEngine] = [.pyannoteMLX, .firered, .energy]
 
     private var language: AppLanguage {
         AppLanguage(rawValue: languageRaw) ?? .systemDefault
@@ -814,6 +986,8 @@ struct PreferencesView: View {
                 .tabItem { Label(t("prefs.general"), systemImage: "gearshape") }
             modelTab
                 .tabItem { Label(t("prefs.model"), systemImage: "cube") }
+            ModelManagerView(language: language)
+                .tabItem { Label(t("prefs.modelManager"), systemImage: "arrow.down.circle") }
             presetsTab
                 .tabItem { Label(t("prefs.presets"), systemImage: "slider.horizontal.3") }
             appearanceTab

@@ -12,8 +12,10 @@ private struct BackendManifest: Decodable {
     let sourceMegaModelPath: String?
     let sourceFireRedVADModelPath: String?
     let sourceDiarizationModelPath: String?
+    let sourceSpeakerDiarizationCoreMLModelPath: String?
     let sourceSpeakerRecognitionModelPath: String?
     let sourceEmotionModelPath: String?
+    let sourceEmotionMLXModelPath: String?
     let sourceAudioEventModelPath: String?
 }
 
@@ -42,11 +44,11 @@ final class BackendService {
     private let fireRedModelPathKey = "msub.modelPath.fireredasr2"
     private let fireRedModelDownloadConsentKey = "msub.modelDownloadConsent.fireredasr2"
     private let megaModelDirectoryName = "Mega-ASR-bf16"
-    private let emotionModelDirectoryName = "emotion2vec_plus_base"
-    private let emotionRemoteModelID = "emotion2vec/emotion2vec_plus_base"
+    private let emotionModelDirectoryName = "emotion2vec-plus-large-mlx"
+    private let emotionRemoteModelID = "mlx-community/emotion2vec-plus-large-mlx"
     private let emotionModelPathKey = "msub.modelPath.emotion2vecPlusBase"
     private let emotionModelDownloadConsentKey = "msub.modelDownloadConsent.emotion2vecPlusBase"
-    private let audioEventModelDirectoryName = "ast-finetuned-audioset-10-10-0.4593"
+    private let audioEventModelDirectoryName = "panns-cnn14-16k-mlx"
     private let audioEventModelPathKey = "msub.modelPath.astAudioSet"
     private let speakerRecognitionModelDirectoryName = "speech_eres2netv2_sv_zh-cn_16k-common"
     private let speakerRecognitionRemoteModelID = "iic/speech_eres2netv2_sv_zh-cn_16k-common"
@@ -104,6 +106,9 @@ final class BackendService {
         if let diarizationModelPath = bundledOrWorkspaceDiarizationModel(in: workspace) {
             environment["MSUB_DIARIZATION_MODEL"] = diarizationModelPath.path
         }
+        if let speakerDiarizationCoreMLModelPath = bundledOrWorkspaceSpeakerDiarizationCoreMLModel(in: workspace) {
+            environment["MSUB_SPEAKER_DIARIZATION_COREML_MODEL"] = speakerDiarizationCoreMLModelPath.path
+        }
         if let speakerRecognitionModelPath = bundledOrWorkspaceSpeakerRecognitionModel(in: workspace) {
             environment["MSUB_SPEAKER_RECOGNITION_MODEL"] = speakerRecognitionModelPath.path
         } else if UserDefaults.standard.bool(forKey: speakerRecognitionModelDownloadConsentKey) {
@@ -124,16 +129,18 @@ final class BackendService {
         environment["MSUB_PORT"] = "\(port)"
         environment["MSUB_BACKEND_ROOT"] = workspace.path
         environment["MSUB_PARENT_PID"] = "\(ProcessInfo.processInfo.processIdentifier)"
-        environment["MSUB_MODEL_IDLE_SECONDS"] = environment["MSUB_MODEL_IDLE_SECONDS"] ?? "60"
+        environment["MSUB_MODEL_IDLE_SECONDS"] = environment["MSUB_MODEL_IDLE_SECONDS"] ?? "45"
         environment["MSUB_STT_MODEL_CACHE_SIZE"] = environment["MSUB_STT_MODEL_CACHE_SIZE"] ?? "1"
         environment["MSUB_CLEAR_MLX_CACHE_EACH_CHUNK"] = environment["MSUB_CLEAR_MLX_CACHE_EACH_CHUNK"] ?? "1"
         environment["PYTHONUNBUFFERED"] = "1"
         environment["PYTHONIOENCODING"] = "utf-8"
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        environment["MSUB_SKIP_UNAVAILABLE_AUX_MODELS"] = environment["MSUB_SKIP_UNAVAILABLE_AUX_MODELS"] ?? "1"
         environment["UV_NO_PROGRESS"] = "1"
         environment["UV_LINK_MODE"] = "copy"
         configureJobDirectory(&environment, workspace: workspace)
         configurePythonPath(&environment, workspace: workspace)
+        configureRuntimeDirectories(&environment)
         configureBundledMediaTools(&environment)
         configureModelDownloadEnvironment(&environment)
         environment["PYTHONNOUSERSITE"] = "1"
@@ -154,16 +161,18 @@ final class BackendService {
             appendLog("Starting backend with \(python.label): \(python.url.path)")
         } else {
             process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            process.arguments = [
-                "uv",
-                "run",
-                "--extra",
-                "speaker",
-                "--extra",
-                "emotion",
-                "msub-web",
-            ]
-            appendLog("Starting backend with uv run --extra speaker --extra emotion msub-web")
+            let enableTorchExtras = (environment["MSUB_ENABLE_TORCH_EXTRAS"] ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            var arguments = ["uv", "run"]
+            if ["1", "true", "yes", "on"].contains(enableTorchExtras) {
+                arguments.append(contentsOf: ["--extra", "speaker", "--extra", "emotion"])
+                appendLog("Starting backend with uv run --extra speaker --extra emotion msub-web")
+            } else {
+                appendLog("Starting backend with uv run msub-web")
+            }
+            arguments.append("msub-web")
+            process.arguments = arguments
         }
         process.environment = environment
 
@@ -269,14 +278,13 @@ final class BackendService {
         let runningProcess = process
         process = nil
         if let runningProcess, runningProcess.isRunning {
-            runningProcess.terminationHandler = nil
-            runningProcess.terminate()
             let pid = runningProcess.processIdentifier
+            let graceSeconds: TimeInterval = waitForExit ? 4.0 : 2.5
             if waitForExit {
-                Self.waitForBackendExit(runningProcess, pid: pid)
+                Self.waitForBackendExit(runningProcess, pid: pid, graceSeconds: graceSeconds)
             } else {
                 DispatchQueue.global(qos: .utility).async {
-                    Self.waitForBackendExit(runningProcess, pid: pid)
+                    Self.waitForBackendExit(runningProcess, pid: pid, graceSeconds: graceSeconds)
                 }
             }
             forgetBackendProcess(pid)
@@ -318,9 +326,20 @@ final class BackendService {
         UserDefaults.standard.set(survivors, forKey: recordedBackendProcessIDsKey)
     }
 
-    private nonisolated static func waitForBackendExit(_ process: Process, pid: pid_t) {
-        let deadline = Date().addingTimeInterval(2.0)
+    private nonisolated static func waitForBackendExit(
+        _ process: Process,
+        pid: pid_t,
+        graceSeconds: TimeInterval
+    ) {
+        let deadline = Date().addingTimeInterval(graceSeconds)
         while process.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        if process.isRunning {
+            process.terminate()
+        }
+        let terminateDeadline = Date().addingTimeInterval(1.0)
+        while process.isRunning && Date() < terminateDeadline {
             Thread.sleep(forTimeInterval: 0.05)
         }
         if process.isRunning {
@@ -675,6 +694,25 @@ final class BackendService {
             .joined(separator: ":")
     }
 
+    private func configureRuntimeDirectories(_ environment: inout [String: String]) {
+        guard let tempURL = appStorageURL(directory: .cachesDirectory, leaf: "tmp") else {
+            return
+        }
+        let coreMLTempURL = tempURL.appending(path: "coreml")
+        try? FileManager.default.createDirectory(at: coreMLTempURL, withIntermediateDirectories: true)
+        environment["TMPDIR"] = tempURL.path
+        environment["TEMP"] = tempURL.path
+        environment["TMP"] = tempURL.path
+        environment["MSUB_COREML_TEMP_DIR"] = coreMLTempURL.path
+        if let backendHomeURL = appStorageURL(directory: .applicationSupportDirectory, leaf: "backend-home") {
+            let cacheURL = backendHomeURL.appending(path: "Library/Caches")
+            try? FileManager.default.createDirectory(at: cacheURL, withIntermediateDirectories: true)
+            environment["HOME"] = backendHomeURL.path
+            environment["CFFIXED_USER_HOME"] = backendHomeURL.path
+            environment["MSUB_BACKEND_HOME"] = backendHomeURL.path
+        }
+    }
+
     private func configureModelDownloadEnvironment(_ environment: inout [String: String]) {
         guard isBundledRuntimeLaunch(),
               let hfHome = appStorageURL(directory: .cachesDirectory, leaf: "huggingface") else {
@@ -696,12 +734,29 @@ final class BackendService {
     }
 
     private func bundledExecutable(named name: String) -> URL? {
-        guard let url = Bundle.main.url(forResource: name, withExtension: nil) else { return nil }
-        let path = url.path
-        if !FileManager.default.isExecutableFile(atPath: path) {
-            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
+        var candidates: [URL] = []
+        if let url = Bundle.main.url(forResource: name, withExtension: nil) {
+            candidates.append(url)
         }
-        return FileManager.default.isExecutableFile(atPath: path) ? url : nil
+        if let resourceURL = Bundle.main.resourceURL {
+            candidates.append(resourceURL.appending(path: name))
+        }
+        candidates.append(Bundle.main.bundleURL.appending(path: "Contents/Resources/\(name)"))
+
+        var seen = Set<String>()
+        for url in candidates {
+            let path = url.standardizedFileURL.path
+            guard !seen.contains(path) else { continue }
+            seen.insert(path)
+            guard FileManager.default.fileExists(atPath: path) else { continue }
+            if !FileManager.default.isExecutableFile(atPath: path) {
+                try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
+            }
+            if FileManager.default.isExecutableFile(atPath: path) {
+                return url
+            }
+        }
+        return nil
     }
 
     private func configureUVEnvironment(_ environment: inout [String: String], workspace: URL) -> URL? {
@@ -1024,6 +1079,29 @@ final class BackendService {
         )
     }
 
+    private func bundledOrWorkspaceSpeakerDiarizationCoreMLModel(in workspace: URL) -> URL? {
+        if let value = ProcessInfo.processInfo.environment["MSUB_SPEAKER_DIARIZATION_COREML_MODEL"],
+           !value.isEmpty {
+            let modelURL = URL(fileURLWithPath: value).standardizedFileURL
+            if isValidSpeakerDiarizationCoreMLModelDirectory(modelURL) {
+                return modelURL
+            }
+        }
+
+        let modelPath = workspace.appending(path: "models/speaker-diarization-coreml")
+        if isValidSpeakerDiarizationCoreMLModelDirectory(modelPath) {
+            return modelPath
+        }
+
+        if isBundledBackend(workspace),
+           let sourceModelPath = sourceSpeakerDiarizationCoreMLModelPathFromManifest(in: workspace),
+           isValidSpeakerDiarizationCoreMLModelDirectory(sourceModelPath) {
+            return sourceModelPath
+        }
+
+        return nil
+    }
+
     private func bundledOrWorkspaceEmotionModel(in workspace: URL) -> URL? {
         bundledOrWorkspaceAuxiliaryModel(
             in: workspace,
@@ -1093,9 +1171,14 @@ final class BackendService {
             }
         }
 
-        let modelPath = workspace.appending(path: "models/FireRedVAD")
-        if isValidFireRedVADModelDirectory(modelPath) {
-            return modelPath
+        let coreMLModelPath = workspace.appending(path: "models/FireRedVAD-CoreML")
+        if isValidFireRedVADModelDirectory(coreMLModelPath) {
+            return coreMLModelPath
+        }
+
+        let legacyModelPath = workspace.appending(path: "models/FireRedVAD")
+        if isValidFireRedVADModelDirectory(legacyModelPath) {
+            return legacyModelPath
         }
 
         if isBundledBackend(workspace),
@@ -1596,11 +1679,22 @@ final class BackendService {
         return URL(fileURLWithPath: path).standardizedFileURL
     }
 
+    private func sourceSpeakerDiarizationCoreMLModelPathFromManifest(in workspace: URL) -> URL? {
+        let manifestURL = workspace.appending(path: "backend-manifest.json")
+        guard let data = try? Data(contentsOf: manifestURL),
+              let manifest = try? JSONDecoder().decode(BackendManifest.self, from: data),
+              let path = manifest.sourceSpeakerDiarizationCoreMLModelPath,
+              !path.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: path).standardizedFileURL
+    }
+
     private func sourceEmotionModelPathFromManifest(in workspace: URL) -> URL? {
         let manifestURL = workspace.appending(path: "backend-manifest.json")
         guard let data = try? Data(contentsOf: manifestURL),
               let manifest = try? JSONDecoder().decode(BackendManifest.self, from: data),
-              let path = manifest.sourceEmotionModelPath,
+              let path = manifest.sourceEmotionMLXModelPath ?? manifest.sourceEmotionModelPath,
               !path.isEmpty else {
             return nil
         }
@@ -1647,6 +1741,12 @@ final class BackendService {
         FileManager.default.fileExists(atPath: url.appending(path: "config.yaml").path)
     }
 
+    private func isDirectory(_ url: URL) -> Bool {
+        var isDirectory = ObjCBool(false)
+        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+            && isDirectory.boolValue
+    }
+
     private func isNonEmptyDirectory(_ url: URL) -> Bool {
         var isDirectory = ObjCBool(false)
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
@@ -1661,18 +1761,48 @@ final class BackendService {
     }
 
     private func isValidEmotionModelDirectory(_ url: URL) -> Bool {
-        isNonEmptyDirectory(url)
-            && FileManager.default.fileExists(atPath: url.appending(path: "config.yaml").path)
-            && FileManager.default.fileExists(atPath: url.appending(path: "model.pt").path)
+        guard isNonEmptyDirectory(url) else { return false }
+        let isMLXModel = FileManager.default.fileExists(
+            atPath: url.appending(path: "emotion2vec_large_config.json").path
+        ) && FileManager.default.fileExists(
+            atPath: url.appending(path: "emotion2vec_large.safetensors").path
+        )
+        let isLegacyFunASRModel = FileManager.default.fileExists(
+            atPath: url.appending(path: "config.yaml").path
+        ) && FileManager.default.fileExists(
+            atPath: url.appending(path: "model.pt").path
+        )
+        return isMLXModel || isLegacyFunASRModel
     }
 
     private func isValidSpeakerRecognitionModelDirectory(_ url: URL) -> Bool {
         isNonEmptyDirectory(url)
     }
 
+    private func isValidSpeakerDiarizationCoreMLModelDirectory(_ url: URL) -> Bool {
+        let fbankPackageModel = url
+            .appending(path: "mlpackages/Fbank.mlpackage/Data/com.apple.CoreML/model.mlmodel")
+        let fbankCompiled = url.appending(path: "FBank.mlmodelc")
+        let embeddingPackageModel = url
+            .appending(path: "mlpackages/Embedding.mlpackage/Data/com.apple.CoreML/model.mlmodel")
+        let embeddingCompiled = url.appending(path: "Embedding.mlmodelc")
+        return (FileManager.default.fileExists(atPath: fbankPackageModel.path)
+                || isDirectory(fbankCompiled))
+            && (FileManager.default.fileExists(atPath: embeddingPackageModel.path)
+                || isDirectory(embeddingCompiled))
+    }
+
     private func isValidAudioEventModelDirectory(_ url: URL) -> Bool {
-        guard isNonEmptyDirectory(url),
-              FileManager.default.fileExists(atPath: url.appending(path: "config.json").path),
+        guard isNonEmptyDirectory(url) else { return false }
+        let isPANNsMLXModel = FileManager.default.fileExists(
+            atPath: url.appending(path: "panns_cnn14_16k_config.json").path
+        ) && FileManager.default.fileExists(
+            atPath: url.appending(path: "panns_cnn14_16k.safetensors").path
+        )
+        if isPANNsMLXModel {
+            return true
+        }
+        guard FileManager.default.fileExists(atPath: url.appending(path: "config.json").path),
               let contents = try? FileManager.default.contentsOfDirectory(
                   at: url,
                   includingPropertiesForKeys: nil
@@ -1687,7 +1817,16 @@ final class BackendService {
     }
 
     private func isValidFireRedVADModelDirectory(_ url: URL) -> Bool {
-        FileManager.default.fileExists(atPath: url.appending(path: "VAD/model.pth.tar").path)
+        let coreMLPackage = url.appending(path: "FireRedVAD.mlpackage")
+        let coreMLModel = coreMLPackage
+            .appending(path: "Data/com.apple.CoreML/model.mlmodel")
+        let coreMLCMVN = url.appending(path: "cmvn.ark")
+        if FileManager.default.fileExists(atPath: coreMLModel.path)
+            && FileManager.default.fileExists(atPath: coreMLCMVN.path) {
+            return true
+        }
+
+        return FileManager.default.fileExists(atPath: url.appending(path: "VAD/model.pth.tar").path)
             && FileManager.default.fileExists(atPath: url.appending(path: "VAD/cmvn.ark").path)
     }
 

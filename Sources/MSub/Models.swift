@@ -58,6 +58,7 @@ enum RecognitionLanguage: String, CaseIterable, Codable, Identifiable {
 enum VADEngine: String, CaseIterable, Codable, Identifiable {
     case auto
     case firered
+    case pyannoteMLX = "pyannote_mlx"
     case energy
 
     var id: String { rawValue }
@@ -69,6 +70,8 @@ enum VADEngine: String, CaseIterable, Codable, Identifiable {
 }
 
 enum SpeakerLabelingEngine: String, CaseIterable, Codable, Identifiable {
+    case acoustic
+    case coreml
     case pyannote
     case eres2netv2
 
@@ -76,7 +79,7 @@ enum SpeakerLabelingEngine: String, CaseIterable, Codable, Identifiable {
 
     init(from decoder: Decoder) throws {
         let value = try decoder.singleValueContainer().decode(String.self)
-        self = SpeakerLabelingEngine(rawValue: value) ?? .pyannote
+        self = SpeakerLabelingEngine(rawValue: value) ?? .acoustic
     }
 }
 
@@ -104,7 +107,7 @@ enum AudioEventFilterType: String, CaseIterable, Codable, Identifiable {
 
     init(from decoder: Decoder) throws {
         let value = try decoder.singleValueContainer().decode(String.self)
-        self = AudioEventFilterType(rawValue: value) ?? .all
+        self = AudioEventFilterType(rawValue: value) ?? .repetition
     }
 }
 
@@ -147,6 +150,8 @@ struct AppConfig: Decodable {
     let defaultSpeakerRecognitionModel: String?
     let localSpeakerRecognitionModel: String?
     let speakerRecognitionModelAvailable: Bool?
+    let localSpeakerDiarizationCoreMLModel: String?
+    let speakerDiarizationCoreMLModelAvailable: Bool?
 }
 
 struct ASRModelInfo: Decodable, Identifiable {
@@ -181,6 +186,13 @@ struct SegmentPreview: Decodable {
     let mediaInfo: MediaInfo?
 }
 
+struct AudioEventLabelScore: Codable, Equatable, Identifiable {
+    let label: String
+    let score: Double?
+
+    var id: String { label }
+}
+
 struct SubtitleSegment: Codable, Identifiable, Equatable {
     let index: Int
     let start: Double
@@ -188,6 +200,7 @@ struct SubtitleSegment: Codable, Identifiable, Equatable {
     let duration: Double
     var audioLabel: String?
     var audioScore: Double?
+    var audioLabels: [AudioEventLabelScore] = []
     var speechScore: Double?
     var repetitionScore: Double?
     var flagged: Bool = false
@@ -201,6 +214,7 @@ struct SubtitleSegment: Codable, Identifiable, Equatable {
         duration: Double,
         audioLabel: String? = nil,
         audioScore: Double? = nil,
+        audioLabels: [AudioEventLabelScore] = [],
         speechScore: Double? = nil,
         repetitionScore: Double? = nil,
         flagged: Bool = false
@@ -211,6 +225,7 @@ struct SubtitleSegment: Codable, Identifiable, Equatable {
         self.duration = duration
         self.audioLabel = audioLabel
         self.audioScore = audioScore
+        self.audioLabels = audioLabels
         self.speechScore = speechScore
         self.repetitionScore = repetitionScore
         self.flagged = flagged
@@ -223,6 +238,7 @@ struct SubtitleSegment: Codable, Identifiable, Equatable {
         case duration
         case audioLabel = "audio_label"
         case audioScore = "audio_score"
+        case audioLabels = "audio_labels"
         case speechScore = "speech_score"
         case repetitionScore = "repetition_score"
         case flagged
@@ -236,6 +252,7 @@ struct SubtitleSegment: Codable, Identifiable, Equatable {
         duration = try container.decodeIfPresent(Double.self, forKey: .duration) ?? max(0, end - start)
         audioLabel = try container.decodeIfPresent(String.self, forKey: .audioLabel)
         audioScore = try container.decodeIfPresent(Double.self, forKey: .audioScore)
+        audioLabels = try container.decodeIfPresent([AudioEventLabelScore].self, forKey: .audioLabels) ?? []
         speechScore = try container.decodeIfPresent(Double.self, forKey: .speechScore)
         repetitionScore = try container.decodeIfPresent(Double.self, forKey: .repetitionScore)
         flagged = try container.decodeIfPresent(Bool.self, forKey: .flagged) ?? false
@@ -249,6 +266,9 @@ struct SubtitleSegment: Codable, Identifiable, Equatable {
         try container.encode(duration, forKey: .duration)
         try container.encodeIfPresent(audioLabel, forKey: .audioLabel)
         try container.encodeIfPresent(audioScore, forKey: .audioScore)
+        if !audioLabels.isEmpty {
+            try container.encode(audioLabels, forKey: .audioLabels)
+        }
         try container.encodeIfPresent(speechScore, forKey: .speechScore)
         try container.encodeIfPresent(repetitionScore, forKey: .repetitionScore)
         try container.encode(flagged, forKey: .flagged)
@@ -262,6 +282,7 @@ struct SubtitleSegment: Codable, Identifiable, Equatable {
             duration: duration,
             audioLabel: audioLabel,
             audioScore: audioScore,
+            audioLabels: audioLabels,
             speechScore: speechScore,
             repetitionScore: repetitionScore,
             flagged: flagged
@@ -276,6 +297,22 @@ struct SubtitleSegment: Codable, Identifiable, Equatable {
             duration: duration,
             audioLabel: audioLabel,
             audioScore: audioScore,
+            audioLabels: audioLabels,
+            speechScore: speechScore,
+            repetitionScore: repetitionScore,
+            flagged: isFlagged
+        )
+    }
+
+    func withAudioEventMarker(label: String?, score: Double?, flagged isFlagged: Bool) -> SubtitleSegment {
+        SubtitleSegment(
+            index: index,
+            start: start,
+            end: end,
+            duration: duration,
+            audioLabel: label,
+            audioScore: score,
+            audioLabels: audioLabels,
             speechScore: speechScore,
             repetitionScore: repetitionScore,
             flagged: isFlagged
@@ -293,6 +330,7 @@ struct JobStatus: Decodable {
     let current: Int?
     let fractionalCurrent: Double?
     let total: Int?
+    let phaseProgress: Double?
     let progressText: String?
     let cueCount: Int?
     let preview: String?
@@ -311,6 +349,7 @@ struct JobStatus: Decodable {
 enum OutputFormat: String, CaseIterable, Codable, Identifiable {
     case srt
     case vtt
+    case ass
     case txt
     case json
 
@@ -329,6 +368,35 @@ enum SegmentMode: String, CaseIterable, Codable, Identifiable {
 struct DownloadedOutput {
     let data: Data
     let filename: String
+}
+
+struct ManagedModelList: Decodable {
+    let modelsDir: String
+    let models: [ManagedModel]
+}
+
+struct ManagedModel: Decodable, Identifiable, Equatable {
+    let name: String
+    let repo: String?
+    let feature: String
+    let installed: Bool
+    let sizeBytes: Int64
+    let downloadable: Bool
+    let downloadStatus: String?
+    let downloadError: String?
+    let downloadedBytes: Int64?
+    let totalBytes: Int64?
+
+    var id: String { name }
+    var isDownloading: Bool { downloadStatus == "downloading" }
+
+    var downloadFraction: Double? {
+        guard isDownloading,
+              let downloadedBytes,
+              let totalBytes,
+              totalBytes > 0 else { return nil }
+        return min(1.0, Double(downloadedBytes) / Double(totalBytes))
+    }
 }
 
 struct MediaInfo: Decodable, Equatable {

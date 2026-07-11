@@ -9,13 +9,33 @@ INCLUDE_MODEL="${MSUB_INCLUDE_MODEL:-0}"
 INCLUDE_SENSEVOICE_MODEL="${MSUB_INCLUDE_SENSEVOICE_MODEL:-0}"
 INCLUDE_MIMO_MODEL="${MSUB_INCLUDE_MIMO_MODEL:-0}"
 INCLUDE_MEGA_MODEL="${MSUB_INCLUDE_MEGA_MODEL:-0}"
-INCLUDE_FIRERED_VAD_MODEL="${MSUB_INCLUDE_FIRERED_VAD_MODEL:-1}"
+BACKEND_BUNDLE_PROFILE="${MSUB_BACKEND_BUNDLE_PROFILE:-core}"
+if [ -n "${MSUB_INCLUDE_FIRERED_VAD_MODEL+x}" ]; then
+    INCLUDE_FIRERED_VAD_MODEL="$MSUB_INCLUDE_FIRERED_VAD_MODEL"
+elif [ "$BACKEND_BUNDLE_PROFILE" = "full" ] || [ "$BACKEND_BUNDLE_PROFILE" = "core" ]; then
+    INCLUDE_FIRERED_VAD_MODEL=1
+else
+    INCLUDE_FIRERED_VAD_MODEL=0
+fi
 INCLUDE_DIARIZATION_MODEL="${MSUB_INCLUDE_DIARIZATION_MODEL:-0}"
+if [ -n "${MSUB_INCLUDE_PYANNOTE_SEGMENTATION_MLX_MODEL+x}" ]; then
+    INCLUDE_PYANNOTE_SEGMENTATION_MLX_MODEL="$MSUB_INCLUDE_PYANNOTE_SEGMENTATION_MLX_MODEL"
+elif [ "$BACKEND_BUNDLE_PROFILE" = "full" ] || [ "$BACKEND_BUNDLE_PROFILE" = "core" ]; then
+    INCLUDE_PYANNOTE_SEGMENTATION_MLX_MODEL=1
+else
+    INCLUDE_PYANNOTE_SEGMENTATION_MLX_MODEL=0
+fi
 INCLUDE_SPEAKER_RECOGNITION_MODEL="${MSUB_INCLUDE_SPEAKER_RECOGNITION_MODEL:-0}"
 INCLUDE_EMOTION_MODEL="${MSUB_INCLUDE_EMOTION_MODEL:-0}"
 INCLUDE_VENV="${MSUB_INCLUDE_VENV:-1}"
 INCLUDE_PYTHON_RUNTIME="${MSUB_INCLUDE_PYTHON_RUNTIME:-$INCLUDE_VENV}"
-REQUIRE_OPTIONAL_DEPS="${MSUB_REQUIRE_OPTIONAL_DEPS:-1}"
+if [ -n "${MSUB_REQUIRE_OPTIONAL_DEPS+x}" ]; then
+    REQUIRE_OPTIONAL_DEPS="$MSUB_REQUIRE_OPTIONAL_DEPS"
+elif [ "$BACKEND_BUNDLE_PROFILE" = "full" ]; then
+    REQUIRE_OPTIONAL_DEPS=1
+else
+    REQUIRE_OPTIONAL_DEPS=0
+fi
 REQUIRE_SPEAKER_DEPS="${MSUB_REQUIRE_SPEAKER_DEPS:-$REQUIRE_OPTIONAL_DEPS}"
 REQUIRE_EMOTION_DEPS="${MSUB_REQUIRE_EMOTION_DEPS:-$REQUIRE_OPTIONAL_DEPS}"
 REQUIRE_DIARIZATION_DEPS="${MSUB_REQUIRE_DIARIZATION_DEPS:-$REQUIRE_OPTIONAL_DEPS}"
@@ -72,6 +92,7 @@ if [ "$INCLUDE_VENV" = "1" ]; then
     export MSUB_REQUIRE_SPEAKER_DEPS="$REQUIRE_SPEAKER_DEPS"
     export MSUB_REQUIRE_EMOTION_DEPS="$REQUIRE_EMOTION_DEPS"
     export MSUB_REQUIRE_DIARIZATION_DEPS="$REQUIRE_DIARIZATION_DEPS"
+    export MSUB_REQUIRE_FIRERED_VAD_DEPS="$INCLUDE_FIRERED_VAD_MODEL"
 
     "$REPO_ROOT/.venv/bin/python" - <<'PY'
 import importlib
@@ -83,12 +104,15 @@ groups = {
         "fastapi",
         "uvicorn",
         "multipart",
-        "fireredvad",
         "mlx",
         "mlx_audio",
         "huggingface_hub",
+        "safetensors",
+        "soundfile",
     ],
 }
+if os.getenv("MSUB_REQUIRE_FIRERED_VAD_DEPS", "0") == "1":
+    groups["firered_vad"] = ["coremltools", "kaldi_native_fbank", "kaldiio", "soundfile"]
 if os.getenv("MSUB_REQUIRE_SPEAKER_DEPS", "1") == "1":
     groups["speaker"] = ["funasr", "modelscope", "torch", "torchaudio", "soundfile"]
 if os.getenv("MSUB_REQUIRE_EMOTION_DEPS", "1") == "1":
@@ -149,12 +173,22 @@ else
 fi
 
 if [ "$INCLUDE_FIRERED_VAD_MODEL" = "1" ]; then
-    require_file "$REPO_ROOT/models/FireRedVAD/VAD/model.pth.tar" "FireRedVAD model"
-    require_file "$REPO_ROOT/models/FireRedVAD/VAD/cmvn.ark" "FireRedVAD cmvn"
+    require_file "$REPO_ROOT/models/FireRedVAD-CoreML/FireRedVAD.mlpackage/Data/com.apple.CoreML/model.mlmodel" "FireRedVAD CoreML model"
+    require_file "$REPO_ROOT/models/FireRedVAD-CoreML/cmvn.ark" "FireRedVAD CoreML cmvn"
 fi
 
 if [ "$INCLUDE_DIARIZATION_MODEL" = "1" ]; then
     require_file "$REPO_ROOT/models/pyannote-speaker-diarization-community-1/config.yaml" "pyannote diarization config"
+fi
+
+if [ "$INCLUDE_PYANNOTE_SEGMENTATION_MLX_MODEL" = "1" ]; then
+    require_file "$REPO_ROOT/models/Pyannote-Segmentation-MLX/config.json" "Pyannote Segmentation MLX config"
+    require_file "$REPO_ROOT/models/Pyannote-Segmentation-MLX/model.safetensors" "Pyannote Segmentation MLX weights"
+fi
+
+if [ "${MSUB_INCLUDE_SPEAKER_DIARIZATION_COREML_MODEL:-0}" = "1" ]; then
+    require_file "$REPO_ROOT/models/speaker-diarization-coreml/Segmentation.mlmodelc/model.mil" "speaker diarization CoreML segmentation"
+    require_file "$REPO_ROOT/models/speaker-diarization-coreml/Embedding.mlmodelc/model.mil" "speaker diarization CoreML embedding"
 fi
 
 if [ "$INCLUDE_SPEAKER_RECOGNITION_MODEL" = "1" ]; then
@@ -163,6 +197,11 @@ fi
 
 if [ "$INCLUDE_EMOTION_MODEL" = "1" ]; then
     require_nonempty_dir "$REPO_ROOT/models/emotion2vec_plus_base" "emotion2vec_plus_base"
+fi
+
+if [ "${MSUB_INCLUDE_EMOTION_MLX_MODEL:-0}" = "1" ]; then
+    require_file "$REPO_ROOT/models/emotion2vec-plus-large-mlx/emotion2vec_large_config.json" "emotion2vec MLX config"
+    require_file "$REPO_ROOT/models/emotion2vec-plus-large-mlx/emotion2vec_large.safetensors" "emotion2vec MLX weights"
 fi
 
 note "ok"

@@ -18,8 +18,14 @@ let package = Package(
                 "Media.xcassets"
             ],
             resources: [
-                .process("Localizable.xcstrings")
+                .process("Localizable.xcstrings"),
+                .copy("ffmpeg")
             ]
+        ),
+        .testTarget(
+            name: "MSubTests",
+            dependencies: ["MSub"],
+            path: "Tests/MSubTests"
         )
     ]
 )

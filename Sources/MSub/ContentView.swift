@@ -34,6 +34,10 @@ struct ContentView: View {
     @State private var connectionState: ConnectionState = .unknown
     @State private var isSaveCustomPresetSheetPresented = false
     @State private var customPresetName = ""
+    @State private var isSubtitleTextImportSheetPresented = false
+    @State private var subtitleTextImportDraft = ""
+    @State private var subtitleTextImportSlotID: FileSlot.ID?
+    @State private var pendingSubtitleOverlapImport: PendingSubtitleOverlapImport?
     @State private var failureDetails: FailureDetails?
     @SceneStorage("ui.detailTab") private var detailTab: DetailTab = .segments
     @State private var processingTask: Task<Void, Never>?
@@ -115,8 +119,8 @@ struct ContentView: View {
 
     private var processingSummary: String? {
         guard files.count > 1 else { return nil }
-        let done = files.filter { $0.processingState == .done }.count
-        let failed = files.filter { $0.processingState == .failed }.count
+        let done = files.count(where: { $0.processingState == .done })
+        let failed = files.count(where: { $0.processingState == .failed })
         return String(format: t("file.summary"), done, files.count, failed)
     }
 
@@ -159,7 +163,7 @@ struct ContentView: View {
     private static let builtInPresetTagPrefix = "builtin:"
     private static let savedCustomPresetTagPrefix = "custom:"
     private let visibleASREngines: [ASREngine] = [.fireredasr2, .sensevoice, .mimo, .mega, .apple]
-    private let visibleVADEngines: [VADEngine] = [.firered, .energy]
+    private let visibleVADEngines: [VADEngine] = [.pyannoteMLX, .firered, .energy]
     private let visibleSpeakerClusteringMethods: [SpeakerClusteringMethod] = [.spectral, .incremental]
     private let visibleAudioEventFilterTypes: [AudioEventFilterType] = [.all, .nonLexical, .nonSpeech, .repetition, .lowSpeech]
     private let visibleAudioEventFilterPresets: [AudioEventFilterPreset] = [.balanced, .strict, .broad]
@@ -174,6 +178,10 @@ struct ContentView: View {
     }
 
     private var content: some View {
+        contentWithEventHandlers
+    }
+
+    private var baseContent: some View {
         NavigationSplitView {
             settingsPanel
                 .navigationSplitViewColumnWidth(min: 260, ideal: 285, max: 320)
@@ -209,21 +217,19 @@ struct ContentView: View {
             await loadConfig()
         }
         .onDisappear {
-            processingTask?.cancel()
-            processingTask = nil
-            statusDetailDismissTask?.cancel()
-            statusDetailDismissTask = nil
+            cleanupOnDisappear()
         }
         .modifier(MSubCommandsModifier(
             detailTab: $detailTab,
-            onWillTerminate: { backend.stop(waitForExit: true) }
+            onWillTerminate: { backend.stop(waitForExit: true) },
+            onDeleteCueListSelection: deleteSelectedCuesFromActiveCueList
         ))
-        .alert(t("error.title"), isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
+        .alert(t("error.title"), isPresented: errorAlertBinding) {
             Button(t("button.ok"), role: .cancel) {}
         } message: {
             Text(errorMessage ?? "")
         }
-        .alert(t("translation.errorTitle"), isPresented: Binding(get: { translationErrorMessage != nil }, set: { if !$0 { translationErrorMessage = nil } })) {
+        .alert(t("translation.errorTitle"), isPresented: translationErrorAlertBinding) {
             Button(t("button.ok"), role: .cancel) {}
         } message: {
             Text(translationErrorMessage ?? "")
@@ -235,7 +241,24 @@ struct ContentView: View {
             actions: sidecarPromptActions,
             message: sidecarPromptMessage
         )
+        .alert(
+            t("importOverlap.title"),
+            isPresented: subtitleOverlapPromptBinding,
+            presenting: pendingSubtitleOverlapImport
+        ) { pendingImport in
+            Button(t("importOverlap.ignore")) {
+                commitPendingSubtitleOverlapImport(pendingImport, resolving: false)
+            }
+            Button(t("importOverlap.resolve")) {
+                commitPendingSubtitleOverlapImport(pendingImport, resolving: true)
+            }
+        } message: { pendingImport in
+            Text(subtitleOverlapPromptMessage(for: pendingImport))
+        }
+    }
 
+    private var contentWithSheets: some View {
+        baseContent
         .translationTask(translationConfiguration) { session in
             await runTranslation(session: session)
         }
@@ -268,6 +291,18 @@ struct ContentView: View {
                 }
             )
         }
+        .sheet(isPresented: $isSubtitleTextImportSheetPresented) {
+            ImportSubtitleTextSheet(
+                language: language,
+                text: $subtitleTextImportDraft,
+                onCancel: {
+                    resetSubtitleTextImportSheet()
+                },
+                onImport: {
+                    submitSubtitleTextImport()
+                }
+            )
+        }
         .sheet(item: $failureDetails) { details in
             FailureDetailsSheet(
                 language: language,
@@ -284,6 +319,10 @@ struct ContentView: View {
                 }
             )
         }
+    }
+
+    private var contentWithEventHandlers: some View {
+        contentWithSheets
         .onReceive(NotificationCenter.default.publisher(for: .msubOpenFilesRequested)) { _ in
             chooseFiles()
         }
@@ -293,6 +332,9 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .msubImportSubtitleRequested)) { _ in
             importSubtitleForActiveFile()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .msubImportSubtitleFromClipboardRequested)) { _ in
+            importSubtitleFromClipboardForActiveFile()
         }
         .onReceive(NotificationCenter.default.publisher(for: .msubTranscribeRequested)) { _ in
             guard canRun else { return }
@@ -329,6 +371,34 @@ struct ContentView: View {
         }
     }
 
+    private func cleanupOnDisappear() {
+        processingTask?.cancel()
+        processingTask = nil
+        statusDetailDismissTask?.cancel()
+        statusDetailDismissTask = nil
+    }
+
+    private var errorAlertBinding: Binding<Bool> {
+        Binding(
+            get: { errorMessage != nil },
+            set: { if !$0 { errorMessage = nil } }
+        )
+    }
+
+    private var translationErrorAlertBinding: Binding<Bool> {
+        Binding(
+            get: { translationErrorMessage != nil },
+            set: { if !$0 { translationErrorMessage = nil } }
+        )
+    }
+
+    private var subtitleOverlapPromptBinding: Binding<Bool> {
+        Binding(
+            get: { pendingSubtitleOverlapImport != nil },
+            set: { if !$0 { pendingSubtitleOverlapImport = nil } }
+        )
+    }
+
     // MARK: - Detail column
 
     private var detailColumn: some View {
@@ -360,17 +430,18 @@ struct ContentView: View {
                             previewView(for: slot)
                         }
                     }
-                    .frame(minWidth: 280, idealWidth: 310, maxWidth: 380, alignment: .topLeading)
+                    .frame(minWidth: 240, idealWidth: 285, maxWidth: 380, alignment: .topLeading)
                     .layoutPriority(1)
 
                     VStack(spacing: 10) {
                         if let slot = activeSlot {
-                            mediaInfoCard(slot, fixedHeight: PreviewCardMetrics.height)
+                            mediaInfoCard(slot, fixedHeight: PreviewCardMetrics.height, compact: true)
                         }
                     }
-                    .frame(minWidth: 95, maxWidth: .infinity, alignment: .top)
+                    .frame(minWidth: 132, idealWidth: 210, maxWidth: .infinity, alignment: .top)
                     .layoutPriority(0)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
 
                 VStack(spacing: 12) {
                     if let slot = activeSlot {
@@ -386,26 +457,26 @@ struct ContentView: View {
         }
     }
 
-    private func mediaInfoCard(_ slot: FileSlot, fixedHeight: CGFloat? = nil) -> some View {
+    private func mediaInfoCard(_ slot: FileSlot, fixedHeight: CGFloat? = nil, compact: Bool = false) -> some View {
         let terms = slot.frequentTerms
         let emotions = slot.emotionFrequencies
         let hasChips = !terms.isEmpty || !emotions.isEmpty
 
-        return VStack(alignment: .leading, spacing: 6) {
+        return VStack(alignment: .leading, spacing: compact ? 5 : 6) {
             Label(t("media.info"), systemImage: "info.circle")
                 .font(.subheadline.weight(.semibold))
 
             Divider()
 
-            editableFileNameRow(slot)
-            VStack(alignment: .leading, spacing: 3) {
-                compactInfoRow(t("media.duration"), value: mediaDurationText(slot))
-                compactInfoRow(t("media.size"), value: fileSizeText(for: slot))
-                compactInfoRow(t("media.resolution"), value: resolutionText(slot.mediaInfo))
-                compactInfoRow(t("media.frameRate"), value: frameRateText(slot.mediaInfo?.frameRate))
-                compactInfoRow(t("media.videoCodec"), value: slot.mediaInfo?.videoCodec ?? t("media.noVideo"))
-                compactInfoRow(t("media.audio"), value: audioText(slot.mediaInfo))
-                compactInfoRow(t("media.bitRate"), value: bitRateText(slot.mediaInfo?.bitRate))
+            editableFileNameRow(slot, compact: compact)
+            VStack(alignment: .leading, spacing: compact ? 2 : 3) {
+                compactInfoRow(t("media.duration"), value: mediaDurationText(slot), compact: compact)
+                compactInfoRow(t("media.size"), value: fileSizeText(for: slot), compact: compact)
+                compactInfoRow(t("media.resolution"), value: resolutionText(slot.mediaInfo), compact: compact)
+                compactInfoRow(t("media.frameRate"), value: frameRateText(slot.mediaInfo?.frameRate), compact: compact)
+                compactInfoRow(t("media.videoCodec"), value: slot.mediaInfo?.videoCodec ?? t("media.noVideo"), compact: compact)
+                compactInfoRow(t("media.audio"), value: audioText(slot.mediaInfo), compact: compact)
+                compactInfoRow(t("media.bitRate"), value: bitRateText(slot.mediaInfo?.bitRate), compact: compact)
             }
 
             if hasChips {
@@ -440,7 +511,7 @@ struct ContentView: View {
                 }
             }
         }
-        .padding(12)
+        .padding(compact ? 10 : 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: fixedHeight, alignment: .topLeading)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
@@ -591,30 +662,38 @@ struct ContentView: View {
         }
     }
 
-    private func compactInfoRow(_ title: String, value: String) -> some View {
-        HStack(spacing: 6) {
+    private func compactInfoRow(_ title: String, value: String, compact: Bool = false) -> some View {
+        HStack(spacing: compact ? 4 : 6) {
             Text(title)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-                .layoutPriority(1)
-            Spacer(minLength: 6)
+                .truncationMode(.tail)
+                .frame(width: compact ? 46 : nil, alignment: .leading)
+                .layoutPriority(compact ? 0 : 1)
+                .help(title)
+            Spacer(minLength: compact ? 3 : 6)
             Text(value)
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.primary)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(minWidth: 0, maxWidth: .infinity, alignment: .trailing)
+                .layoutPriority(1)
+                .help(value)
         }
     }
 
-    private func editableFileNameRow(_ slot: FileSlot) -> some View {
-        HStack(spacing: 8) {
+    private func editableFileNameRow(_ slot: FileSlot, compact: Bool = false) -> some View {
+        HStack(spacing: compact ? 5 : 8) {
             Text(t("media.name"))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-                .layoutPriority(1)
+                .truncationMode(.tail)
+                .frame(width: compact ? 46 : nil, alignment: .leading)
+                .layoutPriority(compact ? 0 : 1)
+                .help(t("media.name"))
 
             TextField(t("media.name"), text: fileNameBinding(for: slot.id))
                 .font(.caption.monospacedDigit())
@@ -633,7 +712,7 @@ struct ContentView: View {
                         commitFileRename(for: slot.id)
                     }
                 }
-                .frame(maxWidth: .infinity)
+                .frame(minWidth: 0, idealWidth: compact ? 88 : nil, maxWidth: .infinity)
         }
     }
 
@@ -1321,6 +1400,10 @@ struct ContentView: View {
                         .pickerStyle(.menu)
                     }
 
+                    stackedField(t("settings.asrContext"), help: t("help.asrContext")) {
+                        TextField("", text: $settings.asrContext)
+                            .textFieldStyle(.roundedBorder)
+                    }
                     stepperField(t("settings.mimoMaxTokens"), value: $settings.mimoMaxTokens, in: settings.generationMaxTokensRange, help: t("help.mimoMaxTokens"))
                     numericField(t("settings.mimoTemperature"), value: $settings.mimoTemperature, suffix: "", help: t("help.mimoTemperature"))
                     numericField(t("settings.mimoTopP"), value: $settings.mimoTopP, suffix: "", help: t("help.mimoTopP"))
@@ -1387,6 +1470,18 @@ struct ContentView: View {
                     }
                 }
                 if settings.usesBackendRecognition {
+                    Toggle(isOn: $settings.denoise) {
+                        parameterLabel(t("settings.denoise"), help: t("help.denoise"))
+                    }
+                    .toggleStyle(.switch)
+                    Toggle(isOn: $settings.alignWords) {
+                        parameterLabel(t("settings.alignWords"), help: t("help.alignWords"))
+                    }
+                    .toggleStyle(.switch)
+                    Toggle(isOn: $settings.punctuate) {
+                        parameterLabel(t("settings.punctuate"), help: t("help.punctuate"))
+                    }
+                    .toggleStyle(.switch)
                     Toggle(isOn: $settings.diarizeSpeakers) {
                         parameterLabel(t("settings.diarizeSpeakers"), help: t("help.diarizeSpeakers"))
                     }
@@ -1401,6 +1496,14 @@ struct ContentView: View {
                         }
                         .labelsHidden()
                         .pickerStyle(.menu)
+                        .onChange(of: settings.speakerLabelingEngine) { _, newValue in
+                            if newValue == .acoustic && settings.speakerClusterThreshold <= 0.5 {
+                                settings.speakerClusterThreshold = 0.82
+                            } else if (newValue == .coreml || newValue == .eres2netv2)
+                                        && settings.speakerClusterThreshold >= 0.8 {
+                                settings.speakerClusterThreshold = 0.45
+                            }
+                        }
                     }
                     if settings.speakerLabelingEngine == .eres2netv2 {
                         stackedField(t("settings.speakerRecognitionModel"), help: t("help.speakerRecognitionModel")) {
@@ -1435,6 +1538,8 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    if settings.speakerLabelingEngine != .pyannote {
                         stackedField(t("settings.speakerClusteringMethod"), help: t("help.speakerClusteringMethod")) {
                             Picker("", selection: $settings.speakerClusteringMethod) {
                                 ForEach(visibleSpeakerClusteringMethods) { method in
@@ -1690,7 +1795,7 @@ struct ContentView: View {
                         )
                     }
                     if files.count > 1 {
-                        let done = files.filter { $0.processingState == .done }.count
+                        let done = files.count(where: { $0.processingState == .done })
                         statusCapsuleDetail(
                             icon: "doc.on.doc.fill",
                             value: "\(done)/\(files.count)",
@@ -1823,12 +1928,12 @@ struct ContentView: View {
         let iconName = hasFile ? "checkmark.seal.fill" : "tray.and.arrow.down"
         let iconColor: Color = hasFile ? .teal : .secondary
         let title: String = {
-            if files.count == 0 { return t("input.drop") }
+            if files.isEmpty { return t("input.drop") }
             if files.count == 1 { return files[0].url.lastPathComponent }
             return "\(files.count) \(filesCountLabel(files.count))"
         }()
         let subtitle: String = {
-            if files.count == 0 { return t("input.supportedFormats") }
+            if files.isEmpty { return t("input.supportedFormats") }
             if files.count == 1 { return files[0].url.deletingLastPathComponent().path }
             return files.map(\.url.lastPathComponent).prefix(3).joined(separator: " · ")
         }()
@@ -2009,7 +2114,8 @@ struct ContentView: View {
         let segments = slot?.segments ?? []
         let duration = timelineDuration(for: slot)
         let clipRange = slot.flatMap { normalizedClipRange(for: $0) }
-        let flaggedSegmentCount = segments.filter(\.flagged).count
+        let flaggedSegmentCount = flaggedSegmentCount(in: segments)
+        let audioEventStats = AudioEventSegmentMarker.statistics(in: segments)
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text(t("segments.title"))
@@ -2049,6 +2155,10 @@ struct ContentView: View {
 
             SegmentStatsView(stats: stats, language: language)
 
+            if audioEventStats.hasScores {
+                audioEventTuningRow(stats: audioEventStats)
+            }
+
             if segments.isEmpty {
                 ContentUnavailableView(
                     t("segments.empty"),
@@ -2068,11 +2178,22 @@ struct ContentView: View {
                                 Text(timeRange(segment))
                                     .font(.caption.monospacedDigit())
                                 let labelText = segmentLabelText(segment)
-                                if !labelText.isEmpty {
-                                    Text(labelText)
-                                        .font(.caption2)
-                                        .foregroundStyle(segment.flagged ? .orange : .secondary)
-                                        .lineLimit(1)
+                                let topLabelsText = segmentTopAudioLabelsText(segment)
+                                if !labelText.isEmpty || !topLabelsText.isEmpty {
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        if !labelText.isEmpty {
+                                            Text(labelText)
+                                                .font(.caption2)
+                                                .foregroundStyle(segment.flagged ? .orange : .secondary)
+                                                .lineLimit(1)
+                                        }
+                                        if !topLabelsText.isEmpty {
+                                            Text(topLabelsText)
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(1)
+                                        }
+                                    }
                                 }
                                 Spacer()
                                 Text("\(segment.duration, specifier: "%.2f")s")
@@ -2115,7 +2236,7 @@ struct ContentView: View {
                             .onTapGesture {
                                 previewSegment(segment)
                             }
-                            .help(t("segments.tapToPlay"))
+                            .help(segmentHelpText(segment))
                         }
                     }
                     .padding(.vertical, 2)
@@ -2126,6 +2247,127 @@ struct ContentView: View {
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func audioEventTuningRow(stats: AudioEventPreviewStats) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                audioEventStatsSummary(stats: stats)
+                Spacer(minLength: 8)
+                audioEventTuningControls(stats: stats)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                audioEventStatsSummary(stats: stats)
+                audioEventTuningControls(stats: stats)
+            }
+        }
+        .font(.caption)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(.quinary, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func audioEventStatsSummary(stats: AudioEventPreviewStats) -> some View {
+        HStack(spacing: 8) {
+            Label(
+                String(format: t("segments.tuning.marked"), stats.flagged, stats.total),
+                systemImage: stats.flagged > 0 ? "flag.fill" : "flag"
+            )
+            .foregroundStyle(stats.flagged > 0 ? .orange : .secondary)
+            Text("\(stats.scored)/\(stats.total)")
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+            if let averageSpeech = stats.averageSpeech {
+                Text("\(t("segments.speechScore")) \(percentText(averageSpeech))")
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            if let averageRepetition = stats.averageRepetition {
+                Text("\(t("segments.repetitionScore")) \(percentText(averageRepetition))")
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .lineLimit(1)
+    }
+
+    private func audioEventTuningControls(stats: AudioEventPreviewStats) -> some View {
+        HStack(spacing: 8) {
+            Picker("", selection: Binding(
+                get: { settings.audioEventFilterType },
+                set: { newValue in
+                    settings.audioEventFilterType = newValue
+                    remarkPreviewSegmentsWithCurrentAudioEventSettings()
+                }
+            )) {
+                ForEach(visibleAudioEventFilterTypes) { type in
+                    Text(audioEventFilterTypeTitle(type)).tag(type)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .controlSize(.small)
+            .frame(width: 140)
+            .disabled(isProcessing || !stats.hasScores)
+
+            Picker("", selection: Binding(
+                get: { settings.audioEventPreset },
+                set: { newValue in
+                    settings.audioEventPreset = newValue
+                    settings.audioEventThreshold = newValue.defaultThreshold
+                    remarkPreviewSegmentsWithCurrentAudioEventSettings()
+                }
+            )) {
+                ForEach(visibleAudioEventFilterPresets) { preset in
+                    Text(audioEventFilterPresetTitle(preset)).tag(preset)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .controlSize(.small)
+            .frame(width: 210)
+            .disabled(isProcessing || !stats.hasScores)
+
+            Button {
+                remarkPreviewSegmentsWithCurrentAudioEventSettings()
+            } label: {
+                Label(t("segments.remark"), systemImage: "wand.and.stars")
+            }
+            .labelStyle(.iconOnly)
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .disabled(isProcessing || !stats.hasScores)
+            .help(t("segments.remark.help"))
+        }
+    }
+
+    private func percentText(_ value: Double?) -> String {
+        guard let value else { return "-" }
+        return "\(Int((value * 100).rounded()))%"
+    }
+
+    private func remarkPreviewSegmentsWithCurrentAudioEventSettings() {
+        guard files.indices.contains(activeIndex), !files[activeIndex].segments.isEmpty else { return }
+        withAnimation(.easeInOut(duration: 0.16)) {
+            files[activeIndex].segments = files[activeIndex].segments.map { segment in
+                let result = AudioEventSegmentMarker.mark(
+                    segment: segment,
+                    filterType: settings.audioEventFilterType,
+                    preset: settings.audioEventPreset,
+                    threshold: settings.audioEventThreshold,
+                    lowSpeechLabel: t("segments.lowSpeechProbability"),
+                    repetitionLabel: t("segments.repetitionScore")
+                )
+                return segment.withAudioEventMarker(
+                    label: result.label,
+                    score: result.score.map { AudioEventSegmentMarker.roundedScore($0) },
+                    flagged: result.flagged
+                )
+            }
+            files[activeIndex].statusDetail = "\(flaggedSegmentCount(in: files[activeIndex].segments)) \(t("segments.marked"))"
+        }
+        syncPreviewSegmentsForActiveSlot()
     }
 
     private func segmentLabelText(_ segment: SubtitleSegment) -> String {
@@ -2139,6 +2381,35 @@ struct ContentView: View {
             return "\(label) \(Int((score * 100).rounded()))%"
         }
         return label
+    }
+
+    private func segmentTopAudioLabelsText(_ segment: SubtitleSegment, limit: Int = 3) -> String {
+        audioLabelScoresText(segment.audioLabels.prefix(limit))
+    }
+
+    private func audioLabelScoresText<S: Sequence>(_ labels: S) -> String where S.Element == AudioEventLabelScore {
+        labels.map { item in
+            if let score = item.score {
+                return "\(item.label) \(Int((score * 100).rounded()))%"
+            }
+            return item.label
+        }
+        .joined(separator: " · ")
+    }
+
+    private func segmentHelpText(_ segment: SubtitleSegment) -> String {
+        var lines = [t("segments.tapToPlay")]
+        let topLabels = audioLabelScoresText(segment.audioLabels.prefix(5))
+        if !topLabels.isEmpty {
+            lines.append("\(t("segments.audioTopLabels")): \(topLabels)")
+        }
+        if let speechScore = segment.speechScore {
+            lines.append("\(t("segments.speechScore")): \(Int((speechScore * 100).rounded()))%")
+        }
+        if let repetitionScore = segment.repetitionScore {
+            lines.append("\(t("segments.repetitionScore")): \(Int((repetitionScore * 100).rounded()))%")
+        }
+        return lines.joined(separator: "\n")
     }
 
     private func previewSegment(_ segment: SubtitleSegment) {
@@ -2168,7 +2439,7 @@ struct ContentView: View {
 
     private func deleteFlaggedSegments() {
         guard files.indices.contains(activeIndex) else { return }
-        let flaggedCount = files[activeIndex].segments.filter(\.flagged).count
+        let flaggedCount = flaggedSegmentCount(in: files[activeIndex].segments)
         guard flaggedCount > 0 else { return }
         guard files[activeIndex].segments.count > flaggedCount else {
             errorMessage = t("segments.deleteMarked.emptyError")
@@ -2273,6 +2544,15 @@ struct ContentView: View {
                 .labelStyle(.iconOnly)
                 .disabled(activeSlot == nil || isSaving || isProcessing)
                 .help(t("help.importSubtitle"))
+
+                Button {
+                    importSubtitleFromClipboardForActiveFile()
+                } label: {
+                    Label(t("action.importSubtitleFromClipboard"), systemImage: "clipboard")
+                }
+                .labelStyle(.iconOnly)
+                .disabled(activeSlot == nil || isSaving || isProcessing)
+                .help(t("help.importSubtitleFromClipboard"))
 
                 Button {
                     copyOutput()
@@ -2385,6 +2665,18 @@ struct ContentView: View {
                 .disabled(slot == nil)
                 .accessibilityLabel(t(playback.isPlaying ? "editor.pause" : "editor.play"))
 
+                Button {
+                    selectMeaninglessCuesFromActiveCueList()
+                } label: {
+                    Image(systemName: "text.magnifyingglass")
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .disabled(slot?.cues.isEmpty != false)
+                .help(t("cueList.selectMeaningless.help"))
+                .accessibilityLabel(t("cueList.selectMeaningless"))
+
                 if !cueListSelection.isEmpty {
                     Button(role: .destructive) {
                         deleteCuesFromActiveCueList(cueListSelection)
@@ -2393,6 +2685,7 @@ struct ContentView: View {
                     }
                     .controlSize(.small)
                     .buttonStyle(.borderless)
+                    .keyboardShortcut(.delete, modifiers: [.command])
                     .help(t("cueList.delete"))
                 }
             }
@@ -2490,6 +2783,22 @@ struct ContentView: View {
             .width(min: 60, ideal: 80, max: 140)
             .customizationID("speaker")
 
+            TableColumn(t("cueList.reason")) { cue in
+                if let reason = MeaninglessCueDetector.classification(for: cue.text).reason {
+                    Text(meaninglessCueReasonTitle(reason))
+                        .font(.caption2)
+                        .lineLimit(1)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.secondary.opacity(0.12), in: Capsule())
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("")
+                }
+            }
+            .width(min: 52, ideal: 66, max: 92)
+            .customizationID("meaninglessReason")
+
             TableColumn(t("cueList.content")) { cue in
                 TextField("", text: cueTextDisplayBinding(for: cue.id))
                     .textFieldStyle(.plain)
@@ -2583,6 +2892,14 @@ struct ContentView: View {
 
             Divider()
 
+            if let anchorID {
+                Button(role: .destructive) {
+                    deleteMatchingCuesFromActiveCueList(referenceCueID: anchorID)
+                } label: {
+                    Label(t("editor.deleteMatchingCues"), systemImage: "trash.slash")
+                }
+            }
+
             Button(role: .destructive) {
                 deleteCuesFromActiveCueList(ids)
             } label: {
@@ -2608,6 +2925,19 @@ struct ContentView: View {
         let cues = files[activeIndex].cues
         let firstIndex = cues.indices.first { ids.contains(cues[$0].id) }
         return firstIndex.map { cues[$0].id }
+    }
+
+    private func validCueSelection(_ selection: Set<SubtitleCue.ID>, in cues: [SubtitleCue]) -> Set<SubtitleCue.ID> {
+        guard !selection.isEmpty else { return [] }
+        var validSelection = Set<SubtitleCue.ID>()
+        validSelection.reserveCapacity(min(selection.count, cues.count))
+        for cue in cues where selection.contains(cue.id) {
+            validSelection.insert(cue.id)
+            if validSelection.count == selection.count {
+                break
+            }
+        }
+        return validSelection
     }
 
     private func syncCueListSelectionFromActiveCue(_ cueID: SubtitleCue.ID?) {
@@ -2638,8 +2968,7 @@ struct ContentView: View {
             return
         }
 
-        let validIDs = Set(files[activeIndex].cues.map(\.id))
-        let cleanedSelection = selection.intersection(validIDs)
+        let cleanedSelection = validCueSelection(selection, in: files[activeIndex].cues)
         if cleanedSelection != selection {
             cueListSelection = cleanedSelection
             return
@@ -2653,6 +2982,9 @@ struct ContentView: View {
         }
         if files[activeIndex].selectedCueID != cueID {
             files[activeIndex].selectedCueID = cueID
+        }
+        if let cue = files[activeIndex].cues.first(where: { $0.id == cueID }) {
+            playback.seek(to: cue.start)
         }
     }
 
@@ -2793,6 +3125,54 @@ struct ContentView: View {
         }
     }
 
+    private func deleteSelectedCuesFromActiveCueList() {
+        guard detailTab == .cueList, !cueListSelection.isEmpty else { return }
+        deleteCuesFromActiveCueList(cueListSelection)
+    }
+
+    private func selectMeaninglessCuesFromActiveCueList() {
+        guard files.indices.contains(activeIndex) else { return }
+        let matchingIDs = Set(
+            files[activeIndex].cues
+                .filter { MeaninglessCueDetector.isMeaningless($0.text) }
+                .map(\.id)
+        )
+        cueListSelection = matchingIDs
+        if let anchorID = anchorCueID(in: matchingIDs) {
+            files[activeIndex].selectedCueID = anchorID
+        } else {
+            files[activeIndex].selectedCueID = nil
+        }
+    }
+
+    private func deleteMatchingCuesFromActiveCueList(referenceCueID: SubtitleCue.ID) {
+        guard files.indices.contains(activeIndex),
+              let referenceIndex = files[activeIndex].cues.firstIndex(where: { $0.id == referenceCueID }) else {
+            return
+        }
+        let targetText = SubtitleDocument.normalizedCueTextForMatching(
+            SubtitleDocument.displayText(for: files[activeIndex].cues[referenceIndex])
+        )
+        guard !targetText.isEmpty else { return }
+
+        let matchingIDs = Set(
+            files[activeIndex].cues
+                .filter {
+                    SubtitleDocument.normalizedCueTextForMatching(SubtitleDocument.displayText(for: $0)) == targetText
+                }
+                .map(\.id)
+        )
+        guard !matchingIDs.isEmpty else { return }
+
+        deleteCuesFromActiveCueList(matchingIDs)
+        if files[activeIndex].cues.isEmpty {
+            return
+        }
+        let nextIndex = min(referenceIndex, files[activeIndex].cues.count - 1)
+        files[activeIndex].selectedCueID = files[activeIndex].cues[nextIndex].id
+        cueListSelection = [files[activeIndex].cues[nextIndex].id]
+    }
+
     private func fileSlotBinding(for id: FileSlot.ID) -> Binding<FileSlot> {
         Binding(
             get: {
@@ -2893,42 +3273,70 @@ struct ContentView: View {
 
     private func modelProfileStrip(for engine: ASREngine) -> some View {
         let profile = modelProfile(for: engine)
-        let columns = [GridItem(.adaptive(minimum: 100), spacing: 6, alignment: .leading)]
-        return LazyVGrid(columns: columns, alignment: .leading, spacing: 6) {
-            modelProfileChip(
-                title: t("model.profile.speed"),
-                value: profile.speed,
-                systemImage: "bolt.fill",
-                tint: .orange
-            )
-            modelProfileChip(
-                title: t("model.profile.quality"),
-                value: profile.quality,
-                systemImage: "sparkles",
-                tint: .blue
-            )
-            modelProfileChip(
-                title: t("model.profile.scenario"),
-                value: profile.scenario,
-                systemImage: "scope",
-                tint: .purple
-            )
+        return ViewThatFits(in: .horizontal) {
+            HStack(spacing: 4) {
+                modelProfileChip(
+                    title: t("model.profile.speed"),
+                    value: profile.speed,
+                    systemImage: "bolt.fill",
+                    tint: .orange
+                )
+                modelProfileChip(
+                    title: t("model.profile.quality"),
+                    value: profile.quality,
+                    systemImage: "sparkles",
+                    tint: .blue
+                )
+                modelProfileChip(
+                    title: t("model.profile.scenario"),
+                    value: profile.scenario,
+                    systemImage: "scope",
+                    tint: .purple
+                )
+            }
+
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 72), spacing: 4, alignment: .leading)],
+                alignment: .leading,
+                spacing: 4
+            ) {
+                modelProfileChip(
+                    title: t("model.profile.speed"),
+                    value: profile.speed,
+                    systemImage: "bolt.fill",
+                    tint: .orange
+                )
+                modelProfileChip(
+                    title: t("model.profile.quality"),
+                    value: profile.quality,
+                    systemImage: "sparkles",
+                    tint: .blue
+                )
+                modelProfileChip(
+                    title: t("model.profile.scenario"),
+                    value: profile.scenario,
+                    systemImage: "scope",
+                    tint: .purple
+                )
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func modelProfileChip(title: String, value: String, systemImage: String, tint: Color) -> some View {
         Label {
-            Text("\(title) \(value)")
+            Text(value)
                 .lineLimit(1)
-                .minimumScaleFactor(0.85)
+                .minimumScaleFactor(0.72)
+                .truncationMode(.tail)
         } icon: {
             Image(systemName: systemImage)
+                .imageScale(.small)
                 .foregroundStyle(tint)
         }
-        .font(.caption2.weight(.medium))
-        .padding(.horizontal, 7)
-        .padding(.vertical, 4)
+        .font(.caption2.weight(.semibold))
+        .padding(.horizontal, 5)
+        .padding(.vertical, 3)
         .background(tint.opacity(0.1), in: Capsule())
         .help("\(title) \(value)")
     }
@@ -3068,6 +3476,19 @@ struct ContentView: View {
         t("settings.audioEventPreset.\(preset.rawValue)")
     }
 
+    private func meaninglessCueReasonTitle(_ reason: MeaninglessCueReason) -> String {
+        switch reason {
+        case .empty:
+            t("cueList.reason.empty")
+        case .symbols:
+            t("cueList.reason.symbols")
+        case .repetition:
+            t("cueList.reason.repetition")
+        case .interjection:
+            t("cueList.reason.interjection")
+        }
+    }
+
     private func speakerLabelingEngineTitle(_ engine: SpeakerLabelingEngine) -> String {
         t("settings.speakerLabelingEngine.\(engine.rawValue)")
     }
@@ -3090,6 +3511,11 @@ struct ContentView: View {
            let info = settings.currentVADInfo,
            !info.localModelAvailable {
             return t("vad.status.fireredMissing")
+        }
+        if settings.effectiveVADEngine == .pyannoteMLX,
+           let info = settings.currentVADInfo,
+           !info.localModelAvailable {
+            return t("vad.status.pyannoteMissing")
         }
         if let info = settings.currentVADInfo {
             let availability = info.localModelAvailable ? t("model.localAvailable") : t("model.localMissing")
@@ -3494,6 +3920,35 @@ struct ContentView: View {
         }
     }
 
+    private func importSubtitleFromClipboardForActiveFile() {
+        guard !isProcessing else {
+            errorMessage = t("error.importWhileProcessing")
+            return
+        }
+        guard files.indices.contains(activeIndex) else {
+            errorMessage = t("error.noActiveFile")
+            return
+        }
+        subtitleTextImportSlotID = files[activeIndex].id
+        subtitleTextImportDraft = ""
+        isSubtitleTextImportSheetPresented = true
+    }
+
+    private func submitSubtitleTextImport() {
+        guard let slotID = subtitleTextImportSlotID else { return }
+        let text = subtitleTextImportDraft
+        resetSubtitleTextImportSheet()
+        Task {
+            await importSRTSubtitleText(text, slotID: slotID)
+        }
+    }
+
+    private func resetSubtitleTextImportSheet() {
+        isSubtitleTextImportSheetPresented = false
+        subtitleTextImportDraft = ""
+        subtitleTextImportSlotID = nil
+    }
+
     private func importSidecarSubtitle(for mediaURL: URL, slotID: UUID) {
         if let subtitleURL = sidecarSubtitleURL(for: mediaURL) {
             Task {
@@ -3598,40 +4053,15 @@ struct ContentView: View {
                     userInfo: [NSLocalizedDescriptionKey: t("error.subtitleNoTimedCues")]
                 )
             }
-            if !cues.isEmpty,
-               let mediaDuration = await mediaDurationForSubtitleValidation(slotID: slotID) {
-                let maxEnd = cues.map(\.end).max() ?? 0
-                if maxEnd > mediaDuration + 0.05 {
-                    throw NSError(
-                        domain: "MSub.SubtitleImport",
-                        code: 2,
-                        userInfo: [
-                            NSLocalizedDescriptionKey: String(
-                                format: t("error.subtitleTimeExceedsDuration"),
-                                SubtitleDocument.displayTime(maxEnd),
-                                SubtitleDocument.displayTime(mediaDuration)
-                            )
-                        ]
-                    )
-                }
-            }
-            guard let refreshedIndex = files.firstIndex(where: { $0.id == slotID }) else { return }
-            update(at: refreshedIndex) {
-                $0.outputFormat = format
-            }
-            installSubtitleText(text, at: refreshedIndex, format: format, parsedCues: cues)
-            update(at: refreshedIndex) {
-                $0.outputFormat = format
-                $0.statusKey = automatic ? "status.subtitleAutoImported" : "status.subtitleImported"
-                $0.statusDetail = subtitleURL.lastPathComponent
-                if $0.processingState == .idle || $0.processingState == .failed {
-                    $0.processingState = .done
-                }
-                $0.progress = max($0.progress, 1)
-            }
-            if refreshedIndex == activeIndex {
-                detailTab = .output
-            }
+            try await validateImportedSubtitleCues(cues, slotID: slotID)
+            prepareImportedSubtitle(
+                text: text,
+                format: format,
+                cues: cues,
+                slotID: slotID,
+                statusKey: automatic ? "status.subtitleAutoImported" : "status.subtitleImported",
+                statusDetail: subtitleURL.lastPathComponent
+            )
         } catch {
             if automatic, let index = files.firstIndex(where: { $0.id == slotID }) {
                 update(at: index) {
@@ -3641,6 +4071,142 @@ struct ContentView: View {
             } else {
                 errorMessage = String(format: t("error.subtitleImportFailed"), error.localizedDescription)
             }
+        }
+    }
+
+    private func importSRTSubtitleText(_ text: String, slotID: UUID) async {
+        do {
+            let normalizedText = normalizedSRTImportText(text)
+            let cues = parsedImportableSRTCues(from: normalizedText)
+            if cues.isEmpty {
+                throw NSError(
+                    domain: "MSub.SubtitleImport",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: t("error.subtitleSRTRequired")]
+                )
+            }
+            try await validateImportedSubtitleCues(cues, slotID: slotID)
+            prepareImportedSubtitle(
+                text: normalizedText,
+                format: .srt,
+                cues: cues,
+                slotID: slotID,
+                statusKey: "status.subtitleClipboardImported",
+                statusDetail: OutputFormat.srt.title
+            )
+        } catch {
+            errorMessage = String(format: t("error.subtitleImportFailed"), error.localizedDescription)
+        }
+    }
+
+    private func prepareImportedSubtitle(
+        text: String,
+        format: OutputFormat,
+        cues: [SubtitleCue],
+        slotID: UUID,
+        statusKey: String,
+        statusDetail: String
+    ) {
+        guard files.contains(where: { $0.id == slotID }) else { return }
+
+        let resolution = SubtitleOverlapResolver.resolve(cues)
+        guard resolution.hasOverlaps else {
+            commitImportedSubtitle(
+                text: text,
+                format: format,
+                cues: cues,
+                slotID: slotID,
+                statusKey: statusKey,
+                statusDetail: statusDetail
+            )
+            return
+        }
+
+        pendingSubtitleOverlapImport = PendingSubtitleOverlapImport(
+            slotID: slotID,
+            text: text,
+            format: format,
+            cues: cues,
+            resolution: resolution,
+            statusKey: statusKey,
+            statusDetail: statusDetail
+        )
+    }
+
+    private func commitPendingSubtitleOverlapImport(_ pendingImport: PendingSubtitleOverlapImport, resolving: Bool) {
+        pendingSubtitleOverlapImport = nil
+        commitImportedSubtitle(
+            text: pendingImport.text,
+            format: pendingImport.format,
+            cues: resolving ? pendingImport.resolution.cues : pendingImport.cues,
+            slotID: pendingImport.slotID,
+            statusKey: pendingImport.statusKey,
+            statusDetail: resolving ? subtitleOverlapResolvedStatusDetail(for: pendingImport) : pendingImport.statusDetail
+        )
+    }
+
+    private func commitImportedSubtitle(
+        text: String,
+        format: OutputFormat,
+        cues: [SubtitleCue],
+        slotID: UUID,
+        statusKey: String,
+        statusDetail: String
+    ) {
+        guard let refreshedIndex = files.firstIndex(where: { $0.id == slotID }) else { return }
+        update(at: refreshedIndex) {
+            $0.outputFormat = format
+        }
+        installSubtitleText(text, at: refreshedIndex, format: format, parsedCues: cues)
+        update(at: refreshedIndex) {
+            $0.outputFormat = format
+            $0.statusKey = statusKey
+            $0.statusDetail = statusDetail
+            if $0.processingState == .idle || $0.processingState == .failed {
+                $0.processingState = .done
+            }
+            $0.progress = max($0.progress, 1)
+        }
+        if refreshedIndex == activeIndex {
+            detailTab = .output
+        }
+    }
+
+    private func subtitleOverlapPromptMessage(for pendingImport: PendingSubtitleOverlapImport) -> String {
+        String(
+            format: t("importOverlap.message"),
+            pendingImport.resolution.overlapPairCount,
+            pendingImport.resolution.removedCount,
+            pendingImport.resolution.adjustedCount
+        )
+    }
+
+    private func subtitleOverlapResolvedStatusDetail(for pendingImport: PendingSubtitleOverlapImport) -> String {
+        String(
+            format: t("importOverlap.resolvedStatus"),
+            pendingImport.resolution.removedCount,
+            pendingImport.resolution.adjustedCount
+        )
+    }
+
+    private func validateImportedSubtitleCues(_ cues: [SubtitleCue], slotID: UUID) async throws {
+        guard !cues.isEmpty,
+              let mediaDuration = await mediaDurationForSubtitleValidation(slotID: slotID) else {
+            return
+        }
+        let maxEnd = maxCueEnd(in: cues)
+        if maxEnd > mediaDuration + 0.05 {
+            throw NSError(
+                domain: "MSub.SubtitleImport",
+                code: 2,
+                userInfo: [
+                    NSLocalizedDescriptionKey: String(
+                        format: t("error.subtitleTimeExceedsDuration"),
+                        SubtitleDocument.displayTime(maxEnd),
+                        SubtitleDocument.displayTime(mediaDuration)
+                    )
+                ]
+            )
         }
     }
 
@@ -3783,7 +4349,7 @@ struct ContentView: View {
 
     private func chooseEmotionModelDirectory() {
         guard let modelURL = chooseAuxiliaryModelDirectory(
-            expectedDirectoryName: "emotion2vec_plus_base",
+            expectedDirectoryName: "emotion2vec-plus-large-mlx",
             message: t("model.chooseEmotion.message")
         ) else {
             return
@@ -3795,7 +4361,7 @@ struct ContentView: View {
     }
 
     private func useRemoteEmotionModel() {
-        settings.emotionModel = "emotion2vec/emotion2vec_plus_base"
+        settings.emotionModel = "mlx-community/emotion2vec-plus-large-mlx"
         settings.emotionModelAvailable = false
         backend.useRemoteEmotionModelDownload()
         restartBackendAfterAuxiliaryModelChange()
@@ -4078,6 +4644,7 @@ struct ContentView: View {
         let attributes = try? FileManager.default.attributesOfItem(atPath: slot.url.path)
         let modified = (attributes?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
         return [
+            "audio-sync-v2",
             slot.url.standardizedFileURL.path,
             "\(modified)",
             clip,
@@ -4328,8 +4895,8 @@ struct ContentView: View {
         displayDuration: Double,
         clipRange: MediaClipRange?
     ) async throws {
-        while !Task.isCancelled {
-            let job = try await api.jobStatus(id: jobID)
+        for try await job in api.jobStatusStream(id: jobID) {
+            if Task.isCancelled { return }
             let total = max(job.total ?? 100, 1)
             let current = max(job.current ?? 0, 0)
             let progress = min(max(Double(current) / Double(total), 0), 0.99)
@@ -4368,7 +4935,7 @@ struct ContentView: View {
                 update(at: fileIndex) {
                     $0.duration = clipRange == nil
                         ? max($0.duration, job.duration ?? 0)
-                        : max($0.duration, displayDuration, clipRange?.end ?? 0, segments.map(\.end).max() ?? 0)
+                        : max($0.duration, displayDuration, clipRange?.end ?? 0, maxSegmentEnd(in: segments))
                     if clipRange == nil {
                         $0.mediaInfo = job.mediaInfo ?? $0.mediaInfo
                     }
@@ -4407,17 +4974,17 @@ struct ContentView: View {
                 failureDetails = details
                 throw JobFailureError(message: message)
             }
-            try await Task.sleep(for: .milliseconds(500))
         }
     }
 
     private func poll(jobID: String, fileIndex: Int, timeOffset: Double) async throws {
-        while !Task.isCancelled {
-            let job = try await api.jobStatus(id: jobID)
+        for try await job in api.jobStatusStream(id: jobID, pollInterval: .seconds(1)) {
+            if Task.isCancelled { return }
             let total = max(job.total ?? 0, 0)
             let current = max(job.current ?? 0, 0)
             let fractionalCurrent = min(max(job.fractionalCurrent ?? Double(current), 0), Double(max(total, 0)))
-            let progress = total > 0 ? fractionalCurrent / Double(total) : 0
+            let phaseProgress = min(max(job.phaseProgress ?? 0, 0), 0.95)
+            let progress = total > 0 ? fractionalCurrent / Double(total) : phaseProgress
 
             update(at: fileIndex) {
                 $0.progress = progress
@@ -4498,7 +5065,6 @@ struct ContentView: View {
                 failureDetails = details
                 throw JobFailureError(message: message)
             }
-            try await Task.sleep(for: .seconds(1))
         }
     }
 
@@ -4645,6 +5211,8 @@ struct ContentView: View {
             UTType(filenameExtension: "srt") ?? .plainText
         case .vtt:
             UTType(filenameExtension: "vtt") ?? .plainText
+        case .ass:
+            UTType(filenameExtension: "ass") ?? .plainText
         case .txt:
             .plainText
         case .json:
@@ -4674,8 +5242,9 @@ struct ContentView: View {
     ) {
         let parsed = parsedCues ?? SubtitleDocument.parse(text, format: format)
         let cues = offsetCues(parsed, by: timeOffset)
-        let termsSource = cues.isEmpty ? text : cues.map(\.text).joined(separator: " ")
-        let frequentTerms = SubtitleTextStats.topTerms(in: termsSource, limit: 8)
+        let frequentTerms = cues.isEmpty
+            ? SubtitleTextStats.topTerms(in: text, limit: 8)
+            : SubtitleTextStats.topTerms(in: cues, limit: 8)
         let emotionFrequencies = SubtitleEmotionStats.frequencies(in: cues)
         update(at: index) {
             $0.outputFormat = format
@@ -4686,7 +5255,7 @@ struct ContentView: View {
             $0.emotionFrequencies = emotionFrequencies
             $0.selectedCueID = cues.first?.id
             if !$0.cues.isEmpty {
-                $0.duration = max($0.duration, $0.cues.map(\.end).max() ?? 0)
+                $0.duration = max($0.duration, maxCueEnd(in: $0.cues))
             }
             if $0.segments.isEmpty {
                 $0.segments = $0.cues.map {
@@ -4710,24 +5279,64 @@ struct ContentView: View {
         "\(timeString(segment.start)) -> \(timeString(segment.end))"
     }
 
+    private func maxPositive(_ current: Double, _ candidate: Double) -> Double {
+        guard candidate.isFinite, candidate > current, candidate > 0 else { return current }
+        return candidate
+    }
+
+    private func maxCueEnd(in cues: [SubtitleCue]) -> Double {
+        var maxEnd: Double = 0
+        for cue in cues {
+            maxEnd = maxPositive(maxEnd, cue.end)
+        }
+        return maxEnd
+    }
+
+    private func maxSegmentEnd(in segments: [SubtitleSegment]) -> Double {
+        var maxEnd: Double = 0
+        for segment in segments {
+            maxEnd = maxPositive(maxEnd, segment.end)
+        }
+        return maxEnd
+    }
+
+    private func flaggedSegmentCount(in segments: [SubtitleSegment]) -> Int {
+        var count = 0
+        for segment in segments where segment.flagged {
+            count += 1
+        }
+        return count
+    }
+
+    private func joinedCueText(_ cues: [SubtitleCue]) -> String {
+        var characterCount = 0
+        for cue in cues {
+            characterCount += cue.text.count + 1
+        }
+        var text = ""
+        text.reserveCapacity(characterCount)
+        for cue in cues {
+            if !text.isEmpty {
+                text.append(" ")
+            }
+            text.append(cue.text)
+        }
+        return text
+    }
+
     private func timelineDuration(for slot: FileSlot?) -> Double {
         guard let slot else { return 0 }
-        var candidates: [Double] = [slot.duration]
-        if let duration = slot.mediaInfo?.duration {
-            candidates.append(duration)
+        var duration: Double = 0
+        duration = maxPositive(duration, slot.duration)
+        if let mediaDuration = slot.mediaInfo?.duration {
+            duration = maxPositive(duration, mediaDuration)
         }
         if let clipRange = slot.clipRange {
-            candidates.append(clipRange.end)
+            duration = maxPositive(duration, clipRange.end)
         }
-        if let segmentEnd = slot.segments.map(\.end).max() {
-            candidates.append(segmentEnd)
-        }
-        if let cueEnd = slot.cues.map(\.end).max() {
-            candidates.append(cueEnd)
-        }
-        return candidates
-            .filter { $0.isFinite && $0 > 0 }
-            .max() ?? 0
+        duration = maxPositive(duration, maxSegmentEnd(in: slot.segments))
+        duration = maxPositive(duration, maxCueEnd(in: slot.cues))
+        return duration
     }
 
     private func normalizedClipRange(for slot: FileSlot) -> MediaClipRange? {
@@ -4869,6 +5478,7 @@ struct ContentView: View {
                 duration: end - start,
                 audioLabel: segment.audioLabel,
                 audioScore: segment.audioScore,
+                audioLabels: segment.audioLabels,
                 speechScore: segment.speechScore,
                 repetitionScore: segment.repetitionScore,
                 flagged: segment.flagged
@@ -4904,6 +5514,7 @@ struct ContentView: View {
                 duration: $0.duration,
                 audioLabel: $0.audioLabel,
                 audioScore: $0.audioScore,
+                audioLabels: $0.audioLabels,
                 speechScore: $0.speechScore,
                 repetitionScore: $0.repetitionScore,
                 flagged: $0.flagged
@@ -4915,6 +5526,259 @@ struct ContentView: View {
         let minutes = Int(seconds) / 60
         let remainder = seconds - Double(minutes * 60)
         return String(format: "%02d:%05.2f", minutes, remainder)
+    }
+
+    private func t(_ key: String) -> String {
+        Copy.text(key, language: language)
+    }
+}
+
+private func normalizedSRTImportText(_ text: String) -> String {
+    text
+        .replacingOccurrences(of: "\r\n", with: "\n")
+        .replacingOccurrences(of: "\r", with: "\n")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+private struct PendingSubtitleOverlapImport: Identifiable {
+    let id = UUID()
+    let slotID: UUID
+    let text: String
+    let format: OutputFormat
+    let cues: [SubtitleCue]
+    let resolution: SubtitleOverlapResolution
+    let statusKey: String
+    let statusDetail: String
+}
+
+private struct SubtitleOverlapResolution {
+    let cues: [SubtitleCue]
+    let overlapPairCount: Int
+    let removedCount: Int
+    let adjustedCount: Int
+
+    var hasOverlaps: Bool {
+        overlapPairCount > 0
+    }
+}
+
+private enum SubtitleOverlapResolver {
+    private static let epsilon = 0.0001
+    private static let minimumDuration = 0.05
+
+    static func resolve(_ cues: [SubtitleCue]) -> SubtitleOverlapResolution {
+        let original = SubtitleDocument.normalize(cues)
+        let overlapPairCount = overlapPairs(in: original).count
+        guard overlapPairCount > 0 else {
+            return SubtitleOverlapResolution(cues: original, overlapPairCount: 0, removedCount: 0, adjustedCount: 0)
+        }
+
+        var working = original
+        var guardCount = 0
+        while guardCount < max(1, original.count * original.count) {
+            guardCount += 1
+            let pairs = overlapPairs(in: working)
+            guard !pairs.isEmpty else { break }
+
+            let conflictedIDs = Set(pairs.flatMap { [working[$0.0].id, working[$0.1].id] })
+            let symbolOrEmptyIDs = Set(
+                working
+                    .filter { conflictedIDs.contains($0.id) && lacksLexicalContent($0.text) }
+                    .map(\.id)
+            )
+            if !symbolOrEmptyIDs.isEmpty {
+                working.removeAll { symbolOrEmptyIDs.contains($0.id) }
+                working = SubtitleDocument.normalize(working)
+                continue
+            }
+
+            let containingIDs = Set(containingCueIDs(in: working))
+            if !containingIDs.isEmpty {
+                working.removeAll { containingIDs.contains($0.id) }
+                working = SubtitleDocument.normalize(working)
+                continue
+            }
+
+            let pair = pairs[0]
+            let leftIndex = pair.0
+            let rightIndex = pair.1
+            let left = working[leftIndex]
+            let right = working[rightIndex]
+            let overlapStart = max(left.start, right.start)
+            let overlapEnd = min(left.end, right.end)
+            let overlapDuration = overlapEnd - overlapStart
+
+            guard overlapDuration > epsilon else { break }
+            let leftDuration = max(minimumDuration, left.end - left.start)
+            let rightDuration = max(minimumDuration, right.end - right.start)
+            if overlapDuration <= leftDuration * 0.5 + epsilon,
+               overlapDuration <= rightDuration * 0.5 + epsilon {
+                let midpoint = (overlapStart + overlapEnd) / 2
+                var adjustedLeft = left
+                var adjustedRight = right
+                if left.start <= right.start {
+                    adjustedLeft.end = max(adjustedLeft.start + minimumDuration, midpoint)
+                    adjustedRight.start = min(max(midpoint, 0), adjustedRight.end - minimumDuration)
+                } else {
+                    adjustedRight.end = max(adjustedRight.start + minimumDuration, midpoint)
+                    adjustedLeft.start = min(max(midpoint, 0), adjustedLeft.end - minimumDuration)
+                }
+                if Self.overlapDuration(adjustedLeft, adjustedRight) > epsilon {
+                    let removeIndex = longerCueIndex(left: left, leftIndex: leftIndex, right: right, rightIndex: rightIndex)
+                    working.remove(at: removeIndex)
+                } else {
+                    working[leftIndex] = adjustedLeft
+                    working[rightIndex] = adjustedRight
+                }
+            } else {
+                let removeIndex = longerCueIndex(left: left, leftIndex: leftIndex, right: right, rightIndex: rightIndex)
+                working.remove(at: removeIndex)
+            }
+            working = SubtitleDocument.normalize(working)
+        }
+
+        let originalByID = Dictionary(uniqueKeysWithValues: original.map { ($0.id, $0) })
+        let removedCount = original.count - working.count
+        let adjustedCount = working.reduce(0) { count, cue in
+            guard let originalCue = originalByID[cue.id] else { return count }
+            let changed = abs(originalCue.start - cue.start) > epsilon || abs(originalCue.end - cue.end) > epsilon
+            return count + (changed ? 1 : 0)
+        }
+        return SubtitleOverlapResolution(
+            cues: SubtitleDocument.normalize(working),
+            overlapPairCount: overlapPairCount,
+            removedCount: max(0, removedCount),
+            adjustedCount: adjustedCount
+        )
+    }
+
+    private static func overlapPairs(in cues: [SubtitleCue]) -> [(Int, Int)] {
+        guard cues.count > 1 else { return [] }
+        var pairs: [(Int, Int)] = []
+        for i in cues.indices {
+            for j in cues.index(after: i)..<cues.endIndex {
+                if overlapDuration(cues[i], cues[j]) > epsilon {
+                    pairs.append((i, j))
+                }
+            }
+        }
+        return pairs
+    }
+
+    private static func containingCueIDs(in cues: [SubtitleCue]) -> [SubtitleCue.ID] {
+        var ids: [SubtitleCue.ID] = []
+        for outer in cues {
+            let outerDuration = outer.end - outer.start
+            let containsAnother = cues.contains { inner in
+                guard inner.id != outer.id else { return false }
+                let innerDuration = inner.end - inner.start
+                return outerDuration > innerDuration + epsilon
+                    && outer.start <= inner.start + epsilon
+                    && outer.end >= inner.end - epsilon
+            }
+            if containsAnother {
+                ids.append(outer.id)
+            }
+        }
+        return ids
+    }
+
+    private static func overlapDuration(_ a: SubtitleCue, _ b: SubtitleCue) -> Double {
+        min(a.end, b.end) - max(a.start, b.start)
+    }
+
+    private static func longerCueIndex(left: SubtitleCue, leftIndex: Int, right: SubtitleCue, rightIndex: Int) -> Int {
+        let leftDuration = max(minimumDuration, left.end - left.start)
+        let rightDuration = max(minimumDuration, right.end - right.start)
+        if abs(leftDuration - rightDuration) <= epsilon {
+            return left.start <= right.start ? rightIndex : leftIndex
+        }
+        return leftDuration > rightDuration ? leftIndex : rightIndex
+    }
+
+    private static func lacksLexicalContent(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return true }
+        return trimmed.rangeOfCharacter(from: .alphanumerics) == nil
+    }
+}
+
+private func parsedImportableSRTCues(from text: String) -> [SubtitleCue] {
+    let normalized = normalizedSRTImportText(text)
+    guard !normalized.isEmpty,
+          !normalized.uppercased().hasPrefix("WEBVTT"),
+          normalized.range(
+              of: #"(?m)\d{1,2}:\d{2}:\d{2},\d{1,3}\s*-->\s*\d{1,2}:\d{2}:\d{2},\d{1,3}"#,
+              options: .regularExpression
+          ) != nil else {
+        return []
+    }
+    return SubtitleDocument.parse(normalized, format: .srt)
+}
+
+private struct ImportSubtitleTextSheet: View {
+    let language: AppLanguage
+    @Binding var text: String
+    var onCancel: () -> Void
+    var onImport: () -> Void
+
+    @FocusState private var isTextFocused: Bool
+
+    private var parsedCues: [SubtitleCue] {
+        parsedImportableSRTCues(from: text)
+    }
+
+    private var canImport: Bool {
+        !parsedCues.isEmpty
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(t("action.importSubtitleFromClipboard"))
+                .font(.headline)
+
+            TextEditor(text: $text)
+                .font(.system(.body, design: .monospaced))
+                .scrollContentBackground(.hidden)
+                .focused($isTextFocused)
+                .frame(width: 540, height: 300)
+                .background(.quinary, in: RoundedRectangle(cornerRadius: 8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(canImport || text.isEmpty ? Color.secondary.opacity(0.18) : Color.red.opacity(0.55), lineWidth: 1)
+                )
+
+            HStack(spacing: 10) {
+                Text(statusText)
+                    .font(.caption)
+                    .foregroundStyle(canImport || text.isEmpty ? Color.secondary : Color.red)
+                Spacer()
+                Button(t("button.cancel")) {
+                    onCancel()
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button(t("action.importSubtitle")) {
+                    onImport()
+                }
+                .disabled(!canImport)
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .onAppear {
+            isTextFocused = true
+        }
+    }
+
+    private var statusText: String {
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "SRT"
+        }
+        if canImport {
+            return String(format: t("importSubtitleText.cueCount"), parsedCues.count)
+        }
+        return t("error.subtitleSRTRequired")
     }
 
     private func t(_ key: String) -> String {
@@ -6033,6 +6897,7 @@ private enum ClipHandleEdge {
 private struct MSubCommandsModifier: ViewModifier {
     @Binding var detailTab: DetailTab
     let onWillTerminate: () -> Void
+    let onDeleteCueListSelection: () -> Void
 
     func body(content: Content) -> some View {
         content
@@ -6059,6 +6924,10 @@ private struct MSubCommandsModifier: ViewModifier {
                     NotificationCenter.default.post(name: .msubFocusFindFieldRequested, object: nil)
                 }
             }
+            .onReceive(NotificationCenter.default.publisher(for: .msubDeleteSelectedCueRequested)) { _ in
+                guard detailTab == .cueList else { return }
+                onDeleteCueListSelection()
+            }
     }
 }
 
@@ -6066,6 +6935,7 @@ extension Notification.Name {
     static let msubOpenFilesRequested = Notification.Name("MSubOpenFilesRequested")
     static let msubOpenRecentFileRequested = Notification.Name("MSubOpenRecentFileRequested")
     static let msubImportSubtitleRequested = Notification.Name("MSubImportSubtitleRequested")
+    static let msubImportSubtitleFromClipboardRequested = Notification.Name("MSubImportSubtitleFromClipboardRequested")
     static let msubTranscribeRequested = Notification.Name("MSubTranscribeRequested")
     static let msubPreviewRequested = Notification.Name("MSubPreviewRequested")
     static let msubStopRequested = Notification.Name("MSubStopRequested")
@@ -6472,12 +7342,14 @@ private struct UnsupportedMediaPreview: View {
 
     private func reloadPreview() async {
         await playback.load(url)
+        guard !Task.isCancelled else { return }
         cover = nil
         filmstrip = []
         selectedFrameIndex = nil
         isLoadingCover = true
 
         let duration = await assetDurationSeconds()
+        guard !Task.isCancelled else { return }
 
         // Cover first — at ~10% in, or 3s if duration is unknown.
         let coverTime = duration > 0 ? duration * 0.1 : 3.0
@@ -6487,16 +7359,19 @@ private struct UnsupportedMediaPreview: View {
         } else {
             coverImage = await quickLookCover()
         }
+        guard !Task.isCancelled else { return }
         await MainActor.run {
             cover = coverImage
             isLoadingCover = false
         }
 
-        // Filmstrip — extract a few frames in parallel. Skip for very short
-        // clips where overlapping fractions would just produce the same frame.
+        // Filmstrip — extract a few frames with bounded concurrency. Skip for
+        // very short clips where overlapping fractions would just produce the
+        // same frame.
         guard duration > 4 else { return }
         let times = Self.filmstripFractions.map { $0 * duration }
         let strip = await loadFilmstrip(times: times)
+        guard !Task.isCancelled else { return }
         guard !strip.isEmpty else { return }
         await MainActor.run {
             filmstrip = strip
@@ -6504,10 +7379,20 @@ private struct UnsupportedMediaPreview: View {
     }
 
     private func loadFilmstrip(times: [Double]) async -> [NSImage] {
-        await withTaskGroup(of: (Int, NSImage?).self) { group in
-            for (idx, time) in times.enumerated() {
-                group.addTask {
-                    if let frameURL = await FFmpegRunner.extractFrame(from: url, at: time, width: 320),
+        let indexedTimes = Array(times.enumerated())
+        guard !indexedTimes.isEmpty else { return [] }
+        let sourceURL = url
+        let maxConcurrentExtractions = min(2, indexedTimes.count)
+        return await withTaskGroup(of: (Int, NSImage?).self) { group in
+            var nextIndex = 0
+
+            func addNextExtraction() {
+                guard nextIndex < indexedTimes.count else { return }
+                let (idx, time) = indexedTimes[nextIndex]
+                nextIndex += 1
+                group.addTask(priority: .utility) {
+                    guard !Task.isCancelled else { return (idx, nil) }
+                    if let frameURL = await FFmpegRunner.extractFrame(from: sourceURL, at: time, width: 320),
                        let image = NSImage(contentsOf: frameURL) {
                         try? FileManager.default.removeItem(at: frameURL)
                         return (idx, image)
@@ -6515,11 +7400,21 @@ private struct UnsupportedMediaPreview: View {
                     return (idx, nil)
                 }
             }
+
+            for _ in 0..<maxConcurrentExtractions {
+                addNextExtraction()
+            }
+
             var collected: [(Int, NSImage)] = []
-            for await result in group {
+            while let result = await group.next() {
+                guard !Task.isCancelled else {
+                    group.cancelAll()
+                    break
+                }
                 if let image = result.1 {
                     collected.append((result.0, image))
                 }
+                addNextExtraction()
             }
             return collected.sorted(by: { $0.0 < $1.0 }).map(\.1)
         }

@@ -27,7 +27,7 @@ final class TranscriptionSettings {
     var mimoTopP = 0.95
     var mimoTopK = 0
     var segmentMode: SegmentMode = .vad
-    var vadEngine: VADEngine = .firered
+    var vadEngine: VADEngine = .pyannoteMLX
     var vadCatalog: [VADModelInfo] = []
     var vadThreshold = -38.0
     var fireRedVADThreshold = 0.4
@@ -36,14 +36,14 @@ final class TranscriptionSettings {
     var vadSilence = 0.28
     var vadSearch = 0.75
     var vadMinSpeech = 0.2
-    var vadPadding = 0.12
+    var vadPadding = 0.20
     var vadMinSegment = 0.8
     var chunkSeconds = 20.0
     var audioEventFilter = false
     var audioEventModel = ""
     var audioEventModelAvailable = false
     var audioEventThreshold = 0.45
-    var audioEventFilterType: AudioEventFilterType = .all
+    var audioEventFilterType: AudioEventFilterType = .repetition
     var audioEventPreset: AudioEventFilterPreset = .balanced
     var beamSize = 3
     var minConfidence = 0.0
@@ -53,10 +53,16 @@ final class TranscriptionSettings {
     var eosPenalty = 1.0
     var decodeMaxLen = 0
     var diarizeSpeakers = false
-    var speakerLabelingEngine: SpeakerLabelingEngine = .pyannote
+    var alignWords = false
+    var punctuate = false
+    var denoise = false
+    var asrContext = ""
+    var speakerLabelingEngine: SpeakerLabelingEngine = .acoustic
     var speakerClusteringMethod: SpeakerClusteringMethod = .spectral
     var speakerRecognitionModel = ""
     var speakerRecognitionModelAvailable = false
+    var speakerDiarizationCoreMLModel = ""
+    var speakerDiarizationCoreMLModelAvailable = false
     var speakerClusterThreshold = 0.45
     var diarizationSpeakerCount = 0
     var emotionModel = ""
@@ -78,16 +84,18 @@ final class TranscriptionSettings {
         modelCatalog = config.models ?? []
         vadCatalog = config.vadEngines ?? []
         asrEngine = sanitizedASREngine(config.defaultASREngine ?? .fireredasr2)
-        vadEngine = sanitizedVADEngine(config.defaultVADEngine ?? .firered)
+        vadEngine = sanitizedVADEngine(config.defaultVADEngine ?? .pyannoteMLX)
         model = config.defaultModel
-        emotionModel = config.defaultEmotionModel ?? "emotion2vec/emotion2vec_plus_base"
+        emotionModel = config.defaultEmotionModel ?? "mlx-community/emotion2vec-plus-large-mlx"
         emotionModelAvailable = config.emotionModelAvailable ?? false
-        audioEventModel = config.defaultAudioEventModel ?? "MIT/ast-finetuned-audioset-10-10-0.4593"
+        audioEventModel = config.defaultAudioEventModel ?? "panns-cnn14-16k-mlx"
         audioEventModelAvailable = config.audioEventModelAvailable ?? false
-        speakerLabelingEngine = config.defaultSpeakerLabelingEngine ?? .pyannote
+        speakerLabelingEngine = config.defaultSpeakerLabelingEngine ?? .acoustic
         speakerClusteringMethod = sanitizedSpeakerClusteringMethod(config.defaultSpeakerClusteringMethod ?? .spectral)
         speakerRecognitionModel = config.defaultSpeakerRecognitionModel ?? "iic/speech_eres2netv2_sv_zh-cn_16k-common"
         speakerRecognitionModelAvailable = config.speakerRecognitionModelAvailable ?? false
+        speakerDiarizationCoreMLModel = config.localSpeakerDiarizationCoreMLModel ?? ""
+        speakerDiarizationCoreMLModelAvailable = config.speakerDiarizationCoreMLModelAvailable ?? false
         if !restorePersistedSettings() {
             applyModelSpecificDefaults()
         }
@@ -117,10 +125,7 @@ final class TranscriptionSettings {
         if vadEngine != .auto {
             return vadEngine
         }
-        if let fireRed = vadCatalog.first(where: { $0.engine == .firered }) {
-            return fireRed.localModelAvailable ? .firered : .energy
-        }
-        return .firered
+        return preferredVADEngine()
     }
 
     var isSenseVoiceActive: Bool {
@@ -271,7 +276,7 @@ final class TranscriptionSettings {
 
     func resetRecognitionDefaults() {
         segmentMode = .vad
-        vadEngine = sanitizedVADEngine(.firered)
+        vadEngine = sanitizedVADEngine(.pyannoteMLX)
         recognitionLanguage = .auto
         senseVoiceUseITN = true
         senseVoiceRichInfo = false
@@ -293,12 +298,12 @@ final class TranscriptionSettings {
         vadSilence = 0.28
         vadSearch = 0.75
         vadMinSpeech = 0.2
-        vadPadding = 0.12
+        vadPadding = 0.20
         vadMinSegment = 0.8
         chunkSeconds = 20.0
         audioEventFilter = false
         audioEventThreshold = 0.45
-        audioEventFilterType = .all
+        audioEventFilterType = .repetition
         audioEventPreset = .balanced
         beamSize = 3
         minConfidence = 0.0
@@ -308,9 +313,12 @@ final class TranscriptionSettings {
         eosPenalty = 1.0
         decodeMaxLen = 0
         diarizeSpeakers = false
-        speakerLabelingEngine = .pyannote
+        alignWords = false
+        punctuate = false
+        denoise = false
+        speakerLabelingEngine = .acoustic
         speakerClusteringMethod = .spectral
-        speakerClusterThreshold = 0.45
+        speakerClusterThreshold = 0.82
         diarizationSpeakerCount = 0
     }
 
@@ -343,7 +351,7 @@ final class TranscriptionSettings {
         vadSilence = snapshot.vadSilence
         vadSearch = snapshot.vadSearch
         vadMinSpeech = snapshot.vadMinSpeech
-        vadPadding = snapshot.vadPadding
+        vadPadding = abs(snapshot.vadPadding - 0.12) < 0.0001 ? 0.20 : snapshot.vadPadding
         vadMinSegment = snapshot.vadMinSegment
         chunkSeconds = snapshot.chunkSeconds
         audioEventFilter = snapshot.audioEventFilter ?? false
@@ -417,17 +425,35 @@ final class TranscriptionSettings {
 
     private func sanitizedVADEngine(_ engine: VADEngine) -> VADEngine {
         if engine == .auto {
-            if let fireRed = vadCatalog.first(where: { $0.engine == .firered }) {
-                return fireRed.localModelAvailable ? .firered : .energy
-            }
-            return .firered
+            return preferredVADEngine()
         }
-        if engine == .firered,
-           let fireRed = vadCatalog.first(where: { $0.engine == .firered }),
-           !fireRed.localModelAvailable {
-            return .energy
+        if engine == .firered {
+            if let fireRed = vadCatalog.first(where: { $0.engine == .firered }),
+               !fireRed.localModelAvailable {
+                return preferredVADEngine(excluding: .firered)
+            }
+            return engine
+        }
+        if engine == .pyannoteMLX,
+           let pyannote = vadCatalog.first(where: { $0.engine == .pyannoteMLX }),
+           !pyannote.localModelAvailable {
+            return preferredVADEngine(excluding: .pyannoteMLX)
         }
         return engine
+    }
+
+    private func preferredVADEngine(excluding excluded: VADEngine? = nil) -> VADEngine {
+        for engine in [VADEngine.pyannoteMLX, .firered, .energy] where engine != excluded {
+            if engine == .energy {
+                return .energy
+            }
+            if let info = vadCatalog.first(where: { $0.engine == engine }) {
+                if info.localModelAvailable {
+                    return engine
+                }
+            }
+        }
+        return .energy
     }
 
     private func sanitizedSpeakerClusteringMethod(_ method: SpeakerClusteringMethod) -> SpeakerClusteringMethod {
@@ -493,7 +519,7 @@ final class TranscriptionSettings {
         vadSilence = snapshot.vadSilence
         vadSearch = snapshot.vadSearch
         vadMinSpeech = snapshot.vadMinSpeech
-        vadPadding = snapshot.vadPadding
+        vadPadding = abs(snapshot.vadPadding - 0.12) < 0.0001 ? 0.20 : snapshot.vadPadding
         vadMinSegment = snapshot.vadMinSegment
         chunkSeconds = snapshot.chunkSeconds
         audioEventFilter = snapshot.audioEventFilter ?? false
@@ -512,6 +538,10 @@ final class TranscriptionSettings {
         eosPenalty = snapshot.eosPenalty
         decodeMaxLen = snapshot.decodeMaxLen
         diarizeSpeakers = snapshot.diarizeSpeakers
+        alignWords = snapshot.alignWords ?? false
+        punctuate = snapshot.punctuate ?? false
+        denoise = snapshot.denoise ?? false
+        asrContext = snapshot.asrContext ?? ""
         speakerLabelingEngine = snapshot.speakerLabelingEngine
         speakerClusteringMethod = sanitizedSpeakerClusteringMethod(snapshot.speakerClusteringMethod)
         speakerRecognitionModel = snapshot.speakerRecognitionModel.isEmpty ? speakerRecognitionModel : snapshot.speakerRecognitionModel
@@ -571,9 +601,14 @@ final class TranscriptionSettings {
                 ("mimo_top_p", "\(mimoTopP)"),
                 ("mimo_top_k", "\(mimoTopK)"),
                 ("emotion_model", emotionModel),
+                ("asr_context", asrContext.trimmingCharacters(in: .whitespacesAndNewlines)),
+                ("align_words", alignWords ? "true" : "false"),
+                ("punctuate", punctuate ? "true" : "false"),
+                ("denoise", denoise ? "true" : "false"),
                 ("diarize_speakers", diarizeSpeakers ? "true" : "false"),
                 ("speaker_labeling_engine", speakerLabelingEngine.rawValue),
                 ("speaker_recognition_model", speakerRecognitionModel),
+                ("speaker_diarization_coreml_model", speakerDiarizationCoreMLModel),
                 ("speaker_cluster_threshold", "\(speakerClusterThreshold)"),
                 ("speaker_clustering_method", speakerClusteringMethod.rawValue),
                 ("diarization_num_speakers", "\(diarizationSpeakerCount)")
@@ -682,7 +717,7 @@ struct RecognitionPresetSnapshot: Codable, Equatable {
 
     private init() {
         segmentMode = .vad
-        vadEngine = .firered
+        vadEngine = .pyannoteMLX
         recognitionLanguage = .auto
         senseVoiceUseITN = true
         senseVoiceRichInfo = false
@@ -697,12 +732,12 @@ struct RecognitionPresetSnapshot: Codable, Equatable {
         vadSilence = 0.28
         vadSearch = 0.75
         vadMinSpeech = 0.2
-        vadPadding = 0.12
+        vadPadding = 0.20
         vadMinSegment = 0.8
         chunkSeconds = 20.0
         audioEventFilter = false
         audioEventThreshold = 0.45
-        audioEventFilterType = .all
+        audioEventFilterType = .repetition
         audioEventPreset = .balanced
         beamSize = 3
         minConfidence = 0.0
@@ -712,9 +747,9 @@ struct RecognitionPresetSnapshot: Codable, Equatable {
         eosPenalty = 1.0
         decodeMaxLen = 0
         diarizeSpeakers = false
-        speakerLabelingEngine = .pyannote
+        speakerLabelingEngine = .acoustic
         speakerClusteringMethod = .spectral
-        speakerClusterThreshold = 0.45
+        speakerClusterThreshold = 0.82
         diarizationSpeakerCount = 0
     }
 
@@ -811,7 +846,7 @@ struct RecognitionPresetSnapshot: Codable, Equatable {
         case .sensevoice:
             senseVoiceUseITN = true
         case .mega:
-            mimoMaxTokens = 8192
+            mimoMaxTokens = 512
             mimoTemperature = 0.0
             mimoTopP = 1.0
             mimoTopK = 0
@@ -857,6 +892,10 @@ private struct PersistedTranscriptionSettings: Codable {
     var eosPenalty: Double
     var decodeMaxLen: Int
     var diarizeSpeakers: Bool
+    var alignWords: Bool?
+    var punctuate: Bool?
+    var denoise: Bool?
+    var asrContext: String?
     var speakerLabelingEngine: SpeakerLabelingEngine
     var speakerClusteringMethod: SpeakerClusteringMethod
     var speakerRecognitionModel: String
@@ -905,6 +944,10 @@ private struct PersistedTranscriptionSettings: Codable {
         eosPenalty = settings.eosPenalty
         decodeMaxLen = settings.decodeMaxLen
         diarizeSpeakers = settings.diarizeSpeakers
+        alignWords = settings.alignWords
+        punctuate = settings.punctuate
+        denoise = settings.denoise
+        asrContext = settings.asrContext
         speakerLabelingEngine = settings.speakerLabelingEngine
         speakerClusteringMethod = settings.speakerClusteringMethod
         speakerRecognitionModel = settings.speakerRecognitionModel

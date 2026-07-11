@@ -8,10 +8,24 @@ CONFIGURATION="${MSUB_CONFIGURATION:-Release}"
 DEFAULT_APP_PATH="$REPO_ROOT/.xcode-derived-release/Build/Products/$CONFIGURATION/MSub.app"
 APP_PATH="${1:-${MSUB_APP_PATH:-$DEFAULT_APP_PATH}}"
 REQUIRE_DEVELOPER_ID="${MSUB_REQUIRE_DEVELOPER_ID:-0}"
-REQUIRE_OPTIONAL_DEPS="${MSUB_REQUIRE_OPTIONAL_DEPS:-1}"
+BACKEND_BUNDLE_PROFILE="${MSUB_BACKEND_BUNDLE_PROFILE:-core}"
+if [ -n "${MSUB_REQUIRE_OPTIONAL_DEPS+x}" ]; then
+    REQUIRE_OPTIONAL_DEPS="$MSUB_REQUIRE_OPTIONAL_DEPS"
+elif [ "$BACKEND_BUNDLE_PROFILE" = "full" ]; then
+    REQUIRE_OPTIONAL_DEPS=1
+else
+    REQUIRE_OPTIONAL_DEPS=0
+fi
 REQUIRE_SPEAKER_DEPS="${MSUB_REQUIRE_SPEAKER_DEPS:-$REQUIRE_OPTIONAL_DEPS}"
 REQUIRE_EMOTION_DEPS="${MSUB_REQUIRE_EMOTION_DEPS:-$REQUIRE_OPTIONAL_DEPS}"
 REQUIRE_DIARIZATION_DEPS="${MSUB_REQUIRE_DIARIZATION_DEPS:-$REQUIRE_OPTIONAL_DEPS}"
+if [ -n "${MSUB_REQUIRE_FIRERED_VAD_DEPS+x}" ]; then
+    REQUIRE_FIRERED_VAD_DEPS="$MSUB_REQUIRE_FIRERED_VAD_DEPS"
+elif [ "$BACKEND_BUNDLE_PROFILE" = "full" ] || [ "$BACKEND_BUNDLE_PROFILE" = "core" ]; then
+    REQUIRE_FIRERED_VAD_DEPS=1
+else
+    REQUIRE_FIRERED_VAD_DEPS=0
+fi
 VALIDATE_BACKEND_START="${MSUB_VALIDATE_BACKEND_START:-0}"
 VALIDATE_PORT="${MSUB_VALIDATE_PORT:-8799}"
 
@@ -73,6 +87,22 @@ require_executable "$PYTHON" "bundled Python runtime"
 SITE_PACKAGES="$(find "$BACKEND/.venv/lib" -maxdepth 2 -type d -name site-packages 2>/dev/null | head -n 1 || true)"
 require_dir "$SITE_PACKAGES" "bundled site-packages"
 
+ARCH_SCAN_FILE="${TMPDIR:-/tmp}/msub-release-native-binaries.$$"
+: > "$ARCH_SCAN_FILE"
+printf '%s\n' "$EXECUTABLE" "$RESOURCES/ffmpeg" "$PYTHON" >> "$ARCH_SCAN_FILE"
+find "$BACKEND" -type f \( -name "*.so" -o -name "*.dylib" \) -print >> "$ARCH_SCAN_FILE" 2>/dev/null || true
+while IFS= read -r binary; do
+    [ -f "$binary" ] || continue
+    archs="$(lipo -archs "$binary" 2>/dev/null || true)"
+    case " $archs " in
+        *" x86_64 "*)
+            rm -f "$ARCH_SCAN_FILE"
+            fail "release is Apple Silicon only but native binary contains x86_64 ($archs): $binary"
+            ;;
+    esac
+done < "$ARCH_SCAN_FILE"
+rm -f "$ARCH_SCAN_FILE"
+
 VALIDATION_CACHE="$REPO_ROOT/.release-bundle-validation-cache"
 mkdir -p "$VALIDATION_CACHE/matplotlib" "$VALIDATION_CACHE/huggingface" "$VALIDATION_CACHE/modelscope"
 export MPLCONFIGDIR="$VALIDATION_CACHE/matplotlib"
@@ -86,6 +116,7 @@ export MSUB_FFMPEG="$RESOURCES/ffmpeg"
 export MSUB_REQUIRE_SPEAKER_DEPS="$REQUIRE_SPEAKER_DEPS"
 export MSUB_REQUIRE_EMOTION_DEPS="$REQUIRE_EMOTION_DEPS"
 export MSUB_REQUIRE_DIARIZATION_DEPS="$REQUIRE_DIARIZATION_DEPS"
+export MSUB_REQUIRE_FIRERED_VAD_DEPS="$REQUIRE_FIRERED_VAD_DEPS"
 
 "$PYTHON" - <<'PY'
 import importlib
@@ -98,13 +129,16 @@ groups = {
         "fastapi",
         "uvicorn",
         "multipart",
-        "fireredvad",
         "mlx",
         "mlx_audio",
         "huz_subtitle.web",
         "huz_subtitle.cli",
+        "safetensors",
+        "soundfile",
     ],
 }
+if os.getenv("MSUB_REQUIRE_FIRERED_VAD_DEPS", "0") == "1":
+    groups["firered_vad"] = ["coremltools", "kaldi_native_fbank", "kaldiio", "soundfile"]
 if os.getenv("MSUB_REQUIRE_SPEAKER_DEPS", "1") == "1":
     groups["speaker"] = ["funasr", "modelscope", "torch", "torchaudio", "soundfile"]
 if os.getenv("MSUB_REQUIRE_EMOTION_DEPS", "1") == "1":
