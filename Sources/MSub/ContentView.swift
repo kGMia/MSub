@@ -1087,7 +1087,7 @@ struct ContentView: View {
                     .background(statusTint.opacity(0.15), in: Circle())
 
                 Text(statusLine)
-                    .font(.callout)
+                    .font(.callout.monospacedDigit())
                     .lineLimit(2)
 
                 Spacer(minLength: 8)
@@ -5750,7 +5750,7 @@ private struct ImportSubtitleTextSheet: View {
 
             HStack(spacing: 10) {
                 Text(statusText)
-                    .font(.caption)
+                    .font(.caption.monospacedDigit())
                     .foregroundStyle(canImport || text.isEmpty ? Color.secondary : Color.red)
                 Spacer()
                 Button(t("button.cancel")) {
