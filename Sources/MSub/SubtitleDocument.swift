@@ -1069,6 +1069,7 @@ struct SubtitleEditorPanel: View {
     @State private var isTimelineZoomSliderDragging = false
     @State private var timelineCenterRequest: TimelineCenterRequest?
     @State private var timelineCueDragUndoSnapshot: SubtitleUndoSnapshot?
+    @State private var textEditUndoBurst: (cueID: SubtitleCue.ID, lastEdit: Date)?
     @State private var isTimingAdjustmentPresented = false
     @State private var timingAdjustmentMode: TimingAdjustmentMode = .shift
     @State private var timingShiftSeconds = 0.0
@@ -1364,6 +1365,11 @@ struct SubtitleEditorPanel: View {
 
     private func registerUndo(_ actionNameKey: String, before snapshot: SubtitleUndoSnapshot? = nil) {
         guard let undoManager else { return }
+        // Any registration ends the current text-editing burst so a later
+        // keystroke starts a fresh undo step instead of merging across it.
+        if actionNameKey != "undo.editSubtitle" {
+            textEditUndoBurst = nil
+        }
         undoManager.levelsOfUndo = Self.maxUndoLevels
         let snapshot = snapshot ?? makeUndoSnapshot()
         undoManager.registerUndo(withTarget: undoController) { controller in
@@ -1386,6 +1392,7 @@ struct SubtitleEditorPanel: View {
         previewSyncTask?.cancel()
         termStatsTask?.cancel()
         timelineCueDragUndoSnapshot = nil
+        textEditUndoBurst = nil
         slot.cues = snapshot.cues
         slot.speakerColors = snapshot.speakerColors
         if let selectedCueID = snapshot.selectedCueID,
@@ -2315,9 +2322,23 @@ struct SubtitleEditorPanel: View {
             set: { newValue in
                 guard let index = cueIndex(for: cueID) else { return }
                 guard newValue != slot.cues[index].text else { return }
-                let snapshot = makeUndoSnapshot()
-                slot.cues[index].text = newValue
-                registerUndo("undo.editSubtitle", before: snapshot)
+                // Coalesce per-keystroke edits: snapshotting and registering
+                // undo for every character is the main typing hotspot with
+                // large cue lists, and floods the undo stack with one-char
+                // steps. One registration per editing burst restores to the
+                // pre-burst text, like a standard text editor.
+                let now = Date()
+                let continuesBurst = textEditUndoBurst.map {
+                    $0.cueID == cueID && now.timeIntervalSince($0.lastEdit) < 2.0
+                } ?? false
+                if continuesBurst {
+                    slot.cues[index].text = newValue
+                } else {
+                    let snapshot = makeUndoSnapshot()
+                    slot.cues[index].text = newValue
+                    registerUndo("undo.editSubtitle", before: snapshot)
+                }
+                textEditUndoBurst = (cueID: cueID, lastEdit: now)
                 schedulePreviewTextSync(for: slot.cues)
                 scheduleTermStatsSync(for: slot.cues)
             }

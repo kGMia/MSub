@@ -1325,11 +1325,51 @@ final class DockMenuState {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @MainActor
     func applicationWillTerminate(_ notification: Notification) {
         BackendService.terminateRecordedBackendProcesses()
         MediaProcessingCleanup.cleanupBeforeTerminate()
+    }
+
+    // MARK: Undo fallback
+    //
+    // Cmd+Z travels the responder chain from the first responder. When an
+    // action removes the focused view (e.g. deleting the selected cue row,
+    // whose text editor was first responder), the window's first responder
+    // resets and nothing in the chain implements undo:/redo: anymore — so
+    // Edit > Undo goes dead even though the action was registered. The app
+    // delegate sits at the end of the chain; forward to the key window's
+    // undo manager (the same manager SwiftUI's environment provides).
+
+    @MainActor
+    @objc func undo(_ sender: Any?) {
+        guard let undoManager = NSApp.keyWindow?.undoManager, undoManager.canUndo else {
+            NSSound.beep()
+            return
+        }
+        undoManager.undo()
+    }
+
+    @MainActor
+    @objc func redo(_ sender: Any?) {
+        guard let undoManager = NSApp.keyWindow?.undoManager, undoManager.canRedo else {
+            NSSound.beep()
+            return
+        }
+        undoManager.redo()
+    }
+
+    @MainActor
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        switch menuItem.action {
+        case #selector(undo(_:)):
+            return NSApp.keyWindow?.undoManager?.canUndo ?? false
+        case #selector(redo(_:)):
+            return NSApp.keyWindow?.undoManager?.canRedo ?? false
+        default:
+            return true
+        }
     }
 
     @MainActor
