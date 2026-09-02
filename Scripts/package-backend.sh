@@ -13,6 +13,8 @@ SENSEVOICE_MODEL_SOURCE="$REPO_ROOT/models/SenseVoiceSmall"
 MIMO_MODEL_SOURCE="$REPO_ROOT/models/MiMo-V2.5-ASR-MLX-4bit"
 MIMO_TOKENIZER_SOURCE="$REPO_ROOT/models/MiMo-Audio-Tokenizer"
 MEGA_MODEL_SOURCE="$REPO_ROOT/models/Mega-ASR-bf16"
+QWEN3_MODEL_SOURCE="$REPO_ROOT/models/Qwen3-ASR-1.7B-8bit"
+FUNASR_MODEL_SOURCE="$REPO_ROOT/models/Fun-ASR-Nano-2512"
 FIRERED_VAD_MODEL_SOURCE="$REPO_ROOT/models/FireRedVAD-CoreML"
 DIARIZATION_MODEL_SOURCE="$REPO_ROOT/models/pyannote-speaker-diarization-community-1"
 PYANNOTE_SEGMENTATION_MLX_MODEL_SOURCE="$REPO_ROOT/models/Pyannote-Segmentation-MLX"
@@ -21,35 +23,16 @@ SPEAKER_RECOGNITION_MODEL_SOURCE="$REPO_ROOT/models/speech_eres2netv2_sv_zh-cn_1
 EMOTION_MODEL_SOURCE="$REPO_ROOT/models/emotion2vec_plus_base"
 EMOTION_MLX_MODEL_SOURCE="$REPO_ROOT/models/emotion2vec-plus-large-mlx"
 PANNS_AUDIO_EVENT_MODEL_SOURCE="$REPO_ROOT/models/panns-cnn14-16k-mlx"
-AST_AUDIO_EVENT_MODEL_SOURCE="$REPO_ROOT/models/ast-finetuned-audioset-10-10-0.4593"
-AUDIO_EVENT_MODEL_SOURCE="$AST_AUDIO_EVENT_MODEL_SOURCE"
+AUDIO_EVENT_MODEL_SOURCE="$PANNS_AUDIO_EVENT_MODEL_SOURCE"
 
 mkdir -p "$DEST"
-rm -rf "$DEST/.uv-cache"
-
-rsync -a --delete --delete-excluded \
-    --exclude "__pycache__" \
-    --exclude "*.pyc" \
-    --exclude "*.pyo" \
-    --exclude ".DS_Store" \
-    --exclude ".git" \
-    --exclude ".mypy_cache" \
-    --exclude ".pytest_cache" \
-    --exclude ".ruff_cache" \
-    "$REPO_ROOT/src" \
-    "$DEST/"
-
-cp "$REPO_ROOT/pyproject.toml" "$DEST/pyproject.toml"
-cp "$REPO_ROOT/uv.lock" "$DEST/uv.lock"
-cp "$REPO_ROOT/README.md" "$DEST/README.md"
-cp "$REPO_ROOT/.python-version" "$DEST/.python-version"
-
-mkdir -p "$DEST/output"
 
 INCLUDE_MODEL="${MSUB_INCLUDE_MODEL:-${HUZ_INCLUDE_MODEL:-0}}"
 INCLUDE_SENSEVOICE_MODEL="${MSUB_INCLUDE_SENSEVOICE_MODEL:-0}"
 INCLUDE_MIMO_MODEL="${MSUB_INCLUDE_MIMO_MODEL:-0}"
 INCLUDE_MEGA_MODEL="${MSUB_INCLUDE_MEGA_MODEL:-0}"
+INCLUDE_QWEN3_MODEL="${MSUB_INCLUDE_QWEN3_MODEL:-0}"
+INCLUDE_FUNASR_MODEL="${MSUB_INCLUDE_FUNASR_MODEL:-0}"
 BACKEND_BUNDLE_PROFILE="${MSUB_BACKEND_BUNDLE_PROFILE:-core}"
 if [ -n "${MSUB_INCLUDE_FIRERED_VAD_MODEL+x}" ]; then
     INCLUDE_FIRERED_VAD_MODEL="$MSUB_INCLUDE_FIRERED_VAD_MODEL"
@@ -78,6 +61,8 @@ SOURCE_SENSEVOICE_MODEL_JSON="null"
 SOURCE_MIMO_MODEL_JSON="null"
 SOURCE_MIMO_TOKENIZER_JSON="null"
 SOURCE_MEGA_MODEL_JSON="null"
+SOURCE_QWEN3_MODEL_JSON="null"
+SOURCE_FUNASR_MODEL_JSON="null"
 SOURCE_FIRERED_VAD_MODEL_JSON="null"
 SOURCE_DIARIZATION_MODEL_JSON="null"
 SOURCE_PYANNOTE_SEGMENTATION_MLX_MODEL_JSON="null"
@@ -86,6 +71,94 @@ SOURCE_SPEAKER_RECOGNITION_MODEL_JSON="null"
 SOURCE_EMOTION_MODEL_JSON="null"
 SOURCE_EMOTION_MLX_MODEL_JSON="null"
 SOURCE_AUDIO_EVENT_MODEL_JSON="null"
+PACKAGE_STAMP="$DEST/.msub-package-signature"
+
+directory_signature() {
+    directory="$1"
+    [ -d "$directory" ] || return 0
+    find "$directory" -type f -print | LC_ALL=C sort | while IFS= read -r file; do
+        stat -f "%N %z %m" "$file"
+    done
+}
+
+package_signature() {
+    {
+        echo "profile=$BACKEND_BUNDLE_PROFILE"
+        echo "include_model=$INCLUDE_MODEL"
+        echo "include_sensevoice=$INCLUDE_SENSEVOICE_MODEL"
+        echo "include_mimo=$INCLUDE_MIMO_MODEL"
+        echo "include_mega=$INCLUDE_MEGA_MODEL"
+        echo "include_qwen3=$INCLUDE_QWEN3_MODEL"
+        echo "include_funasr=$INCLUDE_FUNASR_MODEL"
+        echo "include_firered_vad=$INCLUDE_FIRERED_VAD_MODEL"
+        echo "include_diarization=$INCLUDE_DIARIZATION_MODEL"
+        echo "include_pyannote_mlx=$INCLUDE_PYANNOTE_SEGMENTATION_MLX_MODEL"
+        echo "include_coreml_speaker=$INCLUDE_SPEAKER_DIARIZATION_COREML_MODEL"
+        echo "include_speaker_recognition=$INCLUDE_SPEAKER_RECOGNITION_MODEL"
+        echo "include_emotion=$INCLUDE_EMOTION_MODEL"
+        echo "include_emotion_mlx=$INCLUDE_EMOTION_MLX_MODEL"
+        echo "include_audio_event=$INCLUDE_AUDIO_EVENT_MODEL"
+        echo "include_venv=$INCLUDE_VENV"
+        echo "include_python_runtime=$INCLUDE_PYTHON_RUNTIME"
+        echo "slim_venv=${MSUB_SLIM_VENV:-1}"
+        find "$REPO_ROOT/src" -type f ! -name "*.pyc" -print | LC_ALL=C sort | while IFS= read -r file; do
+            shasum "$file"
+        done
+        for file in \
+            "$REPO_ROOT/pyproject.toml" \
+            "$REPO_ROOT/uv.lock" \
+            "$REPO_ROOT/README.md" \
+            "$REPO_ROOT/.python-version" \
+            "$REPO_ROOT/apps/MSub/Scripts/package-backend.sh" \
+            "$REPO_ROOT/.venv/pyvenv.cfg"
+        do
+            [ -f "$file" ] && shasum "$file"
+        done
+        if [ "$INCLUDE_MODEL" = "1" ]; then directory_signature "$MODEL_SOURCE"; fi
+        if [ "$INCLUDE_SENSEVOICE_MODEL" = "1" ]; then directory_signature "$SENSEVOICE_MODEL_SOURCE"; fi
+        if [ "$INCLUDE_MIMO_MODEL" = "1" ]; then directory_signature "$MIMO_MODEL_SOURCE"; directory_signature "$MIMO_TOKENIZER_SOURCE"; fi
+        if [ "$INCLUDE_MEGA_MODEL" = "1" ]; then directory_signature "$MEGA_MODEL_SOURCE"; fi
+        if [ "$INCLUDE_QWEN3_MODEL" = "1" ]; then directory_signature "$QWEN3_MODEL_SOURCE"; fi
+        if [ "$INCLUDE_FUNASR_MODEL" = "1" ]; then directory_signature "$FUNASR_MODEL_SOURCE"; fi
+        if [ "$INCLUDE_FIRERED_VAD_MODEL" = "1" ]; then directory_signature "$FIRERED_VAD_MODEL_SOURCE"; fi
+        if [ "$INCLUDE_DIARIZATION_MODEL" = "1" ]; then directory_signature "$DIARIZATION_MODEL_SOURCE"; fi
+        if [ "$INCLUDE_PYANNOTE_SEGMENTATION_MLX_MODEL" = "1" ]; then directory_signature "$PYANNOTE_SEGMENTATION_MLX_MODEL_SOURCE"; fi
+        if [ "$INCLUDE_SPEAKER_DIARIZATION_COREML_MODEL" = "1" ]; then directory_signature "$SPEAKER_DIARIZATION_COREML_MODEL_SOURCE"; fi
+        if [ "$INCLUDE_SPEAKER_RECOGNITION_MODEL" = "1" ]; then directory_signature "$SPEAKER_RECOGNITION_MODEL_SOURCE"; fi
+        if [ "$INCLUDE_EMOTION_MODEL" = "1" ]; then directory_signature "$EMOTION_MODEL_SOURCE"; fi
+        if [ "$INCLUDE_EMOTION_MLX_MODEL" = "1" ]; then directory_signature "$EMOTION_MLX_MODEL_SOURCE"; fi
+        if [ "$INCLUDE_AUDIO_EVENT_MODEL" = "1" ]; then directory_signature "$AUDIO_EVENT_MODEL_SOURCE"; fi
+    } | shasum | awk '{print $1}'
+}
+
+CURRENT_PACKAGE_SIGNATURE="$(package_signature)"
+if [ "${MSUB_FORCE_PACKAGE_BACKEND:-0}" != "1" ] \
+    && [ -f "$PACKAGE_STAMP" ] \
+    && [ "$(cat "$PACKAGE_STAMP")" = "$CURRENT_PACKAGE_SIGNATURE" ]; then
+    echo "Backend package inputs unchanged; skipping virtualenv and model copy."
+    exit 0
+fi
+
+rm -rf "$DEST/.uv-cache"
+
+rsync -a --delete --delete-excluded \
+    --exclude "__pycache__" \
+    --exclude "*.pyc" \
+    --exclude "*.pyo" \
+    --exclude ".DS_Store" \
+    --exclude ".git" \
+    --exclude ".mypy_cache" \
+    --exclude ".pytest_cache" \
+    --exclude ".ruff_cache" \
+    "$REPO_ROOT/src" \
+    "$DEST/"
+
+cp "$REPO_ROOT/pyproject.toml" "$DEST/pyproject.toml"
+cp "$REPO_ROOT/uv.lock" "$DEST/uv.lock"
+cp "$REPO_ROOT/README.md" "$DEST/README.md"
+cp "$REPO_ROOT/.python-version" "$DEST/.python-version"
+
+mkdir -p "$DEST/output"
 
 copy_model_dir() {
     source_dir="$1"
@@ -97,7 +170,6 @@ copy_model_dir() {
         --exclude ".DS_Store" \
         --exclude "__pycache__" \
         --exclude "*.pth" \
-        --exclude "panns-cnn14-16k-pytorch" \
         "$source_dir" \
         "$dest_dir/"
 }
@@ -128,6 +200,14 @@ fi
 
 if [ -f "$MEGA_MODEL_SOURCE/config.json" ] && { ls "$MEGA_MODEL_SOURCE"/*.safetensors >/dev/null 2>&1 || ls "$MEGA_MODEL_SOURCE"/*.npz >/dev/null 2>&1; }; then
     SOURCE_MEGA_MODEL_JSON="\"$MEGA_MODEL_SOURCE\""
+fi
+
+if [ -f "$QWEN3_MODEL_SOURCE/config.json" ] && { ls "$QWEN3_MODEL_SOURCE"/*.safetensors >/dev/null 2>&1 || ls "$QWEN3_MODEL_SOURCE"/*.npz >/dev/null 2>&1; }; then
+    SOURCE_QWEN3_MODEL_JSON="\"$QWEN3_MODEL_SOURCE\""
+fi
+
+if [ -f "$FUNASR_MODEL_SOURCE/config.json" ] && { ls "$FUNASR_MODEL_SOURCE"/*.safetensors >/dev/null 2>&1 || ls "$FUNASR_MODEL_SOURCE"/*.npz >/dev/null 2>&1; }; then
+    SOURCE_FUNASR_MODEL_JSON="\"$FUNASR_MODEL_SOURCE\""
 fi
 
 if [ -f "$FIRERED_VAD_MODEL_SOURCE/FireRedVAD.mlpackage/Data/com.apple.CoreML/model.mlmodel" ] && [ -f "$FIRERED_VAD_MODEL_SOURCE/cmvn.ark" ]; then
@@ -162,9 +242,6 @@ fi
 if [ -f "$PANNS_AUDIO_EVENT_MODEL_SOURCE/panns_cnn14_16k_config.json" ] && [ -f "$PANNS_AUDIO_EVENT_MODEL_SOURCE/panns_cnn14_16k.safetensors" ]; then
     AUDIO_EVENT_MODEL_SOURCE="$PANNS_AUDIO_EVENT_MODEL_SOURCE"
     SOURCE_AUDIO_EVENT_MODEL_JSON="\"$PANNS_AUDIO_EVENT_MODEL_SOURCE\""
-elif [ -f "$AST_AUDIO_EVENT_MODEL_SOURCE/config.json" ] && { ls "$AST_AUDIO_EVENT_MODEL_SOURCE"/*.safetensors >/dev/null 2>&1 || [ -f "$AST_AUDIO_EVENT_MODEL_SOURCE/pytorch_model.bin" ]; }; then
-    AUDIO_EVENT_MODEL_SOURCE="$AST_AUDIO_EVENT_MODEL_SOURCE"
-    SOURCE_AUDIO_EVENT_MODEL_JSON="\"$AUDIO_EVENT_MODEL_SOURCE\""
 fi
 
 if [ "$INCLUDE_VENV" = "1" ]; then
@@ -430,6 +507,28 @@ else
     echo "Skipping Mega-ASR model copy. Set MSUB_INCLUDE_MEGA_MODEL=1 to embed local Mega-ASR weights."
 fi
 
+if [ "$INCLUDE_QWEN3_MODEL" = "1" ]; then
+    if [ "$SOURCE_QWEN3_MODEL_JSON" = "null" ]; then
+        echo "MSUB_INCLUDE_QWEN3_MODEL=1 but $QWEN3_MODEL_SOURCE is not a valid MLX STT model directory." >&2
+        exit 1
+    fi
+    mkdir -p "$DEST/models"
+    copy_model_dir "$QWEN3_MODEL_SOURCE" "$DEST/models"
+else
+    echo "Skipping Qwen3-ASR model copy. Set MSUB_INCLUDE_QWEN3_MODEL=1 to embed local Qwen3-ASR weights."
+fi
+
+if [ "$INCLUDE_FUNASR_MODEL" = "1" ]; then
+    if [ "$SOURCE_FUNASR_MODEL_JSON" = "null" ]; then
+        echo "MSUB_INCLUDE_FUNASR_MODEL=1 but $FUNASR_MODEL_SOURCE is not a valid MLX STT model directory." >&2
+        exit 1
+    fi
+    mkdir -p "$DEST/models"
+    copy_model_dir "$FUNASR_MODEL_SOURCE" "$DEST/models"
+else
+    echo "Skipping Fun-ASR model copy. Set MSUB_INCLUDE_FUNASR_MODEL=1 to embed local Fun-ASR weights."
+fi
+
 if [ "$INCLUDE_FIRERED_VAD_MODEL" = "1" ]; then
     if [ "$SOURCE_FIRERED_VAD_MODEL_JSON" = "null" ]; then
         echo "MSUB_INCLUDE_FIRERED_VAD_MODEL=1 but $FIRERED_VAD_MODEL_SOURCE is not a valid FireRedVAD CoreML model directory." >&2
@@ -509,13 +608,13 @@ fi
 
 if [ "$INCLUDE_AUDIO_EVENT_MODEL" = "1" ]; then
     if [ "$SOURCE_AUDIO_EVENT_MODEL_JSON" = "null" ]; then
-        echo "MSUB_INCLUDE_AUDIO_EVENT_MODEL=1 but no valid PANNs MLX or AST AudioSet model directory was found." >&2
+        echo "MSUB_INCLUDE_AUDIO_EVENT_MODEL=1 but no valid PANNs Cnn14_16k MLX model directory was found." >&2
         exit 1
     fi
     mkdir -p "$DEST/models"
     copy_model_dir "$AUDIO_EVENT_MODEL_SOURCE" "$DEST/models"
 else
-    echo "Skipping audio event model copy. Set MSUB_INCLUDE_AUDIO_EVENT_MODEL=1 to embed local PANNs MLX or AST weights."
+    echo "Skipping audio event model copy. Set MSUB_INCLUDE_AUDIO_EVENT_MODEL=1 to embed local PANNs Cnn14_16k MLX weights."
 fi
 
 cat > "$DEST/backend-manifest.json" <<EOF
@@ -525,6 +624,8 @@ cat > "$DEST/backend-manifest.json" <<EOF
   "includeSenseVoiceModel": "$INCLUDE_SENSEVOICE_MODEL",
   "includeMiMoModel": "$INCLUDE_MIMO_MODEL",
   "includeMegaModel": "$INCLUDE_MEGA_MODEL",
+  "includeQwen3Model": "$INCLUDE_QWEN3_MODEL",
+  "includeFunASRModel": "$INCLUDE_FUNASR_MODEL",
   "includeFireRedVADModel": "$INCLUDE_FIRERED_VAD_MODEL",
   "includeDiarizationModel": "$INCLUDE_DIARIZATION_MODEL",
   "includePyannoteSegmentationMLXModel": "$INCLUDE_PYANNOTE_SEGMENTATION_MLX_MODEL",
@@ -541,6 +642,8 @@ cat > "$DEST/backend-manifest.json" <<EOF
   "sourceMiMoModelPath": $SOURCE_MIMO_MODEL_JSON,
   "sourceMiMoTokenizerPath": $SOURCE_MIMO_TOKENIZER_JSON,
   "sourceMegaModelPath": $SOURCE_MEGA_MODEL_JSON,
+  "sourceQwen3ModelPath": $SOURCE_QWEN3_MODEL_JSON,
+  "sourceFunASRModelPath": $SOURCE_FUNASR_MODEL_JSON,
   "sourceFireRedVADModelPath": $SOURCE_FIRERED_VAD_MODEL_JSON,
   "sourceDiarizationModelPath": $SOURCE_DIARIZATION_MODEL_JSON,
   "sourcePyannoteSegmentationMLXModelPath": $SOURCE_PYANNOTE_SEGMENTATION_MLX_MODEL_JSON,
@@ -554,14 +657,18 @@ cat > "$DEST/backend-manifest.json" <<EOF
   "mimoModelPath": "models/MiMo-V2.5-ASR-MLX-4bit",
   "mimoTokenizerPath": "models/MiMo-Audio-Tokenizer",
   "megaModelPath": "models/Mega-ASR-bf16",
+  "qwen3ModelPath": "models/Qwen3-ASR-1.7B-8bit",
+  "funASRModelPath": "models/Fun-ASR-Nano-2512",
   "fireRedVADModelPath": "models/FireRedVAD-CoreML",
   "diarizationModelPath": "models/pyannote-speaker-diarization-community-1",
   "pyannoteSegmentationMLXModelPath": "models/Pyannote-Segmentation-MLX",
   "speakerDiarizationCoreMLModelPath": "models/speaker-diarization-coreml",
   "speakerRecognitionModelPath": "models/speech_eres2netv2_sv_zh-cn_16k-common",
-  "emotionModelPath": "models/emotion2vec_plus_base",
+  "emotionModelPath": "models/emotion2vec-plus-large-mlx",
   "emotionMLXModelPath": "models/emotion2vec-plus-large-mlx",
   "audioEventModelPath": "models/$(basename "$AUDIO_EVENT_MODEL_SOURCE")",
   "entrypoint": "msub-web"
 }
 EOF
+
+echo "$CURRENT_PACKAGE_SIGNATURE" > "$PACKAGE_STAMP"

@@ -10,6 +10,8 @@ private struct BackendManifest: Decodable {
     let sourceMiMoModelPath: String?
     let sourceMiMoTokenizerPath: String?
     let sourceMegaModelPath: String?
+    let sourceQwen3ModelPath: String?
+    let sourceFunASRModelPath: String?
     let sourceFireRedVADModelPath: String?
     let sourceDiarizationModelPath: String?
     let sourceSpeakerDiarizationCoreMLModelPath: String?
@@ -44,6 +46,8 @@ final class BackendService {
     private let fireRedModelPathKey = "msub.modelPath.fireredasr2"
     private let fireRedModelDownloadConsentKey = "msub.modelDownloadConsent.fireredasr2"
     private let megaModelDirectoryName = "Mega-ASR-bf16"
+    private let qwen3ModelDirectoryName = "Qwen3-ASR-1.7B-8bit"
+    private let funASRModelDirectoryName = "Fun-ASR-Nano-2512"
     private let emotionModelDirectoryName = "emotion2vec-plus-large-mlx"
     private let emotionRemoteModelID = "mlx-community/emotion2vec-plus-large-mlx"
     private let emotionModelPathKey = "msub.modelPath.emotion2vecPlusBase"
@@ -102,6 +106,12 @@ final class BackendService {
         }
         if let megaModelPath = bundledOrWorkspaceMegaModel(in: workspace, allowAuthorizationPrompt: false) {
             environment["MSUB_MEGA_MODEL"] = megaModelPath.path
+        }
+        if let qwen3ModelPath = bundledOrWorkspaceQwen3Model(in: workspace, allowAuthorizationPrompt: false) {
+            environment["MSUB_QWEN3_MODEL"] = qwen3ModelPath.path
+        }
+        if let funASRModelPath = bundledOrWorkspaceFunASRModel(in: workspace, allowAuthorizationPrompt: false) {
+            environment["MSUB_FUNASR_MODEL"] = funASRModelPath.path
         }
         if let diarizationModelPath = bundledOrWorkspaceDiarizationModel(in: workspace) {
             environment["MSUB_DIARIZATION_MODEL"] = diarizationModelPath.path
@@ -218,6 +228,8 @@ final class BackendService {
         let expectedSenseVoiceModelPath = expectedSenseVoiceModelPath()
         let expectedMiMoModelPath = expectedMiMoModelPath()
         let expectedMegaModelPath = expectedMegaModelPath()
+        let expectedQwen3ModelPath = expectedQwen3ModelPath()
+        let expectedFunASRModelPath = expectedFunASRModelPath()
         let expectedBackendFingerprint = expectedBackendSourceFingerprint()
         if await healthCheck(
             url: baseURL,
@@ -226,6 +238,8 @@ final class BackendService {
             expectedSenseVoiceModelPath: expectedSenseVoiceModelPath,
             expectedMiMoModelPath: expectedMiMoModelPath,
             expectedMegaModelPath: expectedMegaModelPath,
+            expectedQwen3ModelPath: expectedQwen3ModelPath,
+            expectedFunASRModelPath: expectedFunASRModelPath,
             expectedBackendFingerprint: expectedBackendFingerprint
         ) {
             isRunning = true
@@ -249,6 +263,8 @@ final class BackendService {
         let expectedSenseVoiceModelPath = expectedSenseVoiceModelPath()
         let expectedMiMoModelPath = expectedMiMoModelPath()
         let expectedMegaModelPath = expectedMegaModelPath()
+        let expectedQwen3ModelPath = expectedQwen3ModelPath()
+        let expectedFunASRModelPath = expectedFunASRModelPath()
         let expectedBackendFingerprint = expectedBackendSourceFingerprint()
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
@@ -259,6 +275,8 @@ final class BackendService {
                 expectedSenseVoiceModelPath: expectedSenseVoiceModelPath,
                 expectedMiMoModelPath: expectedMiMoModelPath,
                 expectedMegaModelPath: expectedMegaModelPath,
+                expectedQwen3ModelPath: expectedQwen3ModelPath,
+                expectedFunASRModelPath: expectedFunASRModelPath,
                 expectedBackendFingerprint: expectedBackendFingerprint
             ) {
                 return true
@@ -465,6 +483,8 @@ final class BackendService {
         expectedSenseVoiceModelPath: String?,
         expectedMiMoModelPath: String?,
         expectedMegaModelPath: String?,
+        expectedQwen3ModelPath: String?,
+        expectedFunASRModelPath: String?,
         expectedBackendFingerprint: String?
     ) async -> Bool {
         do {
@@ -494,7 +514,9 @@ final class BackendService {
                 expectedModelPath: expectedModelPath,
                 expectedSenseVoiceModelPath: expectedSenseVoiceModelPath,
                 expectedMiMoModelPath: expectedMiMoModelPath,
-                expectedMegaModelPath: expectedMegaModelPath
+                expectedMegaModelPath: expectedMegaModelPath,
+                expectedQwen3ModelPath: expectedQwen3ModelPath,
+                expectedFunASRModelPath: expectedFunASRModelPath
             )
         } catch {
             return false
@@ -506,12 +528,16 @@ final class BackendService {
         expectedModelPath: String?,
         expectedSenseVoiceModelPath: String?,
         expectedMiMoModelPath: String?,
-        expectedMegaModelPath: String?
+        expectedMegaModelPath: String?,
+        expectedQwen3ModelPath: String?,
+        expectedFunASRModelPath: String?
     ) async -> Bool {
         guard expectedModelPath != nil
             || expectedSenseVoiceModelPath != nil
             || expectedMiMoModelPath != nil
-            || expectedMegaModelPath != nil else { return true }
+            || expectedMegaModelPath != nil
+            || expectedQwen3ModelPath != nil
+            || expectedFunASRModelPath != nil else { return true }
         do {
             let url = baseURL.appending(path: "/api/config")
             var request = URLRequest(url: url)
@@ -552,6 +578,22 @@ final class BackendService {
                     return false
                 }
             }
+            if let expectedQwen3ModelPath {
+                guard let models = object["models"] as? [[String: Any]],
+                      let qwen3 = models.first(where: { ($0["engine"] as? String) == "qwen3" }),
+                      let defaultModel = qwen3["defaultModel"] as? String,
+                      pathsReferToSameFile(defaultModel, expectedQwen3ModelPath) else {
+                    return false
+                }
+            }
+            if let expectedFunASRModelPath {
+                guard let models = object["models"] as? [[String: Any]],
+                      let funASR = models.first(where: { ($0["engine"] as? String) == "funasr" }),
+                      let defaultModel = funASR["defaultModel"] as? String,
+                      pathsReferToSameFile(defaultModel, expectedFunASRModelPath) else {
+                    return false
+                }
+            }
             return true
         } catch {
             return false
@@ -583,6 +625,22 @@ final class BackendService {
     private func expectedMegaModelPath() -> String? {
         guard let workspace = findWorkspaceRoot(),
               let modelURL = bundledOrWorkspaceMegaModel(in: workspace, allowAuthorizationPrompt: false) else {
+            return nil
+        }
+        return modelURL.standardizedFileURL.path
+    }
+
+    private func expectedQwen3ModelPath() -> String? {
+        guard let workspace = findWorkspaceRoot(),
+              let modelURL = bundledOrWorkspaceQwen3Model(in: workspace, allowAuthorizationPrompt: false) else {
+            return nil
+        }
+        return modelURL.standardizedFileURL.path
+    }
+
+    private func expectedFunASRModelPath() -> String? {
+        guard let workspace = findWorkspaceRoot(),
+              let modelURL = bundledOrWorkspaceFunASRModel(in: workspace, allowAuthorizationPrompt: false) else {
             return nil
         }
         return modelURL.standardizedFileURL.path
@@ -1010,6 +1068,72 @@ final class BackendService {
         return nil
     }
 
+    private func bundledOrWorkspaceQwen3Model(in workspace: URL, allowAuthorizationPrompt: Bool = true) -> URL? {
+        bundledOrWorkspaceOptionalASRModel(
+            in: workspace,
+            environmentKey: "MSUB_QWEN3_MODEL",
+            modelDirectoryName: qwen3ModelDirectoryName,
+            displayName: "Qwen3-ASR MLX",
+            manifestPath: sourceQwen3ModelPathFromManifest(in: workspace),
+            allowAuthorizationPrompt: allowAuthorizationPrompt
+        )
+    }
+
+    private func bundledOrWorkspaceFunASRModel(in workspace: URL, allowAuthorizationPrompt: Bool = true) -> URL? {
+        bundledOrWorkspaceOptionalASRModel(
+            in: workspace,
+            environmentKey: "MSUB_FUNASR_MODEL",
+            modelDirectoryName: funASRModelDirectoryName,
+            displayName: "Fun-ASR Nano MLX",
+            manifestPath: sourceFunASRModelPathFromManifest(in: workspace),
+            allowAuthorizationPrompt: allowAuthorizationPrompt
+        )
+    }
+
+    private func bundledOrWorkspaceOptionalASRModel(
+        in workspace: URL,
+        environmentKey: String,
+        modelDirectoryName: String,
+        displayName: String,
+        manifestPath: URL?,
+        allowAuthorizationPrompt: Bool
+    ) -> URL? {
+        if let value = ProcessInfo.processInfo.environment[environmentKey], !value.isEmpty {
+            let modelURL = URL(fileURLWithPath: value).standardizedFileURL
+            if isValidModelDirectory(modelURL) {
+                return modelURL
+            }
+        }
+
+        let modelPath = workspace.appending(path: "models/\(modelDirectoryName)")
+        if isValidModelDirectory(modelPath) {
+            return modelPath
+        }
+        if !isBundledBackend(workspace),
+           let authorizedModelPath = authorizedSourceModelDirectory(
+               modelPath,
+               displayName: displayName,
+               allowPrompt: allowAuthorizationPrompt
+           ) {
+            return authorizedModelPath
+        }
+        if isBundledBackend(workspace),
+           let manifestPath,
+           let authorizedModelPath = authorizedSourceModelDirectory(
+               manifestPath,
+               displayName: displayName,
+               allowPrompt: allowAuthorizationPrompt
+           ) {
+            return authorizedModelPath
+        }
+        if let appSupportModel = appSupportModelDirectory(named: modelDirectoryName),
+           isValidModelDirectory(appSupportModel) {
+            return appSupportModel
+        }
+
+        return nil
+    }
+
     private func bundledOrWorkspaceSenseVoiceModel(in workspace: URL, allowAuthorizationPrompt: Bool = true) -> URL? {
         if let value = ProcessInfo.processInfo.environment["MSUB_SENSEVOICE_MODEL"], !value.isEmpty {
             let modelURL = URL(fileURLWithPath: value).standardizedFileURL
@@ -1174,11 +1298,6 @@ final class BackendService {
         let coreMLModelPath = workspace.appending(path: "models/FireRedVAD-CoreML")
         if isValidFireRedVADModelDirectory(coreMLModelPath) {
             return coreMLModelPath
-        }
-
-        let legacyModelPath = workspace.appending(path: "models/FireRedVAD")
-        if isValidFireRedVADModelDirectory(legacyModelPath) {
-            return legacyModelPath
         }
 
         if isBundledBackend(workspace),
@@ -1631,6 +1750,28 @@ final class BackendService {
         return URL(fileURLWithPath: path).standardizedFileURL
     }
 
+    private func sourceQwen3ModelPathFromManifest(in workspace: URL) -> URL? {
+        let manifestURL = workspace.appending(path: "backend-manifest.json")
+        guard let data = try? Data(contentsOf: manifestURL),
+              let manifest = try? JSONDecoder().decode(BackendManifest.self, from: data),
+              let path = manifest.sourceQwen3ModelPath,
+              !path.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: path).standardizedFileURL
+    }
+
+    private func sourceFunASRModelPathFromManifest(in workspace: URL) -> URL? {
+        let manifestURL = workspace.appending(path: "backend-manifest.json")
+        guard let data = try? Data(contentsOf: manifestURL),
+              let manifest = try? JSONDecoder().decode(BackendManifest.self, from: data),
+              let path = manifest.sourceFunASRModelPath,
+              !path.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: path).standardizedFileURL
+    }
+
     private func sourceSenseVoiceModelPathFromManifest(in workspace: URL) -> URL? {
         let manifestURL = workspace.appending(path: "backend-manifest.json")
         guard let data = try? Data(contentsOf: manifestURL),
@@ -1826,8 +1967,7 @@ final class BackendService {
             return true
         }
 
-        return FileManager.default.fileExists(atPath: url.appending(path: "VAD/model.pth.tar").path)
-            && FileManager.default.fileExists(atPath: url.appending(path: "VAD/cmvn.ark").path)
+        return false
     }
 
     private func appendLog(_ text: String) {

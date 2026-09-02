@@ -14,6 +14,14 @@ final class TranscriptionSettings {
     private static let megaDefaultTemperature = 0.0
     private static let megaDefaultTopP = 1.0
     private static let megaDefaultTopK = 0
+    private static let qwen3DefaultMaxTokens = 512
+    private static let qwen3DefaultTemperature = 0.0
+    private static let qwen3DefaultTopP = 1.0
+    private static let qwen3DefaultTopK = 0
+    private static let funASRDefaultMaxTokens = 512
+    private static let funASRDefaultTemperature = 0.0
+    private static let funASRDefaultTopP = 1.0
+    private static let funASRDefaultTopK = 0
 
     var model = ""
     var asrEngine: ASREngine = .fireredasr2
@@ -112,10 +120,18 @@ final class TranscriptionSettings {
         if lowercasedModel.contains("mimo") {
             return .mimo
         }
+        if lowercasedModel.contains("fun-asr")
+            || lowercasedModel.contains("fun_asr")
+            || lowercasedModel.contains("funasr") {
+            return .funasr
+        }
         if lowercasedModel.contains("mega-asr")
-            || lowercasedModel.contains("mega_asr")
-            || lowercasedModel.contains("qwen3-asr") {
+            || lowercasedModel.contains("mega_asr") {
             return .mega
+        }
+        if lowercasedModel.contains("qwen3-asr")
+            || lowercasedModel.contains("qwen3_asr") {
+            return .qwen3
         }
         return .fireredasr2
     }
@@ -140,12 +156,20 @@ final class TranscriptionSettings {
         effectiveASREngine == .mega
     }
 
+    var isQwen3Active: Bool {
+        effectiveASREngine == .qwen3
+    }
+
+    var isFunASRActive: Bool {
+        effectiveASREngine == .funasr
+    }
+
     var usesQwenGenerationControls: Bool {
-        isMiMoActive || isMegaASRActive
+        isMiMoActive || isMegaASRActive || isQwen3Active || isFunASRActive
     }
 
     var generationMaxTokensRange: ClosedRange<Int> {
-        isMegaASRActive ? 1...8192 : 1...4096
+        (isMegaASRActive || isQwen3Active) ? 1...8192 : 1...4096
     }
 
     var isFireRedVADActive: Bool {
@@ -200,6 +224,42 @@ final class TranscriptionSettings {
                 .hu,
                 .mk,
             ]
+        case .qwen3:
+            return [
+                .auto,
+                .zh,
+                .en,
+                .yue,
+                .ar,
+                .de,
+                .fr,
+                .es,
+                .pt,
+                .indonesian,
+                .it,
+                .ko,
+                .ru,
+                .th,
+                .vi,
+                .ja,
+                .tr,
+                .hi,
+                .ms,
+                .nl,
+                .sv,
+                .da,
+                .fi,
+                .pl,
+                .cs,
+                .fil,
+                .fa,
+                .el,
+                .ro,
+                .hu,
+                .mk,
+            ]
+        case .funasr:
+            return [.auto, .zh, .en, .ja, .yue]
         case .apple:
             return [.zh, .en, .yue, .ja, .ko]
         case .fireredasr2, .auto:
@@ -266,6 +326,21 @@ final class TranscriptionSettings {
             if mimoMaxTokens < 1 || mimoMaxTokens == Self.mimoDefaultMaxTokens || mimoMaxTokens == 8192 {
                 mimoMaxTokens = Self.megaDefaultMaxTokens
             }
+        case .qwen3:
+            mimoTemperature = Self.qwen3DefaultTemperature
+            mimoTopP = Self.qwen3DefaultTopP
+            mimoTopK = Self.qwen3DefaultTopK
+            if mimoMaxTokens < 1 || mimoMaxTokens == Self.mimoDefaultMaxTokens || mimoMaxTokens == 8192 {
+                mimoMaxTokens = Self.qwen3DefaultMaxTokens
+            }
+        case .funasr:
+            senseVoiceUseITN = true
+            mimoTemperature = Self.funASRDefaultTemperature
+            mimoTopP = Self.funASRDefaultTopP
+            mimoTopK = Self.funASRDefaultTopK
+            if mimoMaxTokens < 1 || mimoMaxTokens == Self.mimoDefaultMaxTokens || mimoMaxTokens == 8192 {
+                mimoMaxTokens = Self.funASRDefaultMaxTokens
+            }
         case .apple:
             senseVoiceRichInfo = false
             diarizeSpeakers = false
@@ -280,12 +355,23 @@ final class TranscriptionSettings {
         recognitionLanguage = .auto
         senseVoiceUseITN = true
         senseVoiceRichInfo = false
-        if effectiveASREngine == .mega {
+        switch effectiveASREngine {
+        case .mega:
             mimoMaxTokens = Self.megaDefaultMaxTokens
             mimoTemperature = Self.megaDefaultTemperature
             mimoTopP = Self.megaDefaultTopP
             mimoTopK = Self.megaDefaultTopK
-        } else {
+        case .qwen3:
+            mimoMaxTokens = Self.qwen3DefaultMaxTokens
+            mimoTemperature = Self.qwen3DefaultTemperature
+            mimoTopP = Self.qwen3DefaultTopP
+            mimoTopK = Self.qwen3DefaultTopK
+        case .funasr:
+            mimoMaxTokens = Self.funASRDefaultMaxTokens
+            mimoTemperature = Self.funASRDefaultTemperature
+            mimoTopP = Self.funASRDefaultTopP
+            mimoTopK = Self.funASRDefaultTopK
+        default:
             mimoMaxTokens = Self.mimoDefaultMaxTokens
             mimoTemperature = Self.mimoDefaultTemperature
             mimoTopP = Self.mimoDefaultTopP
@@ -850,6 +936,17 @@ struct RecognitionPresetSnapshot: Codable, Equatable {
             mimoTemperature = 0.0
             mimoTopP = 1.0
             mimoTopK = 0
+        case .qwen3:
+            mimoMaxTokens = 512
+            mimoTemperature = 0.0
+            mimoTopP = 1.0
+            mimoTopK = 0
+        case .funasr:
+            mimoMaxTokens = 512
+            mimoTemperature = 0.0
+            mimoTopP = 1.0
+            mimoTopK = 0
+            senseVoiceUseITN = true
         case .fireredasr2, .auto, .apple:
             break
         }

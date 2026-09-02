@@ -18,6 +18,8 @@
 		00000000000000000000010A /* LocalizationCatalogReferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000020B /* LocalizationCatalogReferences.swift */; };
 		00000000000000000000010B /* AudioEventSegmentMarker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000020C /* AudioEventSegmentMarker.swift */; };
 		00000000000000000000010C /* MeaninglessCueDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000020D /* MeaninglessCueDetector.swift */; };
+		00000000000000000000010D /* MediaPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000020E /* MediaPreview.swift */; };
+		00000000000000000000010E /* MediaProcessing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000020F /* MediaProcessing.swift */; };
 		972EEEEB2FCE6E6C009F6645 /* AppLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 972EEEEA2FCE6E6C009F6645 /* AppLog.swift */; };
 		973399062FBE32A400FDA459 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 973399052FBE32A400FDA459 /* AppIcon.icon */; };
 		974075122FCAE5890019F9A1 /* NotificationsService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 974075112FCAE5890019F9A1 /* NotificationsService.swift */; };
@@ -47,6 +49,8 @@
 		00000000000000000000020B /* LocalizationCatalogReferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalizationCatalogReferences.swift; sourceTree = "<group>"; };
 		00000000000000000000020C /* AudioEventSegmentMarker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioEventSegmentMarker.swift; sourceTree = "<group>"; };
 		00000000000000000000020D /* MeaninglessCueDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeaninglessCueDetector.swift; sourceTree = "<group>"; };
+		00000000000000000000020E /* MediaPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaPreview.swift; sourceTree = "<group>"; };
+		00000000000000000000020F /* MediaProcessing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaProcessing.swift; sourceTree = "<group>"; };
 		000000000000000000000301 /* MSub.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MSub.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		972EEEEA2FCE6E6C009F6645 /* AppLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLog.swift; sourceTree = "<group>"; };
 		973399052FBE32A400FDA459 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
@@ -92,6 +96,8 @@
 				000000000000000000000205 /* Localization.swift */,
 				00000000000000000000020B /* LocalizationCatalogReferences.swift */,
 				00000000000000000000020D /* MeaninglessCueDetector.swift */,
+				00000000000000000000020E /* MediaPreview.swift */,
+				00000000000000000000020F /* MediaProcessing.swift */,
 				978E671E2FC1B89C0054DBBA /* ffmpeg */,
 				000000000000000000000206 /* Models.swift */,
 				000000000000000000000207 /* Settings.swift */,
@@ -209,12 +215,14 @@
 				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/backend/.python-version",
 				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/backend/.venv/pyvenv.cfg",
 				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/backend/python/bin/python3.12",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/backend/.msub-package-signature",
 			);
 			shellPath = /bin/sh;
 			shellScript = (
 				"\"${SRCROOT}/Scripts/package-backend.sh\"",
 				"",
 			);
+			showEnvVarsInLog = 0;
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -235,6 +243,8 @@
 				000000000000000000000105 /* Localization.swift in Sources */,
 				00000000000000000000010A /* LocalizationCatalogReferences.swift in Sources */,
 				00000000000000000000010C /* MeaninglessCueDetector.swift in Sources */,
+				00000000000000000000010D /* MediaPreview.swift in Sources */,
+				00000000000000000000010E /* MediaProcessing.swift in Sources */,
 				000000000000000000000106 /* Models.swift in Sources */,
 				974075162FCAE6480019F9A1 /* AppleSpeechService.swift in Sources */,
 				000000000000000000000107 /* Settings.swift in Sources */,
@@ -380,7 +390,7 @@
 				CODE_SIGN_ENTITLEMENTS = MSub.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 21;
+				CURRENT_PROJECT_VERSION = 22;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -413,7 +423,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				COPY_PHASE_STRIP = YES;
-				CURRENT_PROJECT_VERSION = 21;
+				CURRENT_PROJECT_VERSION = 22;
 				DEAD_CODE_STRIPPING = YES;
 				DEPLOYMENT_POSTPROCESSING = YES;
 				DEVELOPMENT_TEAM = "";

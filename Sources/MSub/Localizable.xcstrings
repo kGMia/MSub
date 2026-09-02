@@ -434,7 +434,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Marks likely repeated non-lexical sounds during segment preview with PANNs MLX when available. Without a local model it falls back to lightweight repetition detection; AST remains an optional torch path."
+            "value" : "Marks likely repeated non-lexical sounds during segment preview with PANNs MLX when available. Without a local model it falls back to lightweight repetition detection."
           }
         }
       }
@@ -579,6 +579,28 @@
         }
       }
     },
+    "help.qwen3" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Qwen3-ASR uses its own engine entry, streaming progress, and a token limit capped by segment duration."
+          }
+        }
+      }
+    },
+    "help.funasr" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Fun-ASR Nano can use the context field as a hotword list and supports text normalization."
+          }
+        }
+      }
+    },
     "help.minSegment" : {
       "localizations" : {
         "en" : {
@@ -650,6 +672,28 @@
           "stringUnit" : {
             "state" : "new",
             "value" : "Mega-ASR BF16 supports recognition in 30 languages and internal utterance routing. Language hints, max tokens, temperature, top-p, and top-k apply; FireRed AED controls do not."
+          }
+        }
+      }
+    },
+    "help.model.qwen3" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Qwen3-ASR MLX supports 30 language hints, context prompts, and streaming progress. FireRed AED controls do not apply."
+          }
+        }
+      }
+    },
+    "help.model.funasr" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Fun-ASR Nano 2512 MLX suits Chinese, English, Japanese, and Chinese dialect media. It supports language hints, hotword context, text normalization, and generation controls."
           }
         }
       }
@@ -986,6 +1030,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "多语种长片"
+          }
+        }
+      }
+    },
+    "model.profile.scenario.qwen3" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "High-quality multilingual"
+          }
+        }
+      }
+    },
+    "model.profile.scenario.funasr" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "ZH/EN/JA dialects"
           }
         }
       }
@@ -1893,6 +1959,28 @@
           "stringUnit" : {
             "state" : "new",
             "value" : "Mega-ASR"
+          }
+        }
+      }
+    },
+    "settings.asrEngine.qwen3" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Qwen3-ASR"
+          }
+        }
+      }
+    },
+    "settings.asrEngine.funasr" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Fun-ASR Nano"
           }
         }
       }

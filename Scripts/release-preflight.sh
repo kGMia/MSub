@@ -9,6 +9,8 @@ INCLUDE_MODEL="${MSUB_INCLUDE_MODEL:-0}"
 INCLUDE_SENSEVOICE_MODEL="${MSUB_INCLUDE_SENSEVOICE_MODEL:-0}"
 INCLUDE_MIMO_MODEL="${MSUB_INCLUDE_MIMO_MODEL:-0}"
 INCLUDE_MEGA_MODEL="${MSUB_INCLUDE_MEGA_MODEL:-0}"
+INCLUDE_QWEN3_MODEL="${MSUB_INCLUDE_QWEN3_MODEL:-0}"
+INCLUDE_FUNASR_MODEL="${MSUB_INCLUDE_FUNASR_MODEL:-0}"
 BACKEND_BUNDLE_PROFILE="${MSUB_BACKEND_BUNDLE_PROFILE:-core}"
 if [ -n "${MSUB_INCLUDE_FIRERED_VAD_MODEL+x}" ]; then
     INCLUDE_FIRERED_VAD_MODEL="$MSUB_INCLUDE_FIRERED_VAD_MODEL"
@@ -25,17 +27,14 @@ elif [ "$BACKEND_BUNDLE_PROFILE" = "full" ] || [ "$BACKEND_BUNDLE_PROFILE" = "co
 else
     INCLUDE_PYANNOTE_SEGMENTATION_MLX_MODEL=0
 fi
+INCLUDE_SPEAKER_DIARIZATION_COREML_MODEL="${MSUB_INCLUDE_SPEAKER_DIARIZATION_COREML_MODEL:-0}"
 INCLUDE_SPEAKER_RECOGNITION_MODEL="${MSUB_INCLUDE_SPEAKER_RECOGNITION_MODEL:-0}"
 INCLUDE_EMOTION_MODEL="${MSUB_INCLUDE_EMOTION_MODEL:-0}"
+INCLUDE_EMOTION_MLX_MODEL="${MSUB_INCLUDE_EMOTION_MLX_MODEL:-0}"
+INCLUDE_AUDIO_EVENT_MODEL="${MSUB_INCLUDE_AUDIO_EVENT_MODEL:-0}"
 INCLUDE_VENV="${MSUB_INCLUDE_VENV:-1}"
 INCLUDE_PYTHON_RUNTIME="${MSUB_INCLUDE_PYTHON_RUNTIME:-$INCLUDE_VENV}"
-if [ -n "${MSUB_REQUIRE_OPTIONAL_DEPS+x}" ]; then
-    REQUIRE_OPTIONAL_DEPS="$MSUB_REQUIRE_OPTIONAL_DEPS"
-elif [ "$BACKEND_BUNDLE_PROFILE" = "full" ]; then
-    REQUIRE_OPTIONAL_DEPS=1
-else
-    REQUIRE_OPTIONAL_DEPS=0
-fi
+REQUIRE_OPTIONAL_DEPS="${MSUB_REQUIRE_OPTIONAL_DEPS:-0}"
 REQUIRE_SPEAKER_DEPS="${MSUB_REQUIRE_SPEAKER_DEPS:-$REQUIRE_OPTIONAL_DEPS}"
 REQUIRE_EMOTION_DEPS="${MSUB_REQUIRE_EMOTION_DEPS:-$REQUIRE_OPTIONAL_DEPS}"
 REQUIRE_DIARIZATION_DEPS="${MSUB_REQUIRE_DIARIZATION_DEPS:-$REQUIRE_OPTIONAL_DEPS}"
@@ -96,6 +95,8 @@ if [ "$INCLUDE_VENV" = "1" ]; then
 
     "$REPO_ROOT/.venv/bin/python" - <<'PY'
 import importlib
+import contextlib
+import io
 import os
 import sys
 
@@ -124,7 +125,8 @@ missing = []
 for group, modules in groups.items():
     for module in modules:
         try:
-            importlib.import_module(module)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                importlib.import_module(module)
         except Exception as exc:
             missing.append(f"{group}: {module} ({exc})")
 
@@ -172,6 +174,18 @@ else
     note "MSUB_INCLUDE_MEGA_MODEL=0; Mega-ASR weights will not be embedded."
 fi
 
+if [ "$INCLUDE_QWEN3_MODEL" = "1" ]; then
+    require_model_dir "$REPO_ROOT/models/Qwen3-ASR-1.7B-8bit" "Qwen3-ASR MLX 8bit"
+else
+    note "MSUB_INCLUDE_QWEN3_MODEL=0; Qwen3-ASR weights will not be embedded."
+fi
+
+if [ "$INCLUDE_FUNASR_MODEL" = "1" ]; then
+    require_model_dir "$REPO_ROOT/models/Fun-ASR-Nano-2512" "Fun-ASR Nano 2512 MLX"
+else
+    note "MSUB_INCLUDE_FUNASR_MODEL=0; Fun-ASR weights will not be embedded."
+fi
+
 if [ "$INCLUDE_FIRERED_VAD_MODEL" = "1" ]; then
     require_file "$REPO_ROOT/models/FireRedVAD-CoreML/FireRedVAD.mlpackage/Data/com.apple.CoreML/model.mlmodel" "FireRedVAD CoreML model"
     require_file "$REPO_ROOT/models/FireRedVAD-CoreML/cmvn.ark" "FireRedVAD CoreML cmvn"
@@ -186,7 +200,7 @@ if [ "$INCLUDE_PYANNOTE_SEGMENTATION_MLX_MODEL" = "1" ]; then
     require_file "$REPO_ROOT/models/Pyannote-Segmentation-MLX/model.safetensors" "Pyannote Segmentation MLX weights"
 fi
 
-if [ "${MSUB_INCLUDE_SPEAKER_DIARIZATION_COREML_MODEL:-0}" = "1" ]; then
+if [ "$INCLUDE_SPEAKER_DIARIZATION_COREML_MODEL" = "1" ]; then
     require_file "$REPO_ROOT/models/speaker-diarization-coreml/Segmentation.mlmodelc/model.mil" "speaker diarization CoreML segmentation"
     require_file "$REPO_ROOT/models/speaker-diarization-coreml/Embedding.mlmodelc/model.mil" "speaker diarization CoreML embedding"
 fi
@@ -199,9 +213,14 @@ if [ "$INCLUDE_EMOTION_MODEL" = "1" ]; then
     require_nonempty_dir "$REPO_ROOT/models/emotion2vec_plus_base" "emotion2vec_plus_base"
 fi
 
-if [ "${MSUB_INCLUDE_EMOTION_MLX_MODEL:-0}" = "1" ]; then
+if [ "$INCLUDE_EMOTION_MLX_MODEL" = "1" ]; then
     require_file "$REPO_ROOT/models/emotion2vec-plus-large-mlx/emotion2vec_large_config.json" "emotion2vec MLX config"
     require_file "$REPO_ROOT/models/emotion2vec-plus-large-mlx/emotion2vec_large.safetensors" "emotion2vec MLX weights"
+fi
+
+if [ "$INCLUDE_AUDIO_EVENT_MODEL" = "1" ]; then
+    require_file "$REPO_ROOT/models/panns-cnn14-16k-mlx/panns_cnn14_16k_config.json" "PANNs Cnn14_16k MLX config"
+    require_file "$REPO_ROOT/models/panns-cnn14-16k-mlx/panns_cnn14_16k.safetensors" "PANNs Cnn14_16k MLX weights"
 fi
 
 note "ok"

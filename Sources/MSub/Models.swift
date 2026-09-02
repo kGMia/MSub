@@ -6,6 +6,8 @@ enum ASREngine: String, CaseIterable, Codable, Identifiable {
     case sensevoice
     case mimo
     case mega
+    case qwen3
+    case funasr
     case apple
 
     var id: String { rawValue }
