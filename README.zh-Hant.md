@@ -8,7 +8,7 @@ MSub 是一款面向 Apple Silicon Mac 的原生字幕工具。它可以把本�
 
 ## 主要功能
 
-- 從本機媒體產生 SRT、VTT、TXT 或 JSON 字幕。
+- 從本機媒體產生 SRT、VTT、ASS、TXT 或 JSON 字幕。
 - 辨識前預覽語音分段。
 - 使用原生 macOS 介面編輯字幕區塊。
 - 在波形時間軸上調整字幕時間。
@@ -16,12 +16,16 @@ MSub 是一款面向 Apple Silicon Mac 的原生字幕工具。它可以把本�
 - 將字幕儲存到原媒體檔案所在目錄。
 - 可選說話者標籤、情緒標籤和翻譯功能。
 - 支援 CLI 和 `msub://`，方便自動化工具或 AI agent 控制。
+- 可選原生 Qwen3 MLX / FireRedVAD Core ML，以及各處理階段的耗時詳情。
+- 雙語樣式、播放位置拆分、批次編輯、品質問題導覽與頂部「檔案」選單中的草稿復原。
+
+近期實作與驗證範圍見 [階段記錄](MILESTONE_2026-10-10.md)，模型版本核查見 [模型更新](MODEL_UPDATE_2026-10-10.md)（簡體中文）。
 
 ## 系統需求
 
 - Apple Silicon Mac。
-- 原生 app 目標為 macOS 26 或更新版本。
-- 本機轉寫需要 Python 3.10-3.13 後端。
+- 目前原生 app 目標為 macOS 27 或更新版本。
+- FireRedASR2 等後端引擎及原生失敗回退需要 Python 3.10-3.13；設定齊全的原生流程可不啟動 Python。
 - 需要 `uv` 管理 Python 依賴。
 - 需要 `ffmpeg` 擷取音訊。
 - 需要預留數 GB 空間存放語音模型。
@@ -35,6 +39,8 @@ MSub 是一款面向 Apple Silicon Mac 的原生字幕工具。它可以把本�
 ## 從原始碼建置
 
 這個倉庫是 macOS app 專案。開發和發佈打包時，Python 後端來自完整工作區；完整工作區需要包含 `src/huz_subtitle`、`pyproject.toml`、`uv.lock` 和 `apps/MSub`。
+
+目前原始碼包含 macOS 27 SDK 適配，需要 Xcode 27 和 macOS 27。原生 MLX 推理建議透過 Xcode 專案建置以產生 Metal 函式庫，單獨 `swift run` 不會編譯所需的 Metal 資源。首次建置需信任已鎖定的 Swift package 外掛 / 巨集，保留專案的 Metal 相容 Pre-action。SwiftPM 建置須先解析依賴，再執行 `python3 Scripts/patch-mlx-metal.py .build/checkouts`。
 
 從目前倉庫執行原生 app target：
 

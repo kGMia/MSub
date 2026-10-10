@@ -8,7 +8,7 @@ MSub is a native macOS subtitle app for Apple Silicon Macs. It turns local video
 
 ## Main Features
 
-- Generate SRT, VTT, TXT, or JSON subtitles from local media.
+- Generate SRT, VTT, ASS, TXT, or JSON subtitles from local media.
 - Preview speech segments before transcription.
 - Edit subtitle blocks in a native macOS interface.
 - Adjust timing on a waveform timeline.
@@ -16,12 +16,16 @@ MSub is a native macOS subtitle app for Apple Silicon Macs. It turns local video
 - Save subtitles beside the source media.
 - Optional speaker labels, emotion tags, and translation tools.
 - CLI and `msub://` control support for automation and AI agents.
+- Optional native Qwen3 MLX / FireRedVAD Core ML, with per-stage processing details.
+- Bilingual styling, playhead splitting, batch edits, quality review and draft recovery in the File menu.
+
+See the [milestone notes](MILESTONE_2026-10-10.md) for scope and validation limits, and the [model audit](MODEL_UPDATE_2026-10-10.md) for current versions (Chinese).
 
 ## Requirements
 
 - Apple Silicon Mac.
-- macOS 26 or newer for the native app target.
-- Python 3.10-3.13 backend for local transcription.
+- macOS 27 or newer for the current native app target.
+- Python 3.10-3.13 for backend engines such as FireRedASR2 and native fallback; configured native workflows can run without starting Python.
 - `uv` for Python dependency management.
 - `ffmpeg` for audio extraction.
 - Several GB of free disk space for speech models.
@@ -35,6 +39,8 @@ Current builds are ad-hoc signed and not notarized. If macOS says the app cannot
 ## Build From Source
 
 This repository is the macOS app project. During development and release packaging, the Python backend is loaded from the full workspace that contains `src/huz_subtitle`, `pyproject.toml`, `uv.lock`, and `apps/MSub`.
+
+The current source uses macOS 27 SDK APIs and requires Xcode 27 and macOS 27. Prefer the Xcode project for native MLX inference because `swift run` alone does not compile the required Metal resources. Trust the pinned Swift package plugins/macros on first build and retain the scheme's Metal compatibility pre-action. For SwiftPM builds, resolve dependencies and run `python3 Scripts/patch-mlx-metal.py .build/checkouts` before building.
 
 Run the native app target from this repository:
 

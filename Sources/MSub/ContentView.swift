@@ -21,7 +21,13 @@ struct ContentView: View {
     @State private var playback = PlaybackController()
 
     @State private var files: [FileSlot] = []
+    @State private var draftStore = SubtitleDraftStore()
+    @State private var preparedAudioCache = PreparedAudioCache()
     @State private var activeIndex: Int = 0
+    @State private var splitColumnVisibility: NavigationSplitViewVisibility = .all
+    @State private var previousColumnVisibility: NavigationSplitViewVisibility = .all
+    @State private var isEditorFocused = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isProcessing = false
     @State private var isProcessingPaused = false
     @State private var isPauseResumeRequestInFlight = false
@@ -46,8 +52,7 @@ struct ContentView: View {
     @State private var quickLookURL: URL?
     @State private var isBackendStatusPopoverPresented = false
     @State private var backendStatusBadgeFrame: CGRect = .zero
-    @State private var isStatusDetailHovered = false
-    @State private var statusDetailDismissTask: Task<Void, Never>?
+    @State private var isStatusDetailPresented = false
     @State private var processingStartedAt: Date?
     @State private var cueListSelection: Set<SubtitleCue.ID> = []
     @State private var cueListColumnCustomization = TableColumnCustomization<SubtitleCue>()
@@ -56,6 +61,7 @@ struct ContentView: View {
     @State private var cueListTimingShiftSeconds: Double = 0.0
     @State private var cueListTimingGapSeconds: Double = 0.0
     @State private var cueListTimingTargetIDs: Set<SubtitleCue.ID> = []
+    @State private var cueListTimingSlotID: UUID?
     @State private var translationJob: TranslationJob?
     @State private var translationConfiguration: TranslationSession.Configuration?
     @State private var isTranslationSheetPresented = false
@@ -67,6 +73,7 @@ struct ContentView: View {
     @State private var translationErrorMessage: String?
     @State private var isTranslating = false
     @State private var translationUndo = TranslationUndoCoordinator()
+    @State private var timingUndo = TranslationUndoCoordinator()
     @State private var pendingSidecarAuthorizationURL: URL?
     @Environment(\.undoManager) private var undoManager
     @FocusState private var focusedMediaNameSlotID: UUID?
@@ -178,8 +185,8 @@ struct ContentView: View {
         contentWithEventHandlers
     }
 
-    private var baseContent: some View {
-        NavigationSplitView {
+    private var workspaceNavigation: some View {
+        NavigationSplitView(columnVisibility: $splitColumnVisibility) {
             settingsPanel
                 .navigationSplitViewColumnWidth(min: 260, ideal: 285, max: 320)
         } detail: {
@@ -190,6 +197,17 @@ struct ContentView: View {
             ToolbarItem(placement: .navigation) {
                 connectionBadge
             }
+            .msubToolbarPriority(.secondary)
+            ToolbarItem(placement: .primaryAction) {
+                Button(action: toggleEditorFocus) {
+                    Label(t(isEditorFocused ? "workspace.focus.exit" : "workspace.focus.enter"),
+                          systemImage: isEditorFocused ? "rectangle.inset.filled" : "arrow.up.left.and.arrow.down.right")
+                }
+                .help(t(isEditorFocused ? "workspace.focus.exit" : "workspace.focus.enter"))
+                .keyboardShortcut("f", modifiers: [.command, .shift])
+                .disabled(!hasFiles && !isEditorFocused)
+            }
+            .msubToolbarPriority(.primary)
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
                     Task { await previewAll() }
@@ -202,23 +220,54 @@ struct ContentView: View {
             ToolbarItem(placement: .confirmationAction) {
                 transcribeButton
             }
+            .msubToolbarPriority(.critical)
         }
         .overlay(alignment: .topLeading) {
             backendStatusPopoverOverlay
         }
         .animation(.snappy(duration: 0.18), value: isBackendStatusPopoverPresented)
+    }
+
+    private var baseContent: some View {
+        workspaceNavigation
+        .focusedSceneValue(\.subtitleDraftActions, SubtitleDraftActions(
+            store: draftStore, canRestore: canReorderFiles, restore: restoreEditingDrafts))
         .onAppear {
             configureTranslationUndo()
         }
+        .onChange(of: files.map(SubtitleDraftChangeToken.init)) { _, _ in
+            draftStore.schedule(files.map(SubtitleDraft.init))
+        }
+        .onChange(of: files.map { $0.url.standardizedFileURL.path }) { _, paths in
+            preparedAudioCache.retainSources(Set(paths))
+        }
         .task {
-            await loadConfig()
+            if let config = api.cachedConfig() {
+                settings.apply(config: config)
+                connectionState = backend.isRunning ? .connected : .disconnected
+                // Python-only recognition still needs a server. Start it while the
+                // user selects media, rather than adding startup to the first job.
+                // Keep native/local recognition lazy and do not reset user options.
+                if !settings.effectiveASREngine.isLocal && !settings.canUseNativeQwen {
+                    _ = await ensureBackendReady()
+                }
+            } else {
+                // First launch discovers installed model paths once; later native runs use the cache.
+                await loadConfig()
+            }
         }
         .onDisappear {
+            preparedAudioCache.removeAll()
+            draftStore.flush(files.map(SubtitleDraft.init))
             cleanupOnDisappear()
         }
         .modifier(MSubCommandsModifier(
             detailTab: $detailTab,
-            onWillTerminate: { backend.stop(waitForExit: true) },
+            onWillTerminate: {
+                preparedAudioCache.removeAll()
+                draftStore.flush(files.map(SubtitleDraft.init))
+                backend.stop(waitForExit: true)
+            },
             onDeleteCueListSelection: deleteSelectedCuesFromActiveCueList
         ))
         .alert(t("error.title"), isPresented: errorAlertBinding) {
@@ -371,8 +420,6 @@ struct ContentView: View {
     private func cleanupOnDisappear() {
         processingTask?.cancel()
         processingTask = nil
-        statusDetailDismissTask?.cancel()
-        statusDetailDismissTask = nil
     }
 
     private var errorAlertBinding: Binding<Bool> {
@@ -398,6 +445,20 @@ struct ContentView: View {
 
     // MARK: - Detail column
 
+    private func toggleEditorFocus() {
+        withAnimation(reduceMotion ? nil : .snappy(duration: 0.2)) {
+            if isEditorFocused {
+                isEditorFocused = false
+                splitColumnVisibility = previousColumnVisibility
+            } else {
+                previousColumnVisibility = splitColumnVisibility
+                splitColumnVisibility = .detailOnly
+                detailTab = .output
+                isEditorFocused = true
+            }
+        }
+    }
+
     private var detailColumn: some View {
         VStack(spacing: 0) {
             ScrollView {
@@ -405,7 +466,7 @@ struct ContentView: View {
                     if hasFiles {
                         fileHeaderBar
                     }
-                    compactWorkArea
+                    if !isEditorFocused { compactWorkArea }
                     detailTabContent
                 }
                 .padding(14)
@@ -511,7 +572,7 @@ struct ContentView: View {
         .padding(compact ? 10 : 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: fixedHeight, alignment: .topLeading)
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
+        .msubPanel(cornerRadius: 14)
     }
 
     private func emotionStackedBar(_ emotions: [SubtitleEmotionFrequency]) -> some View {
@@ -922,7 +983,7 @@ struct ContentView: View {
                 let top = max(margin, desiredTop)
 
                 backendStatusPopover
-                    .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16))
+                    .msubPanel(cornerRadius: 16)
                     .shadow(color: .black.opacity(0.16), radius: 18, y: 8)
                     .frame(width: popoverWidth, alignment: .leading)
                     .offset(x: left, y: top)
@@ -1101,7 +1162,7 @@ struct ContentView: View {
                 }
 
                 if isProcessing || isSaving {
-                    ProgressView()
+                    MSubSpinner()
                         .controlSize(.small)
                         .transition(.scale(scale: 0.6).combined(with: .opacity))
                 }
@@ -1155,7 +1216,7 @@ struct ContentView: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
+        .msubPanel(cornerRadius: 14)
     }
 
     private var statusSystemImage: String {
@@ -1307,6 +1368,15 @@ struct ContentView: View {
                     .labelsHidden()
                     .pickerStyle(.menu)
                 }
+                if !settings.effectiveASREngine.isLocal && settings.effectiveVADEngine == .firered {
+                    Toggle(t("settings.nativeFireRedVAD"), isOn: $settings.nativeFireRedVADEnabled)
+                        .help(t("help.nativeFireRedVAD"))
+                    if settings.nativeFireRedVADEnabled {
+                        Text(t(settings.nativeFireRedVADDirectory == nil ? "nativeFireRedVAD.requirements" : "nativeFireRedVAD.ready"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 if let status = vadStatusText() {
                     Text(status)
                         .font(.caption)
@@ -1387,6 +1457,15 @@ struct ContentView: View {
                     }
                     .toggleStyle(.switch)
                 } else if settings.usesQwenGenerationControls {
+                    if settings.isQwen3Active {
+                        Toggle(t("settings.nativeQwen"), isOn: $settings.nativeQwenEnabled)
+                            .help(t("help.nativeQwen"))
+                        if settings.nativeQwenEnabled {
+                            Text(t(settings.canUseNativeQwen ? "nativeQwen.ready" : "nativeQwen.fallbackOptions"))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                     stackedField(t("settings.recognitionLanguage"), help: t("help.recognitionLanguage")) {
                         Picker("", selection: $settings.recognitionLanguage) {
                             ForEach(settings.supportedRecognitionLanguages) { option in
@@ -1619,74 +1698,34 @@ struct ContentView: View {
             .help(t("file.clearAll"))
             .accessibilityLabel(t("file.clearAll"))
 
+            Divider().frame(height: 18)
+
             statusCapsule
                 .layoutPriority(1)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular, in: Capsule())
+        .controlSize(.small)
+        .msubPanel(cornerRadius: 12)
         .animation(.spring(response: 0.55, dampingFraction: 0.82), value: compactStatusText)
         .animation(.spring(response: 0.55, dampingFraction: 0.82), value: isProcessing)
     }
 
     private var statusCapsule: some View {
-        statusCapsuleContent(expanded: false)
-            .onHover { hovering in
-                setStatusDetailHovered(hovering)
-            }
+        statusCapsuleCompactBody
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(.quaternary, in: Capsule())
             .help(statusHelpText)
-            .popover(isPresented: $isStatusDetailHovered, arrowEdge: .top) {
-                statusCapsuleExpandedBody
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 11)
-                    .frame(width: 240, alignment: .leading)
-                    .onHover { hovering in
-                        setStatusDetailHovered(hovering)
-                    }
+            .popover(isPresented: $isStatusDetailPresented, arrowEdge: .top) {
+                ScrollView {
+                    statusCapsuleExpandedBody.padding(16)
+                }
+                .frame(width: 320)
+                .frame(maxHeight: 560)
+                .scrollBounceBehavior(.basedOnSize)
             }
-            .animation(.spring(response: 0.55, dampingFraction: 0.82), value: compactStatusText)
-            .animation(.spring(response: 0.55, dampingFraction: 0.82), value: isProcessing)
-            .animation(.spring(response: 0.55, dampingFraction: 0.82), value: statusSystemImage)
-            .animation(.spring(response: 0.55, dampingFraction: 0.82), value: statusTint)
-            .animation(.easeOut(duration: 0.25), value: aggregateProgress)
-    }
-
-    private func setStatusDetailHovered(_ hovering: Bool) {
-        statusDetailDismissTask?.cancel()
-        statusDetailDismissTask = nil
-        if hovering {
-            isStatusDetailHovered = true
-        } else {
-            statusDetailDismissTask = Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(220))
-                guard !Task.isCancelled else { return }
-                isStatusDetailHovered = false
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func statusCapsuleContent(expanded: Bool) -> some View {
-        if expanded {
-            statusCapsuleExpandedBody
-                .padding(.horizontal, 14)
-                .padding(.vertical, 11)
-                .frame(width: 240, alignment: .leading)
-                .background(statusTint.opacity(0.06), in: RoundedRectangle(cornerRadius: 18))
-                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18))
-                .overlay(RoundedRectangle(cornerRadius: 18).stroke(statusTint.opacity(0.35), lineWidth: 1.0))
-                .clipShape(RoundedRectangle(cornerRadius: 18))
-                .geometryGroup()
-        } else {
-            statusCapsuleCompactBody
-                .padding(.horizontal, 9)
-                .padding(.vertical, 5)
-                .background(statusTint.opacity(0.12), in: Capsule())
-                .overlay(Capsule().stroke(statusTint.opacity(0.22), lineWidth: 0.8))
-                .clipShape(Capsule())
-                .geometryGroup()
-        }
     }
 
     private var statusCapsuleCompactBody: some View {
@@ -1721,12 +1760,21 @@ struct ContentView: View {
                     Image(systemName: pauseResumeSystemImage)
                         .font(Font.caption.weight(.semibold))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderless)
                 .foregroundStyle(pauseResumeTint)
                 .disabled(isPauseResumeRequestInFlight)
                 .help(t(pauseResumeLabelKey))
                 .transition(.scale.combined(with: .opacity))
             }
+            Button {
+                isStatusDetailPresented.toggle()
+            } label: {
+                Label(t("diagnostics.details"), systemImage: "info.circle")
+                    .labelStyle(.iconOnly)
+            }
+            .buttonStyle(.borderless)
+            .help(t("diagnostics.details"))
+            .accessibilityLabel(t("diagnostics.details"))
         }
     }
 
@@ -1752,7 +1800,7 @@ struct ContentView: View {
                         Image(systemName: pauseResumeSystemImage)
                             .font(.title3)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.borderless)
                     .foregroundStyle(pauseResumeTint)
                     .disabled(isPauseResumeRequestInFlight)
                     .help(t(pauseResumeLabelKey))
@@ -1816,6 +1864,11 @@ struct ContentView: View {
                 }
             }
 
+            if let slot = activeSlot, slot.processingElapsed != nil || slot.backendDiagnostics != nil || !slot.localStageTimings.isEmpty {
+                Divider()
+                processingDiagnosticsView(slot)
+            }
+
             if let details = activeFailureDetails {
                 HStack(spacing: 8) {
                     Button {
@@ -1832,6 +1885,81 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderless)
                 .controlSize(.small)
+            }
+        }
+    }
+
+    private func beginProcessingDiagnostics(at index: Int) {
+        update(at: index) {
+            $0.processingElapsed = nil
+            $0.localStageTimings = [:]
+            $0.processingFacts = [:]
+            $0.backendDiagnostics = nil
+        }
+    }
+
+    private func recordLocalStage(_ stage: String, id: UUID, started: TimeInterval) {
+        guard let index = files.firstIndex(where: { $0.id == id }) else { return }
+        let elapsed = max(0, ProcessInfo.processInfo.systemUptime - started)
+        update(at: index) { $0.localStageTimings[stage, default: 0] += elapsed }
+    }
+
+    private func recordProcessingFact(_ key: String, value: String, id: UUID) {
+        guard let index = files.firstIndex(where: { $0.id == id }) else { return }
+        update(at: index) { $0.processingFacts[key] = value }
+    }
+
+    private func finishProcessingDiagnostics(id: UUID, started: TimeInterval) {
+        guard let index = files.firstIndex(where: { $0.id == id }) else { return }
+        let elapsed = max(0, ProcessInfo.processInfo.systemUptime - started)
+        update(at: index) { $0.processingElapsed = elapsed }
+        let stages = files[index].localStageTimings
+        let facts = files[index].processingFacts
+        AppLog.processing.info("taskDiagnostics id=\(id.uuidString, privacy: .public) seconds=\(elapsed) localStages=\(String(describing: stages), privacy: .public) facts=\(String(describing: facts), privacy: .public)")
+    }
+
+    private func processingDiagnosticsView(_ slot: FileSlot) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let elapsed = slot.processingElapsed {
+                diagnosticTimeRow("diagnostics.total", seconds: elapsed)
+            }
+            if !slot.localStageTimings.isEmpty {
+                Text(t("diagnostics.local")).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                diagnosticStageRows(slot.localStageTimings)
+            }
+            diagnosticFacts(slot.processingFacts)
+            if let backend = slot.backendDiagnostics {
+                diagnosticTimeRow("diagnostics.backend", seconds: backend.totalSeconds)
+                diagnosticStageRows(backend.stages)
+                diagnosticFacts(backend.facts)
+            }
+            Text(t("diagnostics.help"))
+                .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .font(.caption)
+    }
+
+    private func diagnosticStageRows(_ stages: [String: Double]) -> some View {
+        let order = ["backendStartup", "queue", "audioPreparation", "segmentation", "nativePreparation", "modelLoading", "recognition", "nativeCheckpoint", "nativeInference", "postprocessing", "export", "paused", "other"]
+        return ForEach(order.filter { (stages[$0] ?? 0) > 0 }, id: \.self) { stage in
+            diagnosticTimeRow("diagnostics.stage.\(stage)", seconds: stages[stage] ?? 0)
+        }
+    }
+
+    private func diagnosticTimeRow(_ key: String, seconds: Double) -> some View {
+        LabeledContent(t(key)) {
+            Text(String(format: t("diagnostics.seconds"), seconds.isFinite ? max(0, seconds) : 0))
+                .monospacedDigit()
+        }
+    }
+
+    private func diagnosticFacts(_ facts: [String: String]) -> some View {
+        let known = ["preparedAudio", "segmentation", "modelCache", "nativeVAD", "nativeQwen", "speaker_labeling_fallback", "rich_model_unavailable", "rich_metadata_unavailable"]
+        return ForEach(known.filter { facts[$0] != nil }, id: \.self) { key in
+            LabeledContent(t("diagnostics.fact.\(key)")) {
+                Text(t("diagnostics.value.\(facts[key] ?? "unknown")"))
+                    .foregroundStyle(facts[key] == "fallback" ? Color.orange : Color.secondary)
             }
         }
     }
@@ -1971,7 +2099,7 @@ struct ContentView: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity)
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
+        .msubPanel(cornerRadius: 14)
         .overlay {
             RoundedRectangle(cornerRadius: 14)
                 .strokeBorder(
@@ -2001,15 +2129,7 @@ struct ContentView: View {
     private var fileChipsRow: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                ForEach(Array(files.enumerated()), id: \.element.id) { index, _ in
-                    fileChip(index: index)
-                        .transition(
-                            .asymmetric(
-                                insertion: .scale(scale: 0.7).combined(with: .opacity),
-                                removal: .scale(scale: 0.6).combined(with: .opacity)
-                            )
-                        )
-                }
+                queueChips
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 4)
@@ -2032,6 +2152,18 @@ struct ContentView: View {
         }
         .mask(chipFadeMask)
         .animation(.easeInOut(duration: 0.2), value: chipScrollEdges)
+    }
+
+    private var canReorderFiles: Bool {
+        !isProcessing && !isSaving && !isTranslating && !isClippingVideo && !isCapturingFrame
+    }
+
+    @ViewBuilder
+    private var queueChips: some View {
+        let indices = Dictionary(uniqueKeysWithValues: files.enumerated().map { ($0.element.id, $0.offset) })
+        ForEach(files) { file in
+            if let index = indices[file.id] { fileChip(index: index) }
+        }
     }
 
     private var chipNameMaxWidth: CGFloat {
@@ -2066,6 +2198,7 @@ struct ContentView: View {
             iconName: chipIcon(slot.processingState),
             iconColor: chipColor(slot.processingState),
             nameMaxWidth: chipNameMaxWidth,
+            canReorder: canReorderFiles,
             removeHelp: t("file.remove"),
             statusHelp: [t(slot.statusKey), slot.statusDetail].filter { !$0.isEmpty }.joined(separator: " · "),
             showInFinderLabel: t("file.showInFinder"),
@@ -2077,11 +2210,12 @@ struct ContentView: View {
     }
 
     private func moveChip(from sourceID: UUID, to targetID: UUID) {
+        guard canReorderFiles else { return }
         guard let fromIdx = files.firstIndex(where: { $0.id == sourceID }),
               let toIdx = files.firstIndex(where: { $0.id == targetID }),
               fromIdx != toIdx else { return }
         let activeID = files.indices.contains(activeIndex) ? files[activeIndex].id : nil
-        withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) {
+        withAnimation(reduceMotion ? nil : .spring(response: 0.45, dampingFraction: 0.82)) {
             let item = files.remove(at: fromIdx)
             files.insert(item, at: toIdx)
             if let activeID, let newIdx = files.firstIndex(where: { $0.id == activeID }) {
@@ -2249,7 +2383,7 @@ struct ContentView: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
+        .msubPanel(cornerRadius: 14)
     }
 
     private func audioEventTuningRow(stats: AudioEventPreviewStats) -> some View {
@@ -2497,7 +2631,7 @@ struct ContentView: View {
                         Task { await clipActiveVideoToSelectedRange() }
                     } label: {
                         if isClippingVideo {
-                            ProgressView()
+                            MSubSpinner()
                                 .controlSize(.small)
                         } else {
                             Label(t("segments.clipVideo"), systemImage: "film")
@@ -2526,7 +2660,7 @@ struct ContentView: View {
 
     private var outputPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
+            HStack(spacing: 8) {
                 Text(t("output.title"))
                     .font(.headline)
                 Spacer()
@@ -2585,6 +2719,7 @@ struct ContentView: View {
                 .disabled(!canSaveAll)
                 .help(t("help.saveAll"))
             }
+            .msubCompactActions()
 
             if files.indices.contains(activeIndex), !files[activeIndex].cues.isEmpty {
                 let slotID = files[activeIndex].id
@@ -2616,7 +2751,7 @@ struct ContentView: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
+        .msubPanel(cornerRadius: 14)
     }
 
     // MARK: - Cue list panel
@@ -2722,7 +2857,7 @@ struct ContentView: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
+        .msubPanel(cornerRadius: 14)
         .sheet(isPresented: $isCueListTimingAdjustmentPresented) {
             TimingAdjustmentSheet(
                 language: language,
@@ -2730,7 +2865,9 @@ struct ContentView: View {
                 mode: $cueListTimingMode,
                 shiftSeconds: $cueListTimingShiftSeconds,
                 gapSeconds: $cueListTimingGapSeconds,
-                apply: applyCueListTimingAdjustment
+                apply: applyCueListTimingAdjustment,
+                cues: activeSlot?.cues.filter { cueListTimingTargetIDs.contains($0.id) } ?? [],
+                calibrate: applyCueListTimingCalibration
             )
         }
     }
@@ -2986,7 +3123,10 @@ struct ContentView: View {
         if files[activeIndex].selectedCueID != cueID {
             files[activeIndex].selectedCueID = cueID
         }
-        if let cue = files[activeIndex].cues.first(where: { $0.id == cueID }) {
+        // Review advances selection itself; mirroring that into the table must
+        // not seek again and cancel the playback queue.
+        if playback.activeReviewCueID != cueID,
+           let cue = files[activeIndex].cues.first(where: { $0.id == cueID }) {
             playback.seek(to: cue.start)
         }
     }
@@ -3027,6 +3167,7 @@ struct ContentView: View {
     }
 
     private func presentCueListTimingAdjustment(for ids: Set<SubtitleCue.ID>) {
+        cueListTimingSlotID = activeSlot?.id
         cueListTimingTargetIDs = ids
         cueListTimingMode = .shift
         cueListTimingShiftSeconds = 0
@@ -3041,7 +3182,33 @@ struct ContentView: View {
             shiftSelectedCues(by: cueListTimingShiftSeconds, ids: cueListTimingTargetIDs)
         case .closeGaps:
             closeGapsAmongSelectedCues(targetGap: cueListTimingGapSeconds, ids: cueListTimingTargetIDs)
+        case .calibrate:
+            break // Handled by the sheet's calibration callback.
         }
+    }
+
+    private func applyCueListTimingCalibration(_ calibration: SubtitleTimingCalibration) {
+        guard let slotID = cueListTimingSlotID, activeSlot?.id == slotID,
+              files.indices.contains(activeIndex) else { return }
+        let before = files[activeIndex].cues
+        let targets = before.filter { cueListTimingTargetIDs.contains($0.id) }
+        guard let adjusted = try? calibration.applying(to: targets), adjusted != targets else { return }
+        let changes = Dictionary(adjusted.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let result = before.map { changes[$0.id] ?? $0 }
+        playback.seek(to: playback.currentTime, pause: true)
+        update(at: activeIndex) {
+            $0.cues = result
+            $0.previewText = SubtitleDocument.serialize(result, format: $0.outputFormat)
+        }
+        registerTimingUndoStep(slotID: slotID, cues: before)
+    }
+
+    private func registerTimingUndoStep(slotID: UUID, cues: [SubtitleCue]) {
+        guard let undoManager else { return }
+        undoManager.registerUndo(withTarget: timingUndo) { coordinator in
+            coordinator.restore(slotID: slotID, cues: cues)
+        }
+        undoManager.setActionName(t("undo.adjustTiming"))
     }
 
     private func shiftSelectedCues(by seconds: Double, ids: Set<SubtitleCue.ID>) {
@@ -3629,15 +3796,12 @@ struct ContentView: View {
                 systemImage: isProcessing ? "stop.circle" : "captions.bubble"
             )
                 .labelStyle(.titleAndIcon)
-                .font(.body.weight(.semibold))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 6)
+                .fontWeight(.semibold)
                 .contentTransition(.symbolEffect(.replace))
         }
-        .glassEffect(.regular.tint(isProcessing ? .red : .accentColor).interactive())
-        .buttonBorderShape(.capsule)
-        .controlSize(.large)
+        .buttonStyle(.borderedProminent)
+        .tint(isProcessing ? Color.red : nil)
+        .controlSize(.regular)
         .disabled(!isProcessing && !canRun)
         .help(t(isProcessing ? "action.stop" : "action.transcribe"))
         .accessibilityLabel(t(isProcessing ? "action.stop" : "action.transcribe"))
@@ -3730,10 +3894,11 @@ struct ContentView: View {
 
     private func translateWholeSlot(slotID: FileSlot.ID, mode: TranslationOutputMode, session: TranslationSession) async throws {
         guard let index = files.firstIndex(where: { $0.id == slotID }) else { return }
-        let originals = files[index].cues.map(\.text)
+        let snapshot = files[index].cues
+        let originals = snapshot.map(\.translationSourceText)
         let translated = try await TranslationUtility.translateBatch(originals, using: session, contextual: true)
         guard files.indices.contains(index), files[index].id == slotID else { return }
-        applyTranslation(originals: originals, translated: translated, to: index, mode: mode, restrictTo: nil)
+        applyTranslation(snapshot: snapshot, translated: translated, to: index, mode: mode)
     }
 
     private func translateCues(slotID: FileSlot.ID, cueIDs: Set<SubtitleCue.ID>, mode: TranslationOutputMode, session: TranslationSession) async throws {
@@ -3743,41 +3908,21 @@ struct ContentView: View {
             cueIDs.contains(cue.id) ? offset : nil
         }
         guard !targetIndices.isEmpty else { return }
-        let originals = targetIndices.map { allCues[$0].text }
+        let snapshot = targetIndices.map { allCues[$0] }
+        let originals = snapshot.map(\.translationSourceText)
         let translated = try await TranslationUtility.translateBatch(originals, using: session)
         guard files.indices.contains(index), files[index].id == slotID else { return }
-        applyTranslation(originals: originals, translated: translated, to: index, mode: mode, restrictTo: targetIndices)
+        applyTranslation(snapshot: snapshot, translated: translated, to: index, mode: mode)
     }
 
-    private func applyTranslation(
-        originals: [String],
-        translated: [String],
-        to fileIndex: Int,
-        mode: TranslationOutputMode,
-        restrictTo cueIndices: [Int]?
-    ) {
+    private func applyTranslation(snapshot: [SubtitleCue], translated: [String], to fileIndex: Int, mode: TranslationOutputMode) {
         let slotID = files[fileIndex].id
         let beforeCues = files[fileIndex].cues
+        let result = SubtitleTranslationEdits.apply(snapshot: snapshot, translated: translated, current: beforeCues, mode: mode)
+        guard result != beforeCues else { return }
         update(at: fileIndex) { slot in
-            if let cueIndices {
-                for (offset, cueIndex) in cueIndices.enumerated() {
-                    guard slot.cues.indices.contains(cueIndex), offset < translated.count else { continue }
-                    slot.cues[cueIndex].text = TranslationUtility.combine(
-                        original: originals[offset],
-                        translated: translated[offset],
-                        mode: mode
-                    )
-                }
-            } else {
-                for index in slot.cues.indices where index < translated.count {
-                    slot.cues[index].text = TranslationUtility.combine(
-                        original: originals[index],
-                        translated: translated[index],
-                        mode: mode
-                    )
-                }
-            }
-            slot.previewText = SubtitleDocument.serialize(slot.cues, format: slot.outputFormat)
+            slot.cues = result
+            slot.previewText = SubtitleDocument.serialize(result, format: slot.outputFormat)
         }
         registerTranslationUndoStep(slotID: slotID, cues: beforeCues)
     }
@@ -3785,6 +3930,18 @@ struct ContentView: View {
     private func configureTranslationUndo() {
         translationUndo.restoreHandler = { slotID, restoredCues in
             self.applyTranslationSnapshot(slotID: slotID, cues: restoredCues)
+        }
+        timingUndo.restoreHandler = { slotID, restoredCues in
+            guard let index = self.files.firstIndex(where: { $0.id == slotID }) else { return }
+            let current = self.files[index].cues
+            if self.activeSlot?.id == slotID {
+                self.playback.seek(to: self.playback.currentTime, pause: true)
+            }
+            self.update(at: index) {
+                $0.cues = restoredCues
+                $0.previewText = SubtitleDocument.serialize(restoredCues, format: $0.outputFormat)
+            }
+            self.registerTimingUndoStep(slotID: slotID, cues: current)
         }
     }
 
@@ -3817,6 +3974,22 @@ struct ContentView: View {
         )
         guard granted, let slot = activeSlot, !slot.hasEditableSubtitle else { return }
         importSidecarSubtitle(for: slot.url, slotID: slot.id)
+    }
+
+    private func restoreEditingDrafts() {
+        guard canReorderFiles else { return }
+        let drafts = draftStore.resumeRecovery()
+        for draft in drafts {
+            // Keep both copies if this media is already open: recovery must not
+            // overwrite newer in-memory edits or discard the saved draft.
+            let slot = draft.restoredSlot()
+            files.append(slot)
+            if FileManager.default.isReadableFile(atPath: slot.url.path) {
+                loadMediaInfo(for: slot.url, slotID: slot.id)
+            }
+        }
+        if !files.isEmpty { activeIndex = 0; detailTab = .output }
+        draftStore.schedule(files.map(SubtitleDraft.init))
     }
 
     private func addFiles(_ urls: [URL]) {
@@ -4340,6 +4513,26 @@ struct ContentView: View {
         return isReady
     }
 
+    private func requireBackendForProcessing(fileIndex: Int) async throws {
+        try Task.checkCancellation()
+        await waitWhileProcessingPaused()
+        try Task.checkCancellation()
+        let id = files[fileIndex].id
+        let started = ProcessInfo.processInfo.systemUptime
+        defer { recordLocalStage("backendStartup", id: id, started: started) }
+        guard await ensureBackendReady() else {
+            try Task.checkCancellation()
+            throw NSError(domain: "MSub.Backend", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: backend.message])
+        }
+        try Task.checkCancellation()
+        let config = try await api.fetchConfig()
+        try Task.checkCancellation()
+        settings.refreshCatalog(config: config)
+        await waitWhileProcessingPaused()
+        try Task.checkCancellation()
+    }
+
     private func chooseASRModelDirectory() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
@@ -4449,17 +4642,6 @@ struct ContentView: View {
         guard hasFiles, !isProcessing else { return }
         isProcessing = true
         processingStartedAt = Date()
-        guard await ensureBackendReady() else {
-            if isProcessing {
-                errorMessage = backend.message
-                isProcessing = false
-                processingStartedAt = nil
-            }
-            return
-        }
-        guard isProcessing else {
-            return
-        }
         let task = Task { @MainActor in
             defer {
                 isProcessing = false
@@ -4482,19 +4664,6 @@ struct ContentView: View {
         guard hasFiles, !isProcessing else { return }
         isProcessing = true
         processingStartedAt = Date()
-        if !settings.effectiveASREngine.isLocal {
-            guard await ensureBackendReady() else {
-                if isProcessing {
-                    errorMessage = backend.message
-                    isProcessing = false
-                    processingStartedAt = nil
-                }
-                return
-            }
-        }
-        guard isProcessing else {
-            return
-        }
         detailTab = .output
         let totalCount = files.count
         let language = self.language
@@ -4525,6 +4694,7 @@ struct ContentView: View {
         }
         processingTask = task
         await task.value
+        await NativeQwenService.shared.release()
     }
 
     private func togglePauseProcessing() {
@@ -4627,8 +4797,15 @@ struct ContentView: View {
                 }
             }
         }
-        processingTask?.cancel()
-        processingTask = nil
+        // Keep the workflow occupied until its task has actually finished.
+        // Native decoding drains the current segment; allowing a restart here
+        // would let the cancelled task overwrite the next batch's UI state.
+        if let processingTask {
+            processingTask.cancel()
+        } else {
+            isProcessing = false
+            processingStartedAt = nil
+        }
         for index in files.indices {
             switch files[index].processingState {
             case .previewing, .transcribing:
@@ -4639,29 +4816,57 @@ struct ContentView: View {
                 break
             }
         }
-        isProcessing = false
-        processingStartedAt = nil
     }
 
     private func preparedMediaInput(for slot: FileSlot, clipRange: MediaClipRange?) async throws -> PreparedMediaInput {
-        try await MediaClipExporter.prepare(
+        let started = ProcessInfo.processInfo.systemUptime
+        defer { recordLocalStage("audioPreparation", id: slot.id, started: started) }
+        let preferNative = settings.canUseNativeQwen || settings.nativeFireRedVADDirectory != nil
+        let key = PreparedAudioCache.Key(source: slot.url, start: clipRange?.start, end: clipRange?.end)
+        if preferNative, let key, let lease = preparedAudioCache.lookup(key) {
+            try Task.checkCancellation()
+            recordProcessingFact("preparedAudio", value: "reused", id: slot.id)
+            AppLog.processing.info("audioPreparation nativePCM cache=hit")
+            return PreparedMediaInput(uploadURL: lease.url, clipRange: clipRange,
+                                      timeOffset: clipRange?.start ?? 0, cleanupURL: nil, lease: lease)
+        }
+        let prepared = try await MediaClipExporter.prepare(
             source: slot.url,
             clipRange: clipRange,
-            failureMessage: t("error.clipFailed")
+            failureMessage: t("error.clipFailed"),
+            preferNativeAudio: preferNative
         )
+        if Task.isCancelled {
+            prepared.cleanup()
+            throw CancellationError()
+        }
+        // Cache only owned native PCM; original media and converter fallbacks
+        // retain their existing lifetime. Recognition options do not affect PCM.
+        guard preferNative, let key, let ownedURL = prepared.cleanupURL,
+              key == PreparedAudioCache.Key(source: slot.url, start: clipRange?.start, end: clipRange?.end),
+              let audio = try? AVAudioFile(forReading: ownedURL),
+              audio.fileFormat.sampleRate == 16000, audio.fileFormat.channelCount == 1,
+              audio.fileFormat.commonFormat == .pcmFormatInt16 else { return prepared }
+        let lease = preparedAudioCache.insert(ownedURL: ownedURL, for: key)
+        return PreparedMediaInput(uploadURL: prepared.uploadURL, clipRange: prepared.clipRange,
+                                  timeOffset: prepared.timeOffset, cleanupURL: nil, lease: lease)
     }
 
     private func previewReuseKey(for slot: FileSlot, clipRange: MediaClipRange?) -> String {
+        // Recognition language/text formatting do not change PCM or VAD.
+        let recognitionOnlyFields: Set<String> = ["language", "use_itn", "sensevoice_rich_info"]
         let fields = settings.formFields(includeOutput: false)
+            .filter { !recognitionOnlyFields.contains($0.0) }
             .map { "\($0.0)=\($0.1)" }
             .joined(separator: "\u{1f}")
         let clip = clipRange.map { "\($0.start)-\($0.end)" } ?? "full"
         let attributes = try? FileManager.default.attributesOfItem(atPath: slot.url.path)
         let modified = (attributes?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
         return [
-            "audio-sync-v2",
+            "audio-sync-v3",
             slot.url.standardizedFileURL.path,
             "\(modified)",
+            "\((attributes?[.size] as? NSNumber)?.int64Value ?? 0)",
             clip,
             fields
         ].joined(separator: "\u{1e}")
@@ -4676,16 +4881,63 @@ struct ContentView: View {
         return previewID
     }
 
+    // VAD ranges have their own settings key; the bounded audio cache separately
+    // reuses PCM across recognition/VAD option changes when media is unchanged.
+    private func nativePreviewKey(for slot: FileSlot, clipRange: MediaClipRange?) -> String? {
+        guard let directory = settings.nativeFireRedVADDirectory else { return nil }
+        var parts = ["native-firered-v1", previewReuseKey(for: slot, clipRange: clipRange), directory.standardizedFileURL.path]
+        for path in ["cmvn.ark", "FireRedVAD.mlpackage/Data/com.apple.CoreML/model.mlmodel",
+                     "FireRedVAD.mlpackage/Data/com.apple.CoreML/weights/weight.bin"] {
+            guard let attributes = try? FileManager.default.attributesOfItem(atPath: directory.appending(path: path).path) else { return nil }
+            let modified = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+            parts.append("\(attributes[.size] ?? 0):\(modified)")
+        }
+        return parts.joined(separator: "\u{1e}")
+    }
+
+    private func detectNativeSegments(audioURL: URL, directory: URL, fileIndex: Int,
+                                      progressLimit: Double) async throws -> [SubtitleSegment] {
+        let diagnosticsID = files[fileIndex].id
+        let diagnosticsStarted = ProcessInfo.processInfo.systemUptime
+        defer { recordLocalStage("segmentation", id: diagnosticsID, started: diagnosticsStarted) }
+        let options = settings.nativeFireRedVADOptions
+        update(at: fileIndex) { $0.statusKey = "status.detecting"; $0.statusDetail = "FireRedVAD · Core ML" }
+        let started = ContinuousClock.now
+        let ranges = try await NativeFireRedVAD.shared.segments(
+            audio: audioURL, modelDirectory: directory, options: options,
+            checkpoint: {
+                await self.waitWhileProcessingPaused()
+                try Task.checkCancellation()
+            }, progress: { progress in
+                await MainActor.run {
+                    self.update(at: fileIndex) { $0.progress = max($0.progress, progress * progressLimit) }
+                }
+            })
+        try Task.checkCancellation()
+        AppLog.processing.info("nativeFireRedVAD elapsed=\(started.duration(to: .now).description, privacy: .public) segments=\(ranges.count)")
+        return ranges.enumerated().map { i, range in
+            SubtitleSegment(index: i + 1, start: range.start, end: range.end, duration: range.end - range.start)
+        }
+    }
+
     private func preview(at index: Int) async {
         guard files.indices.contains(index) else { return }
         activeIndex = index
+        beginProcessingDiagnostics(at: index)
+        let diagnosticsID = files[index].id
+        let diagnosticsStarted = ProcessInfo.processInfo.systemUptime
+        defer { finishProcessingDiagnostics(id: diagnosticsID, started: diagnosticsStarted) }
         let slot = files[index]
         let url = slot.url
         let clipRange = processingClipRange(for: slot)
         let reuseKey = previewReuseKey(for: slot, clipRange: clipRange)
         let displayDuration = timelineDuration(for: slot)
+        let nativeKey = nativePreviewKey(for: slot, clipRange: clipRange)
         update(at: index) {
             $0.processingState = .previewing
+            $0.previewID = nil
+            $0.previewSettingsKey = nil
+            $0.nativePreviewSettingsKey = nil
             $0.statusKey = clipRange == nil ? "status.detecting" : "status.clippingMedia"
             $0.statusDetail = clipRange.map { clipRangeSummary($0) } ?? url.lastPathComponent
             $0.progress = 0
@@ -4711,6 +4963,30 @@ struct ContentView: View {
                 $0.progress = max($0.progress, 0.02)
                 $0.statusKey = "status.detecting"
             }
+            if let directory = settings.nativeFireRedVADDirectory {
+                do {
+                    let planned = try await detectNativeSegments(audioURL: preparedInput.uploadURL,
+                        directory: directory, fileIndex: index, progressLimit: 0.99)
+                    let segments = shiftedSegments(planned, by: preparedInput.timeOffset)
+                    update(at: index) {
+                        $0.segments = segments
+                        $0.nativePreviewSettingsKey = nativeKey
+                        $0.previewTimeOffset = preparedInput.timeOffset
+                        $0.duration = max($0.duration, displayDuration, preparedInput.clipRange?.end ?? 0, maxSegmentEnd(in: segments))
+                        $0.statusKey = "status.previewReady"
+                        $0.statusDetail = "\(segments.count) \(t("segments.count")) · FireRedVAD · Core ML"
+                        $0.processingState = .done
+                        $0.progress = 1
+                    }
+                    return
+                } catch {
+                    try Task.checkCancellation()
+                    if error is CancellationError { throw error }
+                    AppLog.processing.error("nativeFireRedVAD preview fallback: \(error.localizedDescription, privacy: .public)")
+                    update(at: index) { $0.progress = 0.02; $0.processingFacts["nativeVAD"] = "fallback"; $0.statusDetail = t("nativeFireRedVAD.fallback") }
+                }
+            }
+            try await requireBackendForProcessing(fileIndex: index)
             let created = try await api.createPreviewJob(fileURL: preparedInput.uploadURL, settings: settings)
             update(at: index) {
                 $0.jobID = created.id
@@ -4726,7 +5002,7 @@ struct ContentView: View {
                 clipRange: preparedInput.clipRange
             )
         } catch {
-            if Task.isCancelled {
+            if Task.isCancelled || error is CancellationError {
                 update(at: index) {
                     $0.processingState = .cancelled
                     $0.statusKey = "status.cancelled"
@@ -4758,11 +5034,19 @@ struct ContentView: View {
     private func transcribe(at index: Int) async {
         guard files.indices.contains(index) else { return }
         activeIndex = index
+        beginProcessingDiagnostics(at: index)
+        let diagnosticsID = files[index].id
+        let diagnosticsStarted = ProcessInfo.processInfo.systemUptime
+        defer { finishProcessingDiagnostics(id: diagnosticsID, started: diagnosticsStarted) }
         let slot = files[index]
         let url = slot.url
         let clipRange = processingClipRange(for: slot)
         let reusablePreviewID = reusablePreviewID(for: slot, clipRange: clipRange)
         let reusablePreviewTimeOffset = slot.previewTimeOffset
+        let nativeKey = nativePreviewKey(for: slot, clipRange: clipRange)
+        let reusableNativeSegments: [SubtitleSegment]? = nativeKey != nil && slot.nativePreviewSettingsKey == nativeKey
+            ? shiftedSegments(slot.segments, by: -slot.previewTimeOffset) : nil
+        draftStore.schedule(files.map(SubtitleDraft.init))
         update(at: index) {
             $0.processingState = .transcribing
             $0.previewText = ""
@@ -4781,18 +5065,21 @@ struct ContentView: View {
             $0.failureLogFilename = nil
             $0.failureJobID = nil
         }
+        var nativeFallbackDetail: String?
         do {
-            if let reusablePreviewID, !settings.effectiveASREngine.isLocal {
+            if let reusablePreviewID, !settings.effectiveASREngine.isLocal, !settings.canUseNativeQwen {
                 update(at: index) {
                     $0.statusKey = "status.starting"
                     $0.statusDetail = t("status.reusingPreview")
                 }
+                try await requireBackendForProcessing(fileIndex: index)
                 do {
                     let created = try await api.createJobFromPreview(previewID: reusablePreviewID, settings: settings)
                     update(at: index) { $0.jobID = created.id }
                     try await poll(jobID: created.id, fileIndex: index, timeOffset: reusablePreviewTimeOffset)
                     return
                 } catch {
+                    try Task.checkCancellation()
                     update(at: index) {
                         $0.previewID = nil
                         $0.previewSettingsKey = nil
@@ -4800,7 +5087,16 @@ struct ContentView: View {
                     }
                 }
             }
-            let preparedInput = try await preparedMediaInput(for: slot, clipRange: clipRange)
+            // A reusable native preview already owns the PCM. Preparing the
+            // original media here would decode the whole file a second time.
+            let reusingNativePreview = settings.canUseNativeQwen && reusablePreviewID != nil
+            var preparedInput: PreparedMediaInput
+            if reusingNativePreview {
+                preparedInput = PreparedMediaInput(uploadURL: slot.url, clipRange: clipRange,
+                                                   timeOffset: reusablePreviewTimeOffset, cleanupURL: nil)
+            } else {
+                preparedInput = try await preparedMediaInput(for: slot, clipRange: clipRange)
+            }
             defer { preparedInput.cleanup() }
             if clipRange != nil {
                 update(at: index) {
@@ -4816,11 +5112,72 @@ struct ContentView: View {
                 )
                 return
             }
-            let created = try await api.createJob(fileURL: preparedInput.uploadURL, settings: settings)
+            if settings.canUseNativeQwen {
+                do {
+                    try await transcribeWithNativeQwen(
+                        fileIndex: index,
+                        audioURL: preparedInput.uploadURL,
+                        timeOffset: preparedInput.timeOffset,
+                        reuseID: reusablePreviewID,
+                        nativePreviewSegments: reusableNativeSegments,
+                        nativePreviewKey: nativeKey,
+                        reuseKey: previewReuseKey(for: slot, clipRange: clipRange)
+                    )
+                    return
+                } catch {
+                    try Task.checkCancellation()
+                    if error is CancellationError { throw error }
+                    await NativeQwenService.shared.release()
+                    AppLog.api.error("Native Qwen fallback: \(error.localizedDescription, privacy: .public)")
+                    nativeFallbackDetail = t("nativeQwen.fallbackError") + ": " + error.localizedDescription
+                    update(at: index) { $0.statusDetail = nativeFallbackDetail ?? ""; $0.processingFacts["nativeQwen"] = "fallback" }
+                    if reusingNativePreview {
+                        // The Python fallback still needs a correctly cropped
+                        // input if its saved preview has expired.
+                        preparedInput = try await preparedMediaInput(for: slot, clipRange: clipRange)
+                    }
+                }
+            }
+            try Task.checkCancellation()
+            try await requireBackendForProcessing(fileIndex: index)
+            var backendNativeSegments: [SubtitleSegment]?
+            if settings.backendSupportsNativeSegments, let directory = settings.nativeFireRedVADDirectory {
+                if nativeKey != nil, files[index].nativePreviewSettingsKey == nativeKey {
+                    backendNativeSegments = shiftedSegments(files[index].segments, by: -files[index].previewTimeOffset)
+                    update(at: index) { $0.statusDetail = t("status.reusingPreview") }
+                } else if !settings.canUseNativeQwen {
+                    do {
+                        let planned = try await detectNativeSegments(audioURL: preparedInput.uploadURL,
+                            directory: directory, fileIndex: index, progressLimit: 0.15)
+                        backendNativeSegments = planned
+                        update(at: index) {
+                            $0.previewID = nil
+                            $0.previewSettingsKey = nil
+                            $0.nativePreviewSettingsKey = nativeKey
+                            $0.previewTimeOffset = preparedInput.timeOffset
+                            $0.segments = shiftedSegments(planned, by: preparedInput.timeOffset)
+                        }
+                    } catch {
+                        try Task.checkCancellation()
+                        if error is CancellationError { throw error }
+                        AppLog.processing.error("nativeFireRedVAD backend handoff fallback: \(error.localizedDescription, privacy: .public)")
+                        update(at: index) { $0.processingFacts["nativeVAD"] = "fallback"; $0.statusDetail = t("nativeFireRedVAD.fallback") }
+                    }
+                }
+            }
+            try Task.checkCancellation()
+            let created = try await api.createJob(
+                fileURL: preparedInput.uploadURL, settings: settings,
+                previewID: backendNativeSegments == nil ? self.reusablePreviewID(for: files[index], clipRange: clipRange) : nil,
+                nativeSegments: backendNativeSegments
+            )
             update(at: index) { $0.jobID = created.id }
             try await poll(jobID: created.id, fileIndex: index, timeOffset: preparedInput.timeOffset)
+            if let nativeFallbackDetail, !Task.isCancelled {
+                update(at: index) { $0.statusDetail = nativeFallbackDetail }
+            }
         } catch {
-            if Task.isCancelled {
+            if Task.isCancelled || error is CancellationError {
                 update(at: index) {
                     $0.processingState = .cancelled
                     $0.statusKey = "status.cancelled"
@@ -4843,6 +5200,147 @@ struct ContentView: View {
                 }
                 failureDetails = details
             }
+        }
+    }
+
+    private func transcribeWithNativeQwen(
+        fileIndex: Int,
+        audioURL: URL,
+        timeOffset: Double,
+        reuseID: String?,
+        nativePreviewSegments: [SubtitleSegment]?,
+        nativePreviewKey: String?,
+        reuseKey: String
+    ) async throws {
+        guard let directory = settings.nativeQwenModelDirectory else {
+            throw NSError(domain: "MSub.NativeQwen", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: t("nativeQwen.localModelRequired")])
+        }
+        let options = NativeQwenService.Options(
+            modelDirectory: directory,
+            language: settings.recognitionLanguage == .auto ? nil : settings.recognitionLanguage.rawValue,
+            context: settings.asrContext,
+            maxTokens: settings.mimoMaxTokens,
+            lineCharacters: settings.lineChars
+        )
+        var nativeSegments = nativePreviewSegments
+        if nativeSegments != nil {
+            update(at: fileIndex) { $0.processingFacts["segmentation"] = "reused"; $0.progress = 0.15; $0.statusDetail = t("status.reusingPreview") }
+        }
+        if nativeSegments == nil, reuseID == nil, let vadDirectory = settings.nativeFireRedVADDirectory {
+            do {
+                nativeSegments = try await detectNativeSegments(audioURL: audioURL,
+                    directory: vadDirectory, fileIndex: fileIndex, progressLimit: 0.15)
+            } catch {
+                try Task.checkCancellation()
+                if error is CancellationError { throw error }
+                AppLog.processing.error("nativeFireRedVAD fallback: \(error.localizedDescription, privacy: .public)")
+                update(at: fileIndex) { $0.processingFacts["nativeVAD"] = "fallback"; $0.statusDetail = t("nativeFireRedVAD.fallback") }
+            }
+        }
+        let pcmURL: URL
+        var ownsPCM = false
+        var segments: [SubtitleSegment]
+        if let nativeSegments {
+            segments = nativeSegments
+            pcmURL = audioURL
+            update(at: fileIndex) {
+                $0.previewID = nil
+                $0.previewSettingsKey = nil
+                $0.nativePreviewSettingsKey = nativePreviewKey
+                $0.previewTimeOffset = timeOffset
+                $0.segments = shiftedSegments(nativeSegments, by: timeOffset)
+            }
+        } else {
+            let previewID: String
+            if let reuseID {
+                previewID = reuseID
+                segments = shiftedSegments(files[fileIndex].segments, by: -timeOffset)
+            } else {
+                try await requireBackendForProcessing(fileIndex: fileIndex)
+                let created = try await api.createPreviewJob(fileURL: audioURL, settings: settings)
+                update(at: fileIndex) { $0.jobID = created.id; $0.statusKey = "status.detecting" }
+                var completed: JobStatus?
+                for try await job in api.jobStatusStream(id: created.id) {
+                    try Task.checkCancellation()
+                    update(at: fileIndex) {
+                        if let diagnostics = job.diagnostics { $0.backendDiagnostics = diagnostics }
+                        $0.progress = min(0.15, Double(job.current ?? 0) / Double(max(1, job.total ?? 100)) * 0.15)
+                    }
+                    if job.status == "done" { completed = job; break }
+                    if job.status == "cancelled" { throw CancellationError() }
+                    if job.status == "error" {
+                        throw NSError(domain: "MSub.NativeQwen", code: 2,
+                                      userInfo: [NSLocalizedDescriptionKey: job.error ?? t("status.previewFailed")])
+                    }
+                }
+                guard let completed, let id = completed.previewId, let planned = completed.segments else {
+                    throw NativeQwenService.Failure.missingResult
+                }
+                previewID = id
+                segments = planned
+                update(at: fileIndex) {
+                    $0.previewID = id
+                    $0.previewSettingsKey = reuseKey
+                    $0.nativePreviewSettingsKey = nil
+                    $0.previewTimeOffset = timeOffset
+                    $0.segments = shiftedSegments(planned, by: timeOffset)
+                }
+            }
+            if reuseID != nil { try await requireBackendForProcessing(fileIndex: fileIndex) }
+            pcmURL = try await api.downloadPreviewAudio(id: previewID)
+            if reuseID != nil {
+                update(at: fileIndex) {
+                    $0.processingFacts["segmentation"] = "reused"
+                    $0.processingFacts["preparedAudio"] = "reused"
+                }
+            }
+            ownsPCM = true
+        }
+        defer { if ownsPCM { try? FileManager.default.removeItem(at: pcmURL) } }
+        try Task.checkCancellation()
+        update(at: fileIndex) { $0.jobID = nil; $0.statusKey = "status.transcribing"; $0.statusDetail = "Qwen3 · Swift MLX" }
+        // Avoid retaining Python ASR weights while loading a second copy in Swift.
+        if backend.isRunning { try await api.unloadIdleModels() }
+        let nativeDiagnosticsID = files[fileIndex].id
+        let cues = try await NativeQwenService.shared.transcribe(
+            audioURL: pcmURL, segments: segments, timeOffset: timeOffset, options: options,
+            checkpoint: {
+                await self.waitWhileProcessingPaused()
+                try Task.checkCancellation()
+            },
+            onProgress: { progress in
+                await MainActor.run {
+                    guard let index = self.files.firstIndex(where: { $0.id == nativeDiagnosticsID }) else { return }
+                    self.update(at: index) { $0.progress = 0.15 + progress * 0.85 }
+                }
+            },
+            onDiagnostics: { snapshot in
+                await MainActor.run {
+                    guard let index = self.files.firstIndex(where: { $0.id == nativeDiagnosticsID }) else { return }
+                    self.update(at: index) { slot in
+                        // Snapshots are cumulative for this attempt, never additive.
+                        for (stage, seconds) in snapshot.stages { slot.localStageTimings[stage] = seconds }
+                        if let cache = snapshot.modelCache { slot.processingFacts["modelCache"] = cache.rawValue }
+                        if snapshot.outcome == .running,
+                           slot.statusKey != "status.paused", slot.statusKey != "status.pausePending" {
+                            slot.statusKey = snapshot.stage == .modelLoading ? "status.loading" : "status.transcribing"
+                        }
+                    }
+                }
+            }
+        )
+        try Task.checkCancellation()
+        let exportStarted = ProcessInfo.processInfo.systemUptime
+        defer { recordLocalStage("export", id: nativeDiagnosticsID, started: exportStarted) }
+        let format = files[fileIndex].outputFormat
+        installSubtitleText(SubtitleDocument.serialize(cues, format: format), at: fileIndex,
+                            format: format, parsedCues: cues, timeOffset: 0)
+        update(at: fileIndex) {
+            $0.progress = 1
+            $0.processingState = .done
+            $0.statusKey = "status.done"
+            $0.statusDetail = "Qwen3 · Swift MLX · \(cues.count)"
         }
     }
 
@@ -4912,6 +5410,9 @@ struct ContentView: View {
     ) async throws {
         for try await job in api.jobStatusStream(id: jobID) {
             if Task.isCancelled { return }
+            if let diagnostics = job.diagnostics {
+                update(at: fileIndex) { $0.backendDiagnostics = diagnostics }
+            }
             let total = max(job.total ?? 100, 1)
             let current = max(job.current ?? 0, 0)
             let progress = min(max(Double(current) / Double(total), 0), 0.99)
@@ -4957,6 +5458,7 @@ struct ContentView: View {
                     $0.segments = segments
                     $0.previewID = job.previewId ?? job.id
                     $0.previewSettingsKey = job.settingsKey ?? reuseKey
+                    $0.nativePreviewSettingsKey = nil
                     $0.previewTimeOffset = timeOffset
                     $0.statusKey = "status.previewReady"
                     $0.statusDetail = "\(job.count ?? segments.count) \(t("segments.count"))"
@@ -4995,6 +5497,9 @@ struct ContentView: View {
     private func poll(jobID: String, fileIndex: Int, timeOffset: Double) async throws {
         for try await job in api.jobStatusStream(id: jobID, pollInterval: .seconds(1)) {
             if Task.isCancelled { return }
+            if let diagnostics = job.diagnostics {
+                update(at: fileIndex) { $0.backendDiagnostics = diagnostics }
+            }
             let total = max(job.total ?? 0, 0)
             let current = max(job.current ?? 0, 0)
             let fractionalCurrent = min(max(job.fractionalCurrent ?? Double(current), 0), Double(max(total, 0)))
@@ -5520,7 +6025,7 @@ struct ContentView: View {
     }
 
     private func shiftedSegments(_ segments: [SubtitleSegment], by offset: Double) -> [SubtitleSegment] {
-        guard offset > 0 else { return segments }
+        guard offset != 0 else { return segments }
         return segments.map {
             SubtitleSegment(
                 index: $0.index,
@@ -5953,18 +6458,20 @@ private struct ChipScrollEdges: Equatable {
 }
 
 private struct FileChipView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let slot: FileSlot
     let isActive: Bool
     let iconName: String
     let iconColor: Color
     let nameMaxWidth: CGFloat
+    let canReorder: Bool
     let removeHelp: String
     let statusHelp: String
     let showInFinderLabel: String
     let openWithDefaultLabel: String
     let onSelect: () -> Void
     let onRemove: () -> Void
-    let onReorder: (UUID) -> Void
+    let onReorder: @MainActor @Sendable (UUID) -> Void
 
     @State private var isHovering = false
     @State private var isDropTarget = false
@@ -5973,14 +6480,25 @@ private struct FileChipView: View {
         slot.processingState == .transcribing || slot.processingState == .previewing
     }
 
+    @ViewBuilder
     var body: some View {
+        // The SDK 27 native reorder container traps on UUID identity at runtime.
+        // Use the app-owned drag payload until that path is validated again.
+        if canReorder {
+            legacyDraggableChip
+        } else {
+            chipContent
+        }
+    }
+
+    private var chipContent: some View {
         HStack(spacing: 6) {
             ZStack {
                 Image(systemName: iconName)
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(iconColor)
                     .contentTransition(.symbolEffect(.replace))
-                    .symbolEffect(.variableColor.iterative, isActive: isActivelyProcessing)
+                    .symbolEffect(.variableColor.iterative, isActive: isActivelyProcessing && !reduceMotion)
                     .opacity(isHovering ? 0 : 1)
                     .scaleEffect(isHovering ? 0.6 : 1)
                 Button {
@@ -6008,7 +6526,7 @@ private struct FileChipView: View {
                 .frame(maxWidth: isHovering ? nil : nameMaxWidth, alignment: .leading)
 
             if isActivelyProcessing {
-                ProgressView()
+                MSubSpinner()
                     .controlSize(.mini)
                     .transition(.scale(scale: 0.6).combined(with: .opacity))
             }
@@ -6026,16 +6544,16 @@ private struct FileChipView: View {
                 lineWidth: isDropTarget ? 1.6 : 1.2
             )
         )
-        .scaleEffect(isDropTarget ? 1.04 : 1)
+        .scaleEffect(isDropTarget && !reduceMotion ? 1.04 : 1)
         .geometryGroup()
-        .animation(.easeInOut(duration: 0.18), value: isDropTarget)
-        .animation(.spring(response: 0.36, dampingFraction: 0.86), value: nameMaxWidth)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: isDropTarget)
+        .animation(reduceMotion ? nil : .spring(response: 0.36, dampingFraction: 0.86), value: nameMaxWidth)
         .contentShape(Capsule())
         .onTapGesture {
             onSelect()
         }
         .onHover { hovering in
-            withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+            withAnimation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.86)) {
                 isHovering = hovering
             }
         }
@@ -6054,6 +6572,10 @@ private struct FileChipView: View {
                 Text(removeHelp)
             }
         }
+    }
+
+    private var legacyDraggableChip: some View {
+        chipContent
         .onDrag {
             let provider = NSItemProvider()
             let payload = fileChipDragPrefix + slot.id.uuidString
@@ -6091,7 +6613,7 @@ private let fileChipDragPrefix = "msub-chip:"
 
 private struct FileChipDropDelegate: DropDelegate {
     let targetID: UUID
-    let onReorder: (UUID) -> Void
+    let onReorder: @MainActor @Sendable (UUID) -> Void
     @Binding var isDropTarget: Bool
 
     private static let acceptedTypes: [UTType] = [.utf8PlainText]
@@ -6117,7 +6639,7 @@ private struct FileChipDropDelegate: DropDelegate {
         let providers = info.itemProviders(for: Self.acceptedTypes)
         guard let provider = providers.first else { return false }
         let targetID = self.targetID
-        let reorder = UncheckedSendableBox(value: onReorder)
+        let reorder = onReorder
         _ = provider.loadDataRepresentation(
             forTypeIdentifier: UTType.utf8PlainText.identifier
         ) { data, _ in
@@ -6129,15 +6651,11 @@ private struct FileChipDropDelegate: DropDelegate {
                 return
             }
             Task { @MainActor in
-                reorder.value(draggedID)
+                reorder(draggedID)
             }
         }
         return true
     }
-}
-
-private struct UncheckedSendableBox<T>: @unchecked Sendable {
-    let value: T
 }
 
 private struct ParameterHelpIcon: View {
@@ -6224,8 +6742,12 @@ private struct PreparedMediaInput {
     let clipRange: MediaClipRange?
     let timeOffset: Double
     let cleanupURL: URL?
+    var lease: PreparedAudioLease? = nil
 
     func cleanup() {
+        // Preserve the file through the end of polling/inference, including
+        // when removing a window has already evicted its cache entry.
+        defer { withExtendedLifetime(lease) {} }
         if let cleanupURL {
             try? FileManager.default.removeItem(at: cleanupURL)
         }
@@ -6236,12 +6758,43 @@ private enum MediaClipExporter {
     static func prepare(
         source: URL,
         clipRange: MediaClipRange?,
-        failureMessage: String
+        failureMessage: String,
+        preferNativeAudio: Bool = false
     ) async throws -> PreparedMediaInput {
         guard let clipRange else {
+            if preferNativeAudio {
+                let started = ContinuousClock.now
+                do {
+                    try Task.checkCancellation()
+                    // Existing ASR-ready WAV files need no additional decode.
+                    if source.pathExtension.lowercased() == "wav",
+                       let audio = try? AVAudioFile(forReading: source),
+                       audio.fileFormat.sampleRate == 16000,
+                       audio.fileFormat.channelCount == 1,
+                       audio.fileFormat.commonFormat == .pcmFormatInt16 {
+                        return PreparedMediaInput(uploadURL: source, clipRange: nil, timeOffset: 0, cleanupURL: nil)
+                    }
+                    let duration = try await AVURLAsset(url: source).load(.duration).seconds
+                    let pcm = try await NativeAudioExporter.shared.extract(source: source, start: 0, duration: duration)
+                    AppLog.processing.info("audioPreparation nativePCM elapsed=\(started.duration(to: .now).description, privacy: .public)")
+                    return PreparedMediaInput(uploadURL: pcm.url, clipRange: nil, timeOffset: 0, cleanupURL: pcm.url)
+                } catch {
+                    try Task.checkCancellation()
+                    AppLog.processing.info("audioPreparation nativePCM fallback: \(error.localizedDescription, privacy: .public)")
+                }
+            }
             return PreparedMediaInput(uploadURL: source, clipRange: nil, timeOffset: 0, cleanupURL: nil)
         }
 
+        do {
+            let pcm = try await NativeAudioExporter.shared.extract(
+                source: source, start: clipRange.start, duration: clipRange.duration)
+            return PreparedMediaInput(uploadURL: pcm.url, clipRange: clipRange,
+                                      timeOffset: clipRange.start, cleanupURL: pcm.url)
+        } catch {
+            try Task.checkCancellation()
+            if error is CancellationError { throw error }
+        }
         let dest = temporaryDestination(for: source)
         if let result = await exportViaAVFoundation(
             source: source,
@@ -6335,8 +6888,16 @@ struct FileSlot: Identifiable {
     var fileNameDraft: String?
     var clipRange: MediaClipRange?
     var segments: [SubtitleSegment] = []
-    var cues: [SubtitleCue] = []
-    var originalCues: [SubtitleCue] = []
+    // Value-type writeback also invokes these observers for nested cue edits.
+    // Tokens avoid comparing every cue/word on unrelated SwiftUI refreshes.
+    private(set) var cuesRevision = UUID()
+    var cues: [SubtitleCue] = [] {
+        didSet { cuesRevision = UUID() }
+    }
+    private(set) var originalCuesRevision = UUID()
+    var originalCues: [SubtitleCue] = [] {
+        didSet { originalCuesRevision = UUID() }
+    }
     var speakerColors: [String: String] = [:]
     var frequentTerms: [SubtitleTermFrequency] = []
     var emotionFrequencies: [SubtitleEmotionFrequency] = []
@@ -6345,6 +6906,7 @@ struct FileSlot: Identifiable {
     var duration: Double = 0
     var previewID: String?
     var previewSettingsKey: String?
+    var nativePreviewSettingsKey: String?
     var previewTimeOffset: Double = 0
     var previewText: String = ""
     var jobID: String?
@@ -6362,6 +6924,10 @@ struct FileSlot: Identifiable {
     var failureJobID: String?
     var processingState: ProcessingState = .idle
     var fileSizeBytes: Int64?
+    var processingElapsed: Double?
+    var localStageTimings: [String: Double] = [:]
+    var processingFacts: [String: String] = [:]
+    var backendDiagnostics: ProcessingDiagnostics?
 
     enum ProcessingState: Equatable {
         case idle
@@ -7029,5 +7595,19 @@ final class RecentFilesStore {
 
     private func save() {
         UserDefaults.standard.set(urls.map(\.path), forKey: key)
+    }
+}
+
+/// Stable ordering shared by native queue gestures and targeted regression tests.
+enum FileQueueOrder {
+    static func moving(_ order: [UUID], sources: [UUID], before target: UUID?) -> [UUID]? {
+        let selected = Set(sources)
+        guard !selected.isEmpty, selected.isSubset(of: Set(order)),
+              target.map({ order.contains($0) && !selected.contains($0) }) ?? true else { return nil }
+        let moved = order.filter { selected.contains($0) }
+        var remaining = order.filter { !selected.contains($0) }
+        let insertion = target.flatMap { remaining.firstIndex(of: $0) } ?? remaining.endIndex
+        remaining.insert(contentsOf: moved, at: insertion)
+        return remaining
     }
 }

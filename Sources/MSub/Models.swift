@@ -135,6 +135,7 @@ enum AudioEventFilterPreset: String, CaseIterable, Codable, Identifiable {
 }
 
 struct AppConfig: Decodable {
+    let supportsNativeSegments: Bool?
     let defaultModel: String
     let defaultOutputDir: String
     let defaultASREngine: ASREngine?
@@ -326,6 +327,13 @@ struct JobCreated: Decodable {
     let id: String
 }
 
+struct ProcessingDiagnostics: Decodable, Sendable {
+    let totalSeconds: Double
+    let stages: [String: Double]
+    let facts: [String: String]
+    let finished: Bool
+}
+
 struct JobStatus: Decodable {
     let id: String
     let status: String
@@ -346,6 +354,7 @@ struct JobStatus: Decodable {
     let errorTrace: String?
     let output: String?
     let pauseRequested: Bool?
+    let diagnostics: ProcessingDiagnostics?
 }
 
 enum OutputFormat: String, CaseIterable, Codable, Identifiable {

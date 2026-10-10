@@ -10,14 +10,18 @@ on:
 
 jobs:
   build-and-test:
-    # The app targets macOS 26, which needs the Xcode 26 toolchain.
-    # If this runner label is not yet available for your plan, switch to the
-    # newest macos-* label that ships Xcode 26.
-    runs-on: macos-26
+    # Match the Xcode/SwiftPM macOS 27 deployment target and AVFoundation APIs.
+    # Official arm64 image: actions/runner-images/images/macos/xcode-27-arm64-Readme.md
+    runs-on: xcode-27
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Swift version
         run: swift --version
+      - name: Resolve pinned dependencies and apply Metal compatibility
+        run: |
+          swift package resolve
+          python3 Scripts/patch-mlx-metal.py .build/checkouts
       - name: Build
         run: swift build
       - name: Test

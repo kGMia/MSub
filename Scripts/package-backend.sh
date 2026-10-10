@@ -1,5 +1,24 @@
 #!/bin/bash
-set -eu
+set -euo pipefail
+
+# Visible in Xcode's build log, including cache hits and failed packaging runs.
+MSUB_PACKAGE_STARTED=$SECONDS
+MSUB_PACKAGE_PHASE_STARTED=$SECONDS
+MSUB_PACKAGE_PHASE=setup
+MSUB_PACKAGE_CACHE=miss
+MSUB_PACKAGE_FILTER_DIR=""
+package_phase() {
+    echo "MSUB_PACKAGE_TIMING phase=$MSUB_PACKAGE_PHASE seconds=$((SECONDS - MSUB_PACKAGE_PHASE_STARTED))"
+    MSUB_PACKAGE_PHASE="$1"
+    MSUB_PACKAGE_PHASE_STARTED=$SECONDS
+}
+package_finished() {
+    local result=$?
+    if [ -n "$MSUB_PACKAGE_FILTER_DIR" ]; then rm -rf "$MSUB_PACKAGE_FILTER_DIR"; fi
+    echo "MSUB_PACKAGE_TIMING phase=$MSUB_PACKAGE_PHASE seconds=$((SECONDS - MSUB_PACKAGE_PHASE_STARTED))"
+    echo "MSUB_PACKAGE_TIMING total_seconds=$((SECONDS - MSUB_PACKAGE_STARTED)) cache=$MSUB_PACKAGE_CACHE exit=$result"
+}
+trap package_finished EXIT
 
 if [ -z "${TARGET_BUILD_DIR:-}" ] || [ -z "${UNLOCALIZED_RESOURCES_FOLDER_PATH:-}" ]; then
     echo "Xcode build environment not found; skipping backend packaging."
@@ -73,17 +92,45 @@ SOURCE_EMOTION_MLX_MODEL_JSON="null"
 SOURCE_AUDIO_EVENT_MODEL_JSON="null"
 PACKAGE_STAMP="$DEST/.msub-package-signature"
 
+RUNTIME_FILTER_TOOL="$SRCROOT/Scripts/package-runtime-filter.py"
+FINGERPRINT_TOOL="$SRCROOT/Scripts/package-fingerprint.py"
+FINGERPRINT_PYTHON="$REPO_ROOT/.venv/bin/python"
+if [ ! -x "$FINGERPRINT_PYTHON" ]; then FINGERPRINT_PYTHON="$(command -v python3)"; fi
+RUNTIME_STAMP="$DEST/.msub-runtime-signature"
+PYTHON_ROOT=""
+if [ "$INCLUDE_VENV" = "1" ] && [ "$INCLUDE_PYTHON_RUNTIME" = "1" ]; then
+    PYTHON_ROOT="$("$REPO_ROOT/.venv/bin/python" -c 'import sys; print(sys.base_prefix)')"
+fi
+
 directory_signature() {
-    directory="$1"
-    [ -d "$directory" ] || return 0
-    find "$directory" -type f -print | LC_ALL=C sort | while IFS= read -r file; do
-        stat -f "%N %z %m" "$file"
-    done
+    "$FINGERPRINT_PYTHON" "$FINGERPRINT_TOOL" "$1"
 }
+
+runtime_signature() {
+    {
+        echo "$BACKEND_BUNDLE_PROFILE:$INCLUDE_VENV:$INCLUDE_PYTHON_RUNTIME:${MSUB_SLIM_VENV:-1}"
+        "$FINGERPRINT_PYTHON" "$FINGERPRINT_TOOL" --content \
+            "$REPO_ROOT/pyproject.toml" "$REPO_ROOT/uv.lock" \
+            "$SRCROOT/Scripts/package-backend.sh" "$FINGERPRINT_TOOL" "$RUNTIME_FILTER_TOOL"
+        if [ "$INCLUDE_VENV" = "1" ]; then directory_signature "$REPO_ROOT/.venv"; fi
+        if [ -n "$PYTHON_ROOT" ]; then directory_signature "$PYTHON_ROOT"; fi
+    } | shasum | awk '{print $1}'
+}
+package_phase fingerprint
+CURRENT_RUNTIME_SIGNATURE="$(runtime_signature)"
+RUNTIME_UNCHANGED=0
+if [ "${MSUB_FORCE_PACKAGE_BACKEND:-0}" != "1" ] \
+    && [ -f "$RUNTIME_STAMP" ] \
+    && [ "$(cat "$RUNTIME_STAMP")" = "$CURRENT_RUNTIME_SIGNATURE" ]; then
+    if [ "$INCLUDE_VENV" != "1" ] || [ -x "$DEST/.venv/bin/python" ]; then
+        RUNTIME_UNCHANGED=1
+    fi
+fi
 
 package_signature() {
     {
         echo "profile=$BACKEND_BUNDLE_PROFILE"
+        echo "runtime=$CURRENT_RUNTIME_SIGNATURE"
         echo "include_model=$INCLUDE_MODEL"
         echo "include_sensevoice=$INCLUDE_SENSEVOICE_MODEL"
         echo "include_mimo=$INCLUDE_MIMO_MODEL"
@@ -101,19 +148,12 @@ package_signature() {
         echo "include_venv=$INCLUDE_VENV"
         echo "include_python_runtime=$INCLUDE_PYTHON_RUNTIME"
         echo "slim_venv=${MSUB_SLIM_VENV:-1}"
-        find "$REPO_ROOT/src" -type f ! -name "*.pyc" -print | LC_ALL=C sort | while IFS= read -r file; do
-            shasum "$file"
-        done
-        for file in \
-            "$REPO_ROOT/pyproject.toml" \
-            "$REPO_ROOT/uv.lock" \
-            "$REPO_ROOT/README.md" \
-            "$REPO_ROOT/.python-version" \
-            "$REPO_ROOT/apps/MSub/Scripts/package-backend.sh" \
-            "$REPO_ROOT/.venv/pyvenv.cfg"
-        do
-            [ -f "$file" ] && shasum "$file"
-        done
+        # One process hashes source contents and paths, including additions and
+        # deletions. Runtime/model fingerprints remain separate and metadata-based.
+        "$FINGERPRINT_PYTHON" "$FINGERPRINT_TOOL" --content \
+            "$REPO_ROOT/src" "$REPO_ROOT/pyproject.toml" "$REPO_ROOT/uv.lock" \
+            "$REPO_ROOT/README.md" "$REPO_ROOT/.python-version" \
+            "$SRCROOT/Scripts/package-backend.sh" "$REPO_ROOT/.venv/pyvenv.cfg"
         if [ "$INCLUDE_MODEL" = "1" ]; then directory_signature "$MODEL_SOURCE"; fi
         if [ "$INCLUDE_SENSEVOICE_MODEL" = "1" ]; then directory_signature "$SENSEVOICE_MODEL_SOURCE"; fi
         if [ "$INCLUDE_MIMO_MODEL" = "1" ]; then directory_signature "$MIMO_MODEL_SOURCE"; directory_signature "$MIMO_TOKENIZER_SOURCE"; fi
@@ -133,12 +173,20 @@ package_signature() {
 
 CURRENT_PACKAGE_SIGNATURE="$(package_signature)"
 if [ "${MSUB_FORCE_PACKAGE_BACKEND:-0}" != "1" ] \
+    && [ "$RUNTIME_UNCHANGED" = "1" ] \
     && [ -f "$PACKAGE_STAMP" ] \
     && [ "$(cat "$PACKAGE_STAMP")" = "$CURRENT_PACKAGE_SIGNATURE" ]; then
+    MSUB_PACKAGE_CACHE=hit
     echo "Backend package inputs unchanged; skipping virtualenv and model copy."
     exit 0
 fi
 
+# A failed refresh may leave partially replaced files. Never let a later
+# reversion of the inputs reuse the signature from before that refresh.
+rm -f "$PACKAGE_STAMP"
+if [ "$RUNTIME_UNCHANGED" != "1" ]; then rm -f "$RUNTIME_STAMP"; fi
+
+package_phase source
 rm -rf "$DEST/.uv-cache"
 
 rsync -a --delete --delete-excluded \
@@ -227,11 +275,11 @@ if { [ -f "$SPEAKER_DIARIZATION_COREML_MODEL_SOURCE/mlpackages/Fbank.mlpackage/D
     SOURCE_SPEAKER_DIARIZATION_COREML_MODEL_JSON="\"$SPEAKER_DIARIZATION_COREML_MODEL_SOURCE\""
 fi
 
-if [ -d "$SPEAKER_RECOGNITION_MODEL_SOURCE" ] && [ "$(find "$SPEAKER_RECOGNITION_MODEL_SOURCE" -mindepth 1 -maxdepth 1 | head -n 1)" ]; then
+if [ -d "$SPEAKER_RECOGNITION_MODEL_SOURCE" ] && [ "$(find "$SPEAKER_RECOGNITION_MODEL_SOURCE" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
     SOURCE_SPEAKER_RECOGNITION_MODEL_JSON="\"$SPEAKER_RECOGNITION_MODEL_SOURCE\""
 fi
 
-if [ -d "$EMOTION_MODEL_SOURCE" ] && [ "$(find "$EMOTION_MODEL_SOURCE" -mindepth 1 -maxdepth 1 | head -n 1)" ]; then
+if [ -d "$EMOTION_MODEL_SOURCE" ] && [ "$(find "$EMOTION_MODEL_SOURCE" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
     SOURCE_EMOTION_MODEL_JSON="\"$EMOTION_MODEL_SOURCE\""
 fi
 
@@ -244,21 +292,25 @@ if [ -f "$PANNS_AUDIO_EVENT_MODEL_SOURCE/panns_cnn14_16k_config.json" ] && [ -f 
     SOURCE_AUDIO_EVENT_MODEL_JSON="\"$PANNS_AUDIO_EVENT_MODEL_SOURCE\""
 fi
 
-if [ "$INCLUDE_VENV" = "1" ]; then
+package_phase runtime
+if [ "$RUNTIME_UNCHANGED" = "1" ]; then
+    echo "Backend runtime unchanged; reusing prepared Python dependencies and binaries."
+elif [ "$INCLUDE_VENV" = "1" ]; then
     if [ ! -x "$REPO_ROOT/.venv/bin/python" ]; then
         echo "MSUB_INCLUDE_VENV=1 but $REPO_ROOT/.venv/bin/python was not found." >&2
         exit 1
     fi
 
-    echo "Copying backend Python virtual environment."
+    MSUB_PACKAGE_FILTER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/msub-package-filters.XXXXXX")"
+    "$FINGERPRINT_PYTHON" "$RUNTIME_FILTER_TOOL" venv --profile "$BACKEND_BUNDLE_PROFILE" \
+        --slim "${MSUB_SLIM_VENV:-1}" > "$MSUB_PACKAGE_FILTER_DIR/venv"
+    "$FINGERPRINT_PYTHON" "$RUNTIME_FILTER_TOOL" python --profile "$BACKEND_BUNDLE_PROFILE" \
+        --slim "${MSUB_SLIM_VENV:-1}" > "$MSUB_PACKAGE_FILTER_DIR/python"
+    echo "Copying backend Python virtual environment (profile=$BACKEND_BUNDLE_PROFILE, exclusions applied before copy)."
+    mkdir -p "$DEST/.venv"
     rsync -a --delete --delete-excluded \
-        --exclude "__pycache__" \
-        --exclude "*.pyc" \
-        --exclude "*.pyo" \
-        --exclude ".DS_Store" \
-        --exclude "_editable_impl_*.pth" \
-        "$REPO_ROOT/.venv" \
-        "$DEST/"
+        --exclude-from="$MSUB_PACKAGE_FILTER_DIR/venv" \
+        "$REPO_ROOT/.venv/" "$DEST/.venv/"
 
     if [ "$INCLUDE_PYTHON_RUNTIME" = "1" ]; then
         PYTHON_ROOT="$("$REPO_ROOT/.venv/bin/python" -c 'import sys; print(sys.base_prefix)')"
@@ -269,12 +321,8 @@ if [ "$INCLUDE_VENV" = "1" ]; then
 
         echo "Copying backend Python runtime from $PYTHON_ROOT."
         rsync -a --delete --delete-excluded \
-            --exclude "__pycache__" \
-            --exclude "*.pyc" \
-            --exclude "*.pyo" \
-            --exclude ".DS_Store" \
-            "$PYTHON_ROOT/" \
-            "$DEST/python/"
+            --exclude-from="$MSUB_PACKAGE_FILTER_DIR/python" \
+            "$PYTHON_ROOT/" "$DEST/python/"
         rm -f "$DEST/.venv/bin/python" "$DEST/.venv/bin/python3" "$DEST/.venv/bin/python3.12"
         ln -s "../../python/bin/python3.12" "$DEST/.venv/bin/python"
         ln -s "python" "$DEST/.venv/bin/python3"
@@ -291,94 +339,14 @@ if [ "$INCLUDE_VENV" = "1" ]; then
         fi
     done
 
-    if [ "$BACKEND_BUNDLE_PROFILE" = "core" ] && [ -n "$VENV_SITE" ]; then
-        echo "Applying core backend bundle profile (set MSUB_BACKEND_BUNDLE_PROFILE=full to keep optional Torch-based features)."
-        remove_site_packages() {
-            for pattern in "$@"; do
-                for path in "$VENV_SITE"/$pattern; do
-                    [ -e "$path" ] || continue
-                    rm -rf "$path"
-                done
-            done
-        }
-        remove_site_packages \
-            "torch" "torch-"*.dist-info "torchgen" "torchgen-"*.dist-info \
-            "torchaudio" "torchaudio-"*.dist-info "torchcodec" "torchcodec-"*.dist-info \
-            "torch_complex" "torch_complex-"*.dist-info "functorch" \
-            "torchmetrics" "torchmetrics-"*.dist-info "torch_audiomentations" "torch_audiomentations-"*.dist-info \
-            "torch_pitch_shift" "torch_pitch_shift-"*.dist-info "pytorch_lightning" "pytorch_lightning-"*.dist-info \
-            "pytorch_metric_learning" "pytorch_metric_learning-"*.dist-info \
-            "pytorch_wpe.py" "pytorch_wpe-"*.dist-info \
-            "pyannote" "pyannote_"*.dist-info "pyannoteai" "pyannoteai_"*.dist-info \
-            "julius" "julius-"*.dist-info "primePy" "primePy-"*.dist-info \
-            "einops" "einops-"*.dist-info "lightning_utilities" "lightning_utilities-"*.dist-info \
-            "funasr" "funasr-"*.dist-info "modelscope" "modelscope-"*.dist-info \
-            "editdistance" "editdistance-"*.dist-info "tiktoken" "tiktoken-"*.dist-info "tiktoken_ext" \
-            "requests" "requests-"*.dist-info "urllib3" "urllib3-"*.dist-info "charset_normalizer" "charset_normalizer-"*.dist-info \
-            "fireredvad" "fireredvad-"*.dist-info \
-            "pyaml" "pyaml-"*.dist-info \
-            "sounddevice.py" "_sounddevice.py" "_sounddevice_data" "sounddevice-"*.dist-info \
-            "httptools" "httptools-"*.dist-info "uvloop" "uvloop-"*.dist-info \
-            "watchfiles" "watchfiles-"*.dist-info "websockets" "websockets-"*.dist-info \
-            "dotenv" "python_dotenv-"*.dist-info \
-            "lightning" "lightning-"*.dist-info "lightning_fabric" "lightning_fabric-"*.dist-info \
-            "asteroid_filterbanks" "asteroid_filterbanks-"*.dist-info \
-            "speechbrain" "speechbrain-"*.dist-info \
-            "numba" "numba-"*.dist-info "llvmlite" "llvmlite-"*.dist-info \
-            "librosa" "librosa-"*.dist-info "audioread" "audioread-"*.dist-info "soxr" "soxr-"*.dist-info \
-            "lazy_loader" "lazy_loader-"*.dist-info "pooch" "pooch-"*.dist-info "platformdirs" "platformdirs-"*.dist-info \
-            "joblib" "joblib-"*.dist-info "threadpoolctl.py" "threadpoolctl-"*.dist-info \
-            "decorator.py" "decorator-"*.dist-info "msgpack" "msgpack-"*.dist-info \
-            "sklearn" "scikit_learn-"*.dist-info \
-            "umap" "umap_learn-"*.dist-info "pynndescent" "pynndescent-"*.dist-info \
-            "pandas" "pandas-"*.dist-info "matplotlib" "matplotlib-"*.dist-info "mpl_toolkits" \
-            "PIL" "pillow-"*.dist-info "fontTools" "fonttools-"*.dist-info \
-            "contourpy" "contourpy-"*.dist-info "cycler" "cycler-"*.dist-info \
-            "kiwisolver" "kiwisolver-"*.dist-info "pyparsing" "pyparsing-"*.dist-info \
-            "dateutil" "python_dateutil-"*.dist-info "six.py" "six-"*.dist-info "pylab.py" \
-            "grpc" "grpcio-"*.dist-info "opentelemetry" "opentelemetry_"*.dist-info \
-            "Crypto" "pycryptodome-"*.dist-info \
-            "jieba" "jieba-"*.dist-info "jamo" "jamo-"*.dist-info "jaconv" "jaconv-"*.dist-info \
-            "hydra" "hydra_core-"*.dist-info "omegaconf" "omegaconf-"*.dist-info \
-            "antlr4" "antlr4_python3_runtime-"*.dist-info "textgrid" "textgrid-"*.dist-info \
-            "tensorboardX" "tensorboardx-"*.dist-info "oss2" "oss2-"*.dist-info \
-            "aliyunsdkcore" "aliyunsdkcore-"*.dist-info "aliyunsdkkms" "aliyun_python_sdk_"*.dist-info \
-            "crcmod" "crcmod-"*.dist-info "jmespath" "jmespath-"*.dist-info \
-            "cryptography" "cryptography-"*.dist-info \
-            "aiohttp" "aiohttp-"*.dist-info "aiohappyeyeballs" "aiohappyeyeballs-"*.dist-info \
-            "aiosignal" "aiosignal-"*.dist-info "frozenlist" "frozenlist-"*.dist-info \
-            "multidict" "multidict-"*.dist-info "propcache" "propcache-"*.dist-info \
-            "yarl" "yarl-"*.dist-info \
-            "sqlalchemy" "sqlalchemy-"*.dist-info "SQLAlchemy-"*.dist-info "alembic" "alembic-"*.dist-info \
-            "mako" "mako-"*.dist-info "colorlog" "colorlog-"*.dist-info "sortedcontainers" "sortedcontainers-"*.dist-info \
-            "optuna" "optuna-"*.dist-info \
-            "networkx" "networkx-"*.dist-info \
-            "setuptools" "setuptools-"*.dist-info "pkg_resources" "_distutils_hack" "distutils-precedence.pth" \
-            "pydevd_plugins"
-    fi
-
     SLIM_VENV="${MSUB_SLIM_VENV:-1}"
     if [ "$SLIM_VENV" = "1" ]; then
         slim_size_before=$(du -sk "$DEST" 2>/dev/null | awk '{print $1}')
         echo "Slimming backend payload (set MSUB_SLIM_VENV=0 to skip)."
 
         if [ -n "$VENV_SITE" ]; then
-            # 1) Drop C/C++ header trees — runtime never needs them.
-            find "$VENV_SITE" -depth -type d -name "include" -exec rm -rf {} + 2>/dev/null || true
-            # 2) Drop unit-test directories. Leave public `testing` submodules (torch.testing,
-            #    sqlalchemy.testing) alone because user code may import them.
-            find "$VENV_SITE" -depth -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true
-            # 3) Drop CMake/man artifacts intended for C/C++ consumers.
-            find "$VENV_SITE" -depth -type d \( -name "cmake" -o -path "*/share/cmake" -o -path "*/share/man" -o -path "*/share/doc" \) -exec rm -rf {} + 2>/dev/null || true
-            # 4) Drop examples, benchmarks, and docs from installed packages.
-            find "$VENV_SITE" -depth -type d \( -name "examples" -o -name "example" -o -name "benchmarks" -o -name "benchmark" -o -name "docs" -o -name "doc" \) -exec rm -rf {} + 2>/dev/null || true
-            # 5) Drop build-time source/header/static artifacts and common caches.
-            find "$VENV_SITE" -depth -type d \( -name "*.dSYM" -o -name ".cache" -o -name ".pytest_cache" -o -name ".mypy_cache" -o -name ".ruff_cache" -o -name ".ipynb_checkpoints" \) -exec rm -rf {} + 2>/dev/null || true
-            find "$VENV_SITE" -type f \( -name "*.a" -o -name "*.la" -o -name "*.o" -o -name "*.c" -o -name "*.cc" -o -name "*.cpp" -o -name "*.h" -o -name "*.hpp" -o -name "*.pyx" -o -name "*.pxd" \) -exec rm -f {} + 2>/dev/null || true
-            # NOTE: never strip *.pyi files. librosa, networkx, scikit-image and
-            # recent scipy load them at runtime via lazy_loader.attach_stub().
-
-            # 6) Thin fat Mach-O binaries down to arm64 (project ships Apple Silicon only).
+            # Non-runtime files were excluded before rsync. Only binary
+            # transformations remain here (Apple Silicon distribution).
             thin_arm64_binary() {
                 bin="$1"
                 [ -f "$bin" ] || return 0
@@ -409,7 +377,7 @@ if [ "$INCLUDE_VENV" = "1" ]; then
             done < "$macho_scan_file"
             rm -f "$macho_scan_file"
 
-            # 7) Strip local symbols from the largest native libraries, then re-sign adhoc.
+            # Strip local symbols from the largest native libraries, then re-sign adhoc.
             slim_strip_targets=(
                 "$VENV_SITE/torch/lib/libtorch_cpu.dylib"
                 "$VENV_SITE/torch/lib/libtorch_python.dylib"
@@ -434,33 +402,22 @@ if [ "$INCLUDE_VENV" = "1" ]; then
             done
         fi
 
-        # 8) Trim the embedded Python runtime stdlib of bits no backend code uses.
-        if [ "$INCLUDE_PYTHON_RUNTIME" = "1" ] && [ -d "$DEST/python" ]; then
-            for stdlib_path in "$DEST"/python/lib/python*/; do
-                [ -d "$stdlib_path" ] || continue
-                rm -rf \
-                    "$stdlib_path/idlelib" \
-                    "$stdlib_path/turtledemo" \
-                    "$stdlib_path/tkinter" \
-                    "$stdlib_path/lib2to3" \
-                    "$stdlib_path/ensurepip" \
-                    "$stdlib_path/test" 2>/dev/null || true
-                rm -f "$stdlib_path/turtle.py" 2>/dev/null || true
-            done
-            rm -rf "$DEST/python/include" 2>/dev/null || true
-            rm -rf "$DEST/python/share/man" "$DEST/python/share/doc" 2>/dev/null || true
-        fi
-
         slim_size_after=$(du -sk "$DEST" 2>/dev/null | awk '{print $1}')
         if [ -n "$slim_size_before" ] && [ -n "$slim_size_after" ]; then
             slim_delta=$((slim_size_before - slim_size_after))
-            echo "Backend slim: $((slim_size_before / 1024)) MiB -> $((slim_size_after / 1024)) MiB (saved $((slim_delta / 1024)) MiB)."
+            echo "Backend binary slim after copy exclusions: $((slim_size_before / 1024)) MiB -> $((slim_size_after / 1024)) MiB (saved $((slim_delta / 1024)) MiB)."
         fi
     fi
 else
     rm -rf "$DEST/.venv" "$DEST/python"
     echo "Skipping venv copy. Set MSUB_INCLUDE_VENV=1 to embed backend dependencies in the app bundle."
 fi
+
+# Publish only after successful preparation. Source-only edits never repeat
+# virtualenv copying, thinning or signing of unchanged native dependencies.
+package_phase models
+printf '%s\n' "$CURRENT_RUNTIME_SIGNATURE" > "$RUNTIME_STAMP.tmp"
+mv "$RUNTIME_STAMP.tmp" "$RUNTIME_STAMP"
 
 if [ "$INCLUDE_MODEL" = "1" ]; then
     mkdir -p "$DEST/models"

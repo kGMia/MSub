@@ -26,7 +26,7 @@ enum AppleSpeechService {
     /// Transcribes an audio/video file with Apple's on-device SpeechAnalyzer.
     /// - Parameters:
     ///   - url: Local audio file URL (already in a format AVAudioFile can read).
-    ///   - locale: Preferred recognition locale; falls back to the closest supported one.
+    ///   - locale: Recognition locale; accepts equivalent supported locales only.
     ///   - timeOffset: Added to each cue's start/end (used when the source was clipped).
     ///   - onProgress: Reports progress in `[0, 1]`. Best-effort.
     static func transcribe(
@@ -37,12 +37,8 @@ enum AppleSpeechService {
         etiquetteFilter: Bool = false,
         onProgress: @escaping @Sendable (Double) -> Void = { _ in }
     ) async throws -> [SubtitleCue] {
-        let supportedLocale: Locale
-        if let match = await SpeechTranscriber.supportedLocale(equivalentTo: locale) {
-            supportedLocale = match
-        } else if let fallback = await SpeechTranscriber.supportedLocales.first {
-            supportedLocale = fallback
-        } else {
+        try Task.checkCancellation()
+        guard let supportedLocale = await SpeechTranscriber.supportedLocale(equivalentTo: locale) else {
             throw AppleSpeechError.unsupportedLocale
         }
 
@@ -61,6 +57,7 @@ enum AppleSpeechService {
         if let installationRequest = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
             try await installationRequest.downloadAndInstall()
         }
+        try Task.checkCancellation()
 
         let audioFile: AVAudioFile
         do {
@@ -80,27 +77,38 @@ enum AppleSpeechService {
 
         let collector = ResultCollector()
         let resultsTask = Task {
-            do {
-                for try await result in transcriber.results {
-                    await collector.append(
-                        result: result,
-                        timeOffset: timeOffset,
-                        totalSeconds: totalSeconds,
-                        onProgress: onProgress
-                    )
-                }
-            } catch {
-                // Surface via analyzer errors instead.
+            for try await result in transcriber.results {
+                try Task.checkCancellation()
+                await collector.append(
+                    result: result,
+                    timeOffset: timeOffset,
+                    totalSeconds: totalSeconds,
+                    onProgress: onProgress
+                )
             }
         }
 
-        let lastSampleTime = try await analyzer.analyzeSequence(from: audioFile)
-        if let lastSampleTime {
-            try await analyzer.finalizeAndFinish(through: lastSampleTime)
-        } else {
+        do {
+            try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                let lastSampleTime = try await analyzer.analyzeSequence(from: audioFile)
+                if let lastSampleTime {
+                    try await analyzer.finalizeAndFinish(through: lastSampleTime)
+                } else {
+                    await analyzer.cancelAndFinishNow()
+                }
+                try await resultsTask.value
+                try Task.checkCancellation()
+            } onCancel: {
+                resultsTask.cancel()
+                Task { await analyzer.cancelAndFinishNow() }
+            }
+        } catch {
+            resultsTask.cancel()
             await analyzer.cancelAndFinishNow()
+            _ = await resultsTask.result
+            throw error
         }
-        await resultsTask.value
         onProgress(1)
         return await collector.cues()
     }

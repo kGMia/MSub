@@ -7,11 +7,20 @@ final class APIClient {
     var baseURL = URL(string: "http://127.0.0.1:7860")!
     @ObservationIgnored private let session = APIClient.makeSession()
 
+    private var configCacheKey: String { "msub.backendConfig.v1." + Bundle.main.bundleURL.standardizedFileURL.path }
+
+    func cachedConfig() -> AppConfig? {
+        guard let data = UserDefaults.standard.data(forKey: configCacheKey) else { return nil }
+        return try? JSONDecoder().decode(AppConfig.self, from: data)
+    }
+
     func fetchConfig() async throws -> AppConfig {
         let url = baseURL.appending(path: "/api/config")
         let (data, response) = try await session.data(from: url)
         try validate(response: response, data: data)
-        return try JSONDecoder().decode(AppConfig.self, from: data)
+        let config = try JSONDecoder().decode(AppConfig.self, from: data)
+        UserDefaults.standard.set(data, forKey: configCacheKey)
+        return config
     }
 
     func preview(fileURL: URL, settings: TranscriptionSettings) async throws -> SegmentPreview {
@@ -24,19 +33,42 @@ final class APIClient {
         return try JSONDecoder().decode(JobCreated.self, from: data)
     }
 
+    func downloadPreviewAudio(id: String) async throws -> URL {
+        let url = baseURL.appending(path: "/api/preview/\(id)/audio")
+        let (temporaryURL, response) = try await session.download(from: url)
+        defer { try? FileManager.default.removeItem(at: temporaryURL) }
+        try validate(response: response, data: Data())
+        let destination = FileManager.default.temporaryDirectory
+            .appending(path: "msub-native-\(UUID().uuidString).wav")
+        try FileManager.default.moveItem(at: temporaryURL, to: destination)
+        return destination
+    }
+
+    func unloadIdleModels() async throws {
+        var request = URLRequest(url: baseURL.appending(path: "/api/model/unload"))
+        request.httpMethod = "POST"
+        let (data, response) = try await session.data(for: request)
+        try validate(response: response, data: data)
+    }
+
     func createJob(
         fileURL: URL,
         settings: TranscriptionSettings,
         previewID: String? = nil,
+        nativeSegments: [SubtitleSegment]? = nil,
         fieldOverrides: [(String, String)] = []
     ) async throws -> JobCreated {
-        let extraFields = previewID.map { [("preview_id", $0)] } ?? []
+        var extraFields = previewID.map { [("preview_id", $0)] } ?? []
+        if let nativeSegments {
+            let data = try JSONEncoder().encode(nativeSegments)
+            extraFields.append(("native_segments", String(decoding: data, as: UTF8.self)))
+        }
         let data = try await sendMediaRequest(
             path: "/api/jobs",
             fileURL: fileURL,
             settings: settings,
             includeOutput: true,
-            fieldOverrides: fieldOverrides,
+            fieldOverrides: fieldOverrides + (nativeSegments == nil ? [] : [("vad_engine", "firered")]),
             extraFields: extraFields
         )
         return try JSONDecoder().decode(JobCreated.self, from: data)

@@ -36,6 +36,7 @@ final class BackendService {
     }
 
     private var process: Process?
+    @ObservationIgnored private var readinessTask: Task<Bool, Never>?
     private var pipe: Pipe?
     private var recentLog = ""
     private let maxRecentLogLength = 6_000
@@ -223,6 +224,14 @@ final class BackendService {
     }
 
     func ensureRunning(timeout: TimeInterval = 25.0) async -> Bool {
+        if let readinessTask { return await readinessTask.value }
+        let task = Task { await self.ensureRunningOnce(timeout: timeout) }
+        readinessTask = task
+        defer { readinessTask = nil }
+        return await task.value
+    }
+
+    private func ensureRunningOnce(timeout: TimeInterval) async -> Bool {
         let expectedBackendRootPath = expectedBackendRootPath()
         let expectedModelPath = expectedModelPath()
         let expectedSenseVoiceModelPath = expectedSenseVoiceModelPath()
@@ -674,40 +683,36 @@ final class BackendService {
     }
 
     private func findWorkspaceRoot() -> URL? {
-        if let envPath = ProcessInfo.processInfo.environment["MSUB_WORKSPACE"]
-            ?? ProcessInfo.processInfo.environment["HUZ_WORKSPACE"] {
-            let url = URL(fileURLWithPath: envPath)
-            if isBackendRoot(url) {
-                return url
-            }
-        }
-
-        var candidates: [URL] = [URL(fileURLWithPath: FileManager.default.currentDirectoryPath)]
+        let explicitPath = ProcessInfo.processInfo.environment["MSUB_WORKSPACE"]
+            ?? ProcessInfo.processInfo.environment["HUZ_WORKSPACE"]
+        var candidates = [URL(fileURLWithPath: FileManager.default.currentDirectoryPath)]
         if let executable = Bundle.main.executableURL {
             candidates.append(executable.deletingLastPathComponent())
         }
+        return Self.resolveWorkspaceRoot(
+            explicit: explicitPath.map { URL(fileURLWithPath: $0) },
+            bundled: Bundle.main.resourceURL?.appending(path: "backend"),
+            candidates: candidates
+        )
+    }
 
+    static func resolveWorkspaceRoot(explicit: URL?, bundled: URL?, candidates: [URL]) -> URL? {
+        if let explicit, isBackendRoot(explicit) { return explicit }
+        // A sandboxed .app must use its packaged interpreter and dependencies.
+        // Ancestor discovery can otherwise pick the developer checkout enclosing
+        // DerivedData and try to execute an inaccessible external uv/Python.
+        if let bundled, isBackendRoot(bundled) { return bundled }
         for candidate in candidates {
             var cursor = candidate
             for _ in 0..<8 {
-                if isBackendRoot(cursor) {
-                    return cursor
-                }
+                if isBackendRoot(cursor) { return cursor }
                 cursor.deleteLastPathComponent()
             }
         }
-
-        if let resourceURL = Bundle.main.resourceURL {
-            let bundledBackend = resourceURL.appending(path: "backend")
-            if isBackendRoot(bundledBackend) {
-                return bundledBackend
-            }
-        }
-
         return nil
     }
 
-    private func isBackendRoot(_ url: URL) -> Bool {
+    private static func isBackendRoot(_ url: URL) -> Bool {
         FileManager.default.fileExists(atPath: url.appending(path: "pyproject.toml").path)
             && FileManager.default.fileExists(atPath: url.appending(path: "src/huz_subtitle/web.py").path)
     }
@@ -788,7 +793,7 @@ final class BackendService {
 
     private func isBundledRuntimeLaunch() -> Bool {
         guard let resourceURL = Bundle.main.resourceURL else { return false }
-        return isBackendRoot(resourceURL.appending(path: "backend"))
+        return Self.isBackendRoot(resourceURL.appending(path: "backend"))
     }
 
     private func bundledExecutable(named name: String) -> URL? {

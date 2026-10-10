@@ -1185,9 +1185,9 @@ enum WaveformLoader {
                 AVLinearPCMIsNonInterleaved: false
             ]
         )
-        output.alwaysCopiesSampleData = false
         guard reader.canAdd(output) else { return [] }
-        reader.add(output)
+        let provider = reader.outputProvider(for: output)
+        defer { reader.cancelReading() }
 
         let formatDescriptions = (try? await track.load(.formatDescriptions)) ?? []
         let audioDescription = formatDescriptions.first
@@ -1197,7 +1197,9 @@ enum WaveformLoader {
         let sampleRate = streamDescription?.mSampleRate ?? 16_000
         let channelCount = max(1, Int(streamDescription?.mChannelsPerFrame ?? 1))
         let duration = (try? await asset.load(.duration)) ?? .zero
-        let estimatedFrames = max(1, Int(CMTimeGetSeconds(duration) * sampleRate))
+        let frameEstimate = duration.seconds * sampleRate
+        guard frameEstimate.isFinite, frameEstimate >= 0, frameEstimate < Double(Int.max) else { return [] }
+        let estimatedFrames = max(1, Int(frameEstimate))
         let binSize = max(1, estimatedFrames / max(1, targetSamples))
         // Sample only a sparse subset of frames per bin to find the peak — for typical
         // bin sizes (thousands of frames each), 32 samples per bin is a faithful peak
@@ -1206,47 +1208,59 @@ enum WaveformLoader {
         let frameStride = max(1, binSize / samplesPerBin)
         var bins = [Float](repeating: 0, count: max(1, targetSamples))
 
-        guard reader.startReading() else { return [] }
-
         var frameIndex = 0
-        while !Task.isCancelled,
-              let sampleBuffer = output.copyNextSampleBuffer(),
-              let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) {
-            let length = CMBlockBufferGetDataLength(blockBuffer)
-            guard length > 0 else { continue }
-            var data = Data(count: length)
-            let copyResult = data.withUnsafeMutableBytes { buffer in
-                CMBlockBufferCopyDataBytes(
-                    blockBuffer,
-                    atOffset: 0,
-                    dataLength: length,
-                    destination: buffer.baseAddress!
-                )
-            }
-            guard copyResult == noErr else { continue }
-            data.withUnsafeBytes { rawBuffer in
-                let floats = rawBuffer.bindMemory(to: Float.self)
-                let chunkFrames = floats.count / max(channelCount, 1)
-                // Align the first frame to sample in this chunk to the global stride grid.
-                let strideRemainder = frameIndex % frameStride
-                var localFrame = strideRemainder == 0 ? 0 : (frameStride - strideRemainder)
-                while localFrame < chunkFrames {
-                    let offset = localFrame * channelCount
-                    var sum: Float = 0
-                    for channel in 0..<channelCount where offset + channel < floats.count {
-                        sum += abs(floats[offset + channel])
+        do {
+            try reader.start()
+            while !Task.isCancelled, let ready = try await provider.next() {
+                ready.withUnsafeSampleBuffer { sampleBuffer in
+                    guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
+                    let length = CMBlockBufferGetDataLength(blockBuffer)
+                    guard length > 0 else { return }
+                    func accumulate(_ rawBuffer: UnsafeRawBufferPointer) {
+                        let floatCount = rawBuffer.count / MemoryLayout<Float>.size
+                        let chunkFrames = floatCount / max(channelCount, 1)
+                        // Align the first frame to sample in this chunk to the global stride grid.
+                        let strideRemainder = frameIndex % frameStride
+                        var localFrame = strideRemainder == 0 ? 0 : (frameStride - strideRemainder)
+                        while localFrame < chunkFrames {
+                            let offset = localFrame * channelCount
+                            var sum: Float = 0
+                            for channel in 0..<channelCount where offset + channel < floatCount {
+                                sum += abs(rawBuffer.loadUnaligned(fromByteOffset: (offset + channel) * MemoryLayout<Float>.size, as: Float.self))
+                            }
+                            let amplitude = sum / Float(channelCount)
+                            let globalFrame = frameIndex + localFrame
+                            let bin = min(bins.count - 1, globalFrame / binSize)
+                            if amplitude > bins[bin] { bins[bin] = amplitude }
+                            localFrame += frameStride
+                        }
+                        frameIndex += chunkFrames
                     }
-                    let amplitude = sum / Float(channelCount)
-                    let globalFrame = frameIndex + localFrame
-                    let bin = min(bins.count - 1, globalFrame / binSize)
-                    if amplitude > bins[bin] { bins[bin] = amplitude }
-                    localFrame += frameStride
+                    // Borrow contiguous PCM only within the sample's lifetime.
+                    // Fragmented blocks retain the copy fallback.
+                    var contiguousLength = 0
+                    var totalLength = 0
+                    var bytes: UnsafeMutablePointer<Int8>?
+                    let status = CMBlockBufferGetDataPointer(
+                        blockBuffer, atOffset: 0, lengthAtOffsetOut: &contiguousLength,
+                        totalLengthOut: &totalLength, dataPointerOut: &bytes)
+                    if status == noErr, contiguousLength == length, totalLength == length, let bytes {
+                        accumulate(UnsafeRawBufferPointer(start: bytes, count: length))
+                    } else {
+                        var data = Data(count: length)
+                        let status = data.withUnsafeMutableBytes { bytes in
+                            CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0,
+                                                       dataLength: length, destination: bytes.baseAddress!)
+                        }
+                        guard status == noErr else { return }
+                        data.withUnsafeBytes { accumulate($0) }
+                    }
                 }
-                frameIndex += chunkFrames
             }
+        } catch {
+            return []
         }
 
-        reader.cancelReading()
         if Task.isCancelled {
             return []
         }
@@ -1383,5 +1397,125 @@ enum WaveformLoader {
                 return peak
             }
         }
+    }
+}
+
+/// Streams decoded audio directly to ASR PCM. All reader/buffer state stays on
+/// this actor; only file URLs and durations cross the isolation boundary.
+actor NativeAudioExporter {
+    static let shared = NativeAudioExporter()
+
+    struct Output: Sendable {
+        let url: URL
+        let duration: Double
+    }
+
+    enum Failure: Error { case invalidRange, missingAudio, decodingFailed }
+
+    func extract(source: URL, start: Double, duration: Double) async throws -> Output {
+        guard start.isFinite, duration.isFinite, start >= 0, duration > 0 else {
+            throw Failure.invalidRange
+        }
+        try Task.checkCancellation()
+        let asset = AVURLAsset(url: source)
+        guard let track = try await asset.loadTracks(withMediaType: .audio).first else {
+            throw Failure.missingAudio
+        }
+        let assetDuration = try await asset.load(.duration).seconds
+        let length = min(duration, assetDuration - start)
+        guard length.isFinite, length > 0, length < Double(Int64.max / 16000) else {
+            throw Failure.invalidRange
+        }
+        let frameLimit = Int64((length * 16000).rounded())
+        guard frameLimit > 0 else { throw Failure.invalidRange }
+        let reader = try AVAssetReader(asset: asset)
+        reader.timeRange = CMTimeRange(start: CMTime(seconds: start, preferredTimescale: 16000),
+                                      duration: CMTime(value: frameLimit, timescale: 16000))
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: 16000,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false
+        ])
+        guard reader.canAdd(output) else { throw Failure.decodingFailed }
+        let provider = reader.outputProvider(for: output)
+        let url = FileManager.default.temporaryDirectory.appending(path: "msub-pcm-\(UUID().uuidString).wav")
+        var complete = false
+        defer {
+            reader.cancelReading()
+            if !complete { try? FileManager.default.removeItem(at: url) }
+        }
+        guard let format = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 16384),
+              let destination = buffer.int16ChannelData?[0] else { throw Failure.decodingFailed }
+        let writer = try AVAudioFile(forWriting: url, settings: format.settings,
+                                     commonFormat: .pcmFormatInt16, interleaved: true)
+        try reader.start()
+        var written: Int64 = 0
+        var sawAudio = false
+        func pad(to target: Int64) throws {
+            while written < target {
+                try Task.checkCancellation()
+                let count = Int(min(16384, target - written))
+                destination.update(repeating: 0, count: count)
+                buffer.frameLength = AVAudioFrameCount(count)
+                try writer.write(from: buffer)
+                written += Int64(count)
+            }
+        }
+        while let ready = try await provider.next() {
+            try Task.checkCancellation()
+            // Borrow the Core Media buffer only to copy this decoded block. The
+            // actor-owned writer and mutable PCM buffer never enter that closure.
+            let (data, sampleCount) = try ready.withUnsafeSampleBuffer { sample -> (Data, Int64) in
+                guard let block = CMSampleBufferGetDataBuffer(sample) else { throw Failure.decodingFailed }
+                let count = CMSampleBufferGetNumSamples(sample)
+                let byteCount = CMBlockBufferGetDataLength(block)
+                guard count >= 0, count <= Int.max / 2, byteCount == count * 2 else {
+                    throw Failure.decodingFailed
+                }
+                var data = Data(count: byteCount)
+                if byteCount > 0 {
+                    let status = data.withUnsafeMutableBytes { bytes in
+                        CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: byteCount,
+                                                   destination: bytes.baseAddress!)
+                    }
+                    guard status == noErr else { throw Failure.decodingFailed }
+                }
+                return (data, Int64(count))
+            }
+            let timestamp = ready.presentationTimeStamp.seconds
+            guard timestamp.isFinite, abs(timestamp - start) < Double(Int64.max / 16000) else {
+                throw Failure.decodingFailed
+            }
+            // Preserve leading silence and timestamp gaps; discard overlapping
+            // decoder preroll rather than shifting speech on the media timeline.
+            let sampleStart = Int64(((timestamp - start) * 16000).rounded())
+            try pad(to: min(frameLimit, max(0, sampleStart)))
+            var offset = max(0, written - sampleStart)
+            while offset < sampleCount && written < frameLimit {
+                let count = Int(min(16384, sampleCount - offset, frameLimit - written))
+                data.withUnsafeBytes { bytes in
+                    UnsafeMutableRawPointer(destination).copyMemory(
+                        from: bytes.baseAddress!.advanced(by: Int(offset) * 2), byteCount: count * 2)
+                }
+                buffer.frameLength = AVAudioFrameCount(count)
+                try writer.write(from: buffer)
+                sawAudio = true
+                offset += Int64(count)
+                written += Int64(count)
+                try Task.checkCancellation()
+            }
+            if written >= frameLimit { break }
+        }
+        if reader.status == .failed { throw reader.error ?? Failure.decodingFailed }
+        guard sawAudio else { throw Failure.missingAudio }
+        try pad(to: frameLimit)
+        try Task.checkCancellation()
+        complete = true
+        return Output(url: url, duration: Double(written) / 16000)
     }
 }

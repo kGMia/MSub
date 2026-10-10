@@ -80,6 +80,7 @@ struct MSubApp: App {
                 }
         }
         .commands {
+            SubtitleDraftMenuCommands()
             CommandGroup(replacing: .newItem) {
                 Button(Copy.text("menu.openFile", language: language)) {
                     NotificationCenter.default.post(name: .msubOpenFilesRequested, object: nil)
@@ -264,6 +265,8 @@ struct MSubApp: App {
 
 struct ModelManagerView: View {
     @Environment(APIClient.self) private var api
+    @Environment(BackendService.self) private var backend
+    @Environment(TranscriptionSettings.self) private var settings
     let language: AppLanguage
 
     @State private var modelList: ManagedModelList?
@@ -296,7 +299,7 @@ struct ModelManagerView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             } else if errorMessage == nil {
-                ProgressView()
+                MSubSpinner()
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             }
         }
@@ -372,7 +375,7 @@ struct ModelManagerView: View {
                     .controlSize(.small)
                     .frame(width: 72)
             } else if model.isDownloading || busyModels.contains(model.name) {
-                ProgressView()
+                MSubSpinner()
                     .controlSize(.small)
             } else if model.installed {
                 Button(t("models.delete"), role: .destructive) {
@@ -392,10 +395,16 @@ struct ModelManagerView: View {
     private func refreshLoop() async {
         while !Task.isCancelled {
             do {
+                if !backend.isRunning { try await ensureModelBackend() }
                 let list = try await api.fetchModels()
                 modelList = list
                 errorMessage = nil
-                guard list.models.contains(where: { $0.isDownloading }) else { return }
+                if !list.models.contains(where: { $0.isDownloading }) {
+                    if let config = try? await api.fetchConfig(), !Task.isCancelled {
+                        settings.refreshCatalog(config: config)
+                    }
+                    return
+                }
             } catch {
                 if modelList == nil {
                     errorMessage = t("models.backendUnavailable")
@@ -413,6 +422,7 @@ struct ModelManagerView: View {
         busyModels.insert(name)
         Task {
             do {
+                try await ensureModelBackend()
                 try await operation(name)
             } catch {
                 errorMessage = error.localizedDescription
@@ -420,6 +430,17 @@ struct ModelManagerView: View {
             busyModels.remove(name)
             refreshTrigger += 1
         }
+    }
+
+    private func ensureModelBackend() async throws {
+        try Task.checkCancellation()
+        guard await backend.ensureRunning() else {
+            try Task.checkCancellation()
+            throw NSError(domain: "MSub.Backend", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: backend.message])
+        }
+        api.baseURL = backend.baseURL
+        try Task.checkCancellation()
     }
 
     private func formattedSize(_ bytes: Int64) -> String {
@@ -1429,5 +1450,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc private func openRecentFile(_ sender: NSMenuItem) {
         guard let url = sender.representedObject as? URL else { return }
         DockMenuState.shared.submitAutomationCommands([.open(url)])
+    }
+}
+
+/// A fixed-size SwiftUI spinner avoids AppKit progress intrinsic-size rounding
+/// faults when a parent animates layout or scale during status transitions.
+struct MSubSpinner: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var rotating = false
+
+    var body: some View {
+        Circle()
+            .trim(from: 0, to: 0.75)
+            .stroke(.secondary, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+            .frame(width: 14, height: 14)
+            .rotationEffect(.degrees(rotating && !reduceMotion ? 360 : 0))
+            .animation(reduceMotion ? nil : .linear(duration: 0.9).repeatForever(autoreverses: false), value: rotating)
+            .onAppear { rotating = true }
+            .accessibilityLabel(Text("Loading"))
+    }
+}
+
+// SDK 27 toolbar priorities keep the main action visible as the window narrows.
+enum MSubToolbarPriority { case secondary, primary, critical }
+
+extension ToolbarContent {
+    @MainActor @ToolbarContentBuilder
+    func msubToolbarPriority(_ role: MSubToolbarPriority) -> some ToolbarContent {
+        if #available(macOS 27.0, *) {
+            switch role {
+            case .secondary: self.visibilityPriority(.low)
+            case .primary: self.visibilityPriority(.high)
+            case .critical: self.visibilityPriority(.init(higherThan: .high))
+            }
+        } else {
+            self
+        }
+    }
+}
+
+private struct MSubPanelModifier: ViewModifier {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var contrast
+    let cornerRadius: CGFloat
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if reduceTransparency || contrast == .increased {
+            content
+                .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: cornerRadius))
+                .overlay {
+                    RoundedRectangle(cornerRadius: cornerRadius)
+                        .strokeBorder(.secondary.opacity(contrast == .increased ? 0.65 : 0.25), lineWidth: 1)
+                }
+        } else {
+            content.glassEffect(.regular, in: RoundedRectangle(cornerRadius: cornerRadius))
+        }
+    }
+}
+
+extension View {
+    /// Shared native sizing for local action rows; primary actions can override the style.
+    func msubCompactActions() -> some View {
+        buttonStyle(.bordered)
+            .controlSize(.small)
+    }
+
+    func msubPanel(cornerRadius: CGFloat) -> some View {
+        modifier(MSubPanelModifier(cornerRadius: cornerRadius))
     }
 }

@@ -225,7 +225,7 @@ private struct UnsupportedMediaPreview: View {
                         .padding(.horizontal, 12)
                         .padding(.bottom, 12)
                 } else if isLoadingCover {
-                    ProgressView()
+                    MSubSpinner()
                         .controlSize(.small)
                 } else {
                     VStack(spacing: 6) {
@@ -474,7 +474,7 @@ private struct CaptureFrameButton: View {
     var body: some View {
         Button(action: action) {
             if isCapturing {
-                ProgressView()
+                MSubSpinner()
                     .controlSize(.small)
                     .frame(width: 18, height: 18)
             } else {

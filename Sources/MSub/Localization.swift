@@ -599,6 +599,14 @@ enum Copy {
     ]
 
     private static let strings: [String: [AppLanguage: String]] = [
+        "workspace.focus.enter": [.zh: "专注编辑", .zhHant: "專注編輯", .en: "Focus on Editing", .ja: "編集に集中"],
+        "workspace.focus.exit": [.zh: "退出专注编辑", .zhHant: "退出專注編輯", .en: "Exit Focus Mode", .ja: "集中モードを終了"],
+        "settings.nativeQwen": [.zh: "原生 Qwen3（实验性）", .en: "Native Qwen3 (experimental)"],
+        "help.nativeQwen": [.zh: "使用 Swift MLX 识别，复用后端音频和分段。仅支持已安装模型和贪心解码；附加分析功能或原生失败时使用 Python 引擎。", .en: "Recognize with Swift MLX using backend audio and segments. Requires an installed model and greedy decoding. Additional analysis options or native failures use Python."],
+        "nativeQwen.ready": [.zh: "识别使用 Swift MLX；分段预览仍由本地后端完成。", .en: "Swift MLX recognition with segment preparation by the local backend."],
+        "nativeQwen.fallbackOptions": [.zh: "当前附加功能或采样参数需要 Python 引擎，将保留完整处理流程。", .en: "Current analysis or sampling options require the full Python pipeline."],
+        "nativeQwen.fallbackError": [.zh: "原生识别失败，回退到 Python", .en: "Native recognition failed; falling back to Python"],
+        "nativeQwen.localModelRequired": [.zh: "请先安装 Qwen3 模型或选择本地模型目录。", .en: "Install the Qwen3 model or choose a local model folder first."],
         "app.title": [.zh: "MSub", .en: "MSub"],
         "backend.start": [.zh: "启动后端", .en: "Start Backend"],
         "backend.stop": [.zh: "停止后端", .en: "Stop Backend"],

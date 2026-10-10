@@ -25,6 +25,61 @@ final class TranscriptionSettings {
 
     var model = ""
     var asrEngine: ASREngine = .fireredasr2
+    var nativeQwenEnabled = UserDefaults.standard.bool(forKey: "msub.nativeQwen.enabled") {
+        didSet { UserDefaults.standard.set(nativeQwenEnabled, forKey: "msub.nativeQwen.enabled") }
+    }
+
+    var nativeFireRedVADEnabled = UserDefaults.standard.bool(forKey: "msub.nativeFireRedVAD.enabled") {
+        didSet { UserDefaults.standard.set(nativeFireRedVADEnabled, forKey: "msub.nativeFireRedVAD.enabled") }
+    }
+
+    var backendSupportsNativeSegments = false
+
+    var nativeFireRedVADDirectory: URL? {
+        guard nativeFireRedVADEnabled, !effectiveASREngine.isLocal, !denoise, !diarizeSpeakers,
+              (backendSupportsNativeSegments || (canUseNativeQwen && nativeQwenModelDirectory != nil)), segmentMode == .vad,
+              effectiveVADEngine == .firered, !audioEventFilter,
+              nativeFireRedVADOptions.isSupported,
+              let path = vadCatalog.first(where: { $0.engine == .firered && $0.localModelAvailable })?.localModel else { return nil }
+        // Custom backend-only tuning isn't silently approximated by the native path.
+        let customKeys = ["MSUB_VAD_SHORT_MERGE_GAP_SECONDS", "MSUB_VAD_TIGHT_MERGE_GAP_SECONDS",
+                          "MSUB_VAD_SHORT_MERGE_MAX_SECONDS", "MSUB_COREML_COMPUTE_UNITS",
+                          "MSUB_FIRERED_VAD_COREML_BATCH_FRAMES", "MSUB_FIRERED_VAD_CMVN",
+                          "MSUB_FIRERED_VAD_MODEL"]
+        guard !customKeys.contains(where: { ProcessInfo.processInfo.environment[$0] != nil }) else { return nil }
+        let directory = URL(fileURLWithPath: path)
+        guard FileManager.default.fileExists(atPath: directory.appending(path: "cmvn.ark").path),
+              FileManager.default.fileExists(atPath: directory.appending(path: "FireRedVAD.mlpackage").path) else { return nil }
+        return directory
+    }
+
+    var nativeFireRedVADOptions: FireRedVADOptions {
+        FireRedVADOptions(threshold: fireRedVADThreshold, smoothWindow: fireRedVADSmoothWindow,
+                          minSpeech: vadMinSpeech, minSilence: vadSilence, padding: vadPadding,
+                          maxSegment: vadMaxSegment, minSegment: vadMinSegment, splitSearch: vadSearch)
+    }
+
+    // Unsupported options retain the complete Python pipeline. The first native
+    // implementation deliberately supports greedy ASR with VAD cue boundaries.
+    var canUseNativeQwen: Bool {
+        nativeQwenEnabled && effectiveASREngine == .qwen3
+            && !senseVoiceRichInfo && !diarizeSpeakers && !alignWords && !punctuate && !denoise
+            && mimoTemperature == 0 && mimoTopP == 1 && mimoTopK == 0
+            && minConfidence == 0
+    }
+
+    var nativeQwenModelDirectory: URL? {
+        let selected = submittedModel
+        if selected.hasPrefix("/") || selected.hasPrefix("~") {
+            return URL(fileURLWithPath: (selected as NSString).expandingTildeInPath)
+        }
+        // Only map the known default repo to its installed counterpart.
+        if selected == "mlx-community/Qwen3-ASR-1.7B-8bit",
+           let info = currentModelInfo, info.localModelAvailable {
+            return URL(fileURLWithPath: info.localModel)
+        }
+        return nil
+    }
     var modelCatalog: [ASRModelInfo] = []
     var format: OutputFormat = .srt
     var recognitionLanguage: RecognitionLanguage = .auto
@@ -89,8 +144,7 @@ final class TranscriptionSettings {
     }
 
     func apply(config: AppConfig) {
-        modelCatalog = config.models ?? []
-        vadCatalog = config.vadEngines ?? []
+        refreshCatalog(config: config)
         asrEngine = sanitizedASREngine(config.defaultASREngine ?? .fireredasr2)
         vadEngine = sanitizedVADEngine(config.defaultVADEngine ?? .pyannoteMLX)
         model = config.defaultModel
@@ -107,6 +161,13 @@ final class TranscriptionSettings {
         if !restorePersistedSettings() {
             applyModelSpecificDefaults()
         }
+    }
+
+    /// Refresh capabilities without resetting options chosen for the current job.
+    func refreshCatalog(config: AppConfig) {
+        backendSupportsNativeSegments = config.supportsNativeSegments ?? false
+        modelCatalog = config.models ?? []
+        vadCatalog = config.vadEngines ?? []
     }
 
     var effectiveASREngine: ASREngine {

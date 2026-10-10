@@ -2,29 +2,898 @@ import AppKit
 import AVFoundation
 import NaturalLanguage
 import SwiftUI
+import UniformTypeIdentifiers
 
-struct SubtitleWord: Codable, Equatable {
+struct SubtitleWord: Codable, Equatable, Sendable {
     var text: String
     var start: Double
     var end: Double
 }
 
-struct SubtitleCue: Identifiable, Codable, Equatable {
+struct SubtitleBilingualText: Codable, Equatable, Sendable {
+    var source: String
+    var translation: String
+    var translationFirst = false
+
+    var combined: String {
+        let first = translationFirst ? translation : source
+        let second = translationFirst ? source : translation
+        if first.isEmpty { return second }
+        if second.isEmpty || first == second { return first }
+        return first + "\n" + second
+    }
+}
+
+struct SubtitleCue: Identifiable, Codable, Equatable, Sendable {
     var id = UUID()
     var index: Int
     var start: Double
     var end: Double
-    var text: String
+    var text: String {
+        didSet {
+            // Generic find/style edits operate on the visible text.
+            // Do not silently retain an obsolete source/translation mapping.
+            if let bilingual, bilingual.combined != text { self.bilingual = nil }
+        }
+    }
     var confidence: Double?
     var speaker: String?
     var words: [SubtitleWord]?
+    var bilingual: SubtitleBilingualText?
+
+    var bilingualText: SubtitleBilingualText? {
+        guard let bilingual, bilingual.combined == text else { return nil }
+        return bilingual
+    }
+
+    var translationSourceText: String { bilingualText?.source ?? text }
+
+    mutating func setBilingual(_ value: SubtitleBilingualText) {
+        text = value.combined
+        bilingual = value
+    }
 
     var duration: Double {
         max(0, end - start)
     }
+
+    func duplicatedAfterEnd() -> SubtitleCue {
+        var copy = self
+        copy.id = UUID()
+        copy.index = index + 1
+        copy.start = max(0, end)
+        copy.end = copy.start + max(0.5, duration)
+        copy.bilingual = bilingualText
+        // The new interval has not been aligned to speech.
+        copy.words = nil
+        return copy
+    }
 }
 
-private struct TimelineCenterRequest: Equatable {
+/// Compare just the edited scalars before writing through a collection binding.
+/// The caller has already applied snapping and media/minimum-duration limits.
+enum SubtitleCueTimingUpdate {
+    static func updated(_ cue: SubtitleCue, start: Double, end: Double) -> SubtitleCue? {
+        guard start.isFinite, end.isFinite,
+              cue.start != start || cue.end != end else { return nil }
+        var result = cue
+        result.start = start
+        result.end = end
+        return result
+    }
+}
+
+struct SubtitleCueIndex {
+    var positions: [UUID: Int] = [:]
+    var maximumEnd = 0.001
+    var speakers: [String] = []
+    var speechSeconds = 0.0
+    private var starts: [Double] = []
+    private var prefixEnds: [Double] = []
+    private var ordered = true
+
+    init(_ cues: [SubtitleCue]) {
+        positions.reserveCapacity(cues.count)
+        var seen: Set<String> = []
+        for (index, cue) in cues.enumerated() {
+            if !cue.start.isFinite || !cue.end.isFinite || cue.end < cue.start
+                || (starts.last.map { $0 > cue.start } ?? false) { ordered = false }
+            starts.append(cue.start)
+            prefixEnds.append(max(prefixEnds.last ?? -.infinity, cue.end))
+            if cue.duration.isFinite { speechSeconds += cue.duration }
+            if positions[cue.id] == nil { positions[cue.id] = index }
+            if cue.end.isFinite { maximumEnd = max(maximumEnd, cue.end) }
+            let speaker = cue.speaker?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !speaker.isEmpty, seen.insert(speaker).inserted { speakers.append(speaker) }
+        }
+    }
+
+    func visibleRange(lower: Double, upper: Double) -> Range<Int> {
+        guard ordered, lower.isFinite, upper.isFinite, lower <= upper else { return 0..<starts.count }
+        func firstIndex(_ values: [Double], after value: Double, inclusive: Bool) -> Int {
+            var low = 0, high = values.count
+            while low < high {
+                let middle = low + (high - low) / 2
+                if inclusive ? values[middle] < value : values[middle] <= value { low = middle + 1 }
+                else { high = middle }
+            }
+            return low
+        }
+        let start = firstIndex(prefixEnds, after: lower, inclusive: true)
+        let end = firstIndex(starts, after: upper, inclusive: false)
+        return min(start, end)..<end
+    }
+}
+
+/// Memoization only: this cache does not publish UI state while a body is read.
+/// All access stays on the editor's main actor; each revision is scanned once.
+@MainActor
+final class SubtitleCueIndexCache {
+    private var revision: UUID?
+    private var index = SubtitleCueIndex([])
+
+    func value(for cues: [SubtitleCue], revision: UUID) -> SubtitleCueIndex {
+        if self.revision != revision {
+            index = SubtitleCueIndex(cues)
+            self.revision = revision
+        }
+        return index
+    }
+}
+
+enum SubtitleCueStyle {
+    enum Scope: String, CaseIterable, Identifiable {
+        case all, source, translation
+        var id: String { rawValue }
+        var titleKey: String { "editor.findScope.\(rawValue)" }
+    }
+
+    enum Operation {
+        case toggleTag(String), color(String), clear
+    }
+
+    static func texts(in cue: SubtitleCue, scope: Scope) -> [String] {
+        if let pair = cue.bilingualText {
+            switch scope {
+            case .all: return [pair.source, pair.translation]
+            case .source: return [pair.source]
+            case .translation: return [pair.translation]
+            }
+        }
+        return scope == .translation ? [] : [cue.text]
+    }
+
+    static func hasTag(_ tag: String, in cue: SubtitleCue, scope: Scope) -> Bool {
+        let fields = texts(in: cue, scope: scope).filter { !$0.isEmpty }
+        return !fields.isEmpty && fields.allSatisfy { unwrappedMarkupText($0, tag: tag) != nil }
+    }
+
+    static func hasColor(in cue: SubtitleCue, scope: Scope) -> Bool {
+        let fields = texts(in: cue, scope: scope).filter { !$0.isEmpty }
+        return !fields.isEmpty && fields.allSatisfy { unwrappedFontText($0) != nil }
+    }
+
+    static func applying(_ operation: Operation, to cue: SubtitleCue, scope: Scope = .all) -> SubtitleCue {
+        let removeTag: Bool
+        if case let .toggleTag(tag) = operation {
+            removeTag = hasTag(tag, in: cue, scope: scope)
+        } else { removeTag = false }
+        func transform(_ text: String) -> String {
+            guard !text.isEmpty else { return text }
+            switch operation {
+            case let .toggleTag(tag):
+                let body = unwrappedMarkupText(text, tag: tag)
+                // Mixed lanes become uniformly styled; already styled lanes are not wrapped twice.
+                return removeTag ? (body ?? text) : (body == nil ? "<\(tag)>\(text)</\(tag)>" : text)
+            case let .color(hex): return fontColoredText(text, hex: hex)
+            case .clear: return clearMarkup(in: text)
+            }
+        }
+        var result = cue
+        if var pair = cue.bilingualText {
+            if scope != .translation { pair.source = transform(pair.source) }
+            if scope != .source { pair.translation = transform(pair.translation) }
+            result.setBilingual(pair)
+        } else if scope != .translation {
+            result.text = transform(cue.text)
+        }
+        // Styling leaves speech content and word alignment intact.
+        return result
+    }
+
+    static func clearMarkup(in text: String) -> String {
+        var text = text.replacingOccurrences(
+            of: #"<font\b[^>]*>"#,
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        )
+        for tag in ["b", "i", "u", "font"] {
+            text = text.replacingOccurrences(
+                of: "</\(tag)>",
+                with: "",
+                options: [.caseInsensitive]
+            )
+            text = text.replacingOccurrences(
+                of: "<\(tag)>",
+                with: "",
+                options: [.caseInsensitive]
+            )
+        }
+        return text
+    }
+
+    static func fontMarkupRemoved(from text: String) -> String {
+        text.replacingOccurrences(
+            of: #"<font\b[^>]*>"#,
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        )
+        .replacingOccurrences(
+            of: "</font>",
+            with: "",
+            options: [.caseInsensitive]
+        )
+    }
+
+    static func fontColoredText(_ text: String, hex: String) -> String {
+        let body = fontMarkupRemoved(from: text).trimmingCharacters(in: .whitespacesAndNewlines)
+        return body.isEmpty ? "" : "<font color=\"\(hex)\">\(body)</font>"
+    }
+
+    static func unwrappedMarkupText(_ text: String, tag: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+        let open = "<\(tag)>"
+        let close = "</\(tag)>"
+        guard lower.hasPrefix(open), lower.hasSuffix(close) else { return nil }
+        guard hasSingleOuterWrapper(trimmed, tag: tag) else { return nil }
+        let start = trimmed.index(trimmed.startIndex, offsetBy: open.count)
+        let end = trimmed.index(trimmed.endIndex, offsetBy: -close.count)
+        guard start <= end else { return nil }
+        return String(trimmed[start..<end])
+    }
+
+    static func unwrappedFontText(_ text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+        guard lower.hasPrefix("<font "), lower.hasSuffix("</font>"),
+              let openEnd = trimmed.firstIndex(of: ">") else {
+            return nil
+        }
+        guard hasSingleOuterWrapper(trimmed, tag: "font") else { return nil }
+        let start = trimmed.index(after: openEnd)
+        let end = trimmed.index(trimmed.endIndex, offsetBy: -"</font>".count)
+        guard start <= end else { return nil }
+        return String(trimmed[start..<end])
+    }
+
+    private static func hasSingleOuterWrapper(_ text: String, tag: String) -> Bool {
+        // Adjacent wrappers (e.g. after merging cues) are not one outer wrapper.
+        let name = NSRegularExpression.escapedPattern(for: tag)
+        guard let regex = try? NSRegularExpression(pattern: "</?\(name)(?:\\s[^>]*)?>", options: .caseInsensitive) else { return false }
+        let fullRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        var depth = 0
+        for match in regex.matches(in: text, range: fullRange) {
+            guard let range = Range(match.range, in: text) else { return false }
+            depth += text[range].hasPrefix("</") ? -1 : 1
+            if depth < 0 || (depth == 0 && NSMaxRange(match.range) != fullRange.length) { return false }
+        }
+        return depth == 0
+    }
+}
+
+enum SubtitleCueMerge {
+    /// Merge adjacent rows without inferring languages from plain text or
+    /// discarding distinct speaker attribution. Keep the first cue's identity.
+    static func merged(_ first: SubtitleCue, _ second: SubtitleCue) -> SubtitleCue? {
+        guard first.id != second.id,
+              first.start.isFinite, first.end.isFinite, second.start.isFinite, second.end.isFinite,
+              first.start >= 0, second.start >= first.start,
+              first.end > first.start, second.end > second.start,
+              speaker(first.speaker) == speaker(second.speaker) else { return nil }
+        var result = first
+        result.end = max(first.end, second.end)
+        switch (first.bilingualText, second.bilingualText) {
+        case let (.some(a), .some(b)):
+            result.setBilingual(.init(source: joined(a.source, b.source),
+                                      translation: joined(a.translation, b.translation),
+                                      translationFirst: a.translationFirst))
+        case (nil, nil):
+            result.text = joined(first.text, second.text)
+        default:
+            return nil
+        }
+        if let a = first.confidence, let b = second.confidence, a.isFinite, b.isFinite {
+            result.confidence = min(a, b)
+        } else { result.confidence = nil }
+        // Partial word timing must not masquerade as a complete alignment.
+        if let a = first.words, !a.isEmpty, let b = second.words, !b.isEmpty {
+            let words = (a + b).sorted { $0.start < $1.start }
+            result.words = words.allSatisfy {
+                $0.start.isFinite && $0.end.isFinite && $0.start >= result.start
+                    && $0.end >= $0.start && $0.end <= result.end
+            } ? words : nil
+        } else { result.words = nil }
+        return result
+    }
+
+    private static func speaker(_ name: String?) -> String {
+        (name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func joined(_ first: String, _ second: String) -> String {
+        if first.isEmpty { return second }
+        if second.isEmpty { return first }
+        return first + (first.hasSuffix("\n") || second.hasPrefix("\n") ? "" : "\n") + second
+    }
+}
+
+enum SubtitleCueSplit {
+    /// Visible character boundaries, with supported subtitle markup balanced on both sides.
+    struct FormattedText {
+        private struct Tag {
+            let name: String
+            let opening: String
+        }
+        private struct Span {
+            let text: String
+            let tags: [Tag]
+        }
+        private var spans: [Span] = []
+        let plain: String
+
+        init?(_ raw: String) {
+            // Tokenize tags in UTF-16 so a combining mark immediately after a
+            // closing tag cannot become part of the tag's final ">" grapheme.
+            guard !raw.contains("{\\"),
+                  let regex = try? NSRegularExpression(pattern: "<[^>]*>") else { return nil }
+            let text = raw as NSString
+            var stack: [Tag] = []
+            var cursor = 0
+            var visible = ""
+            for match in regex.matches(in: raw, range: NSRange(location: 0, length: text.length)) {
+                let fragment = text.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
+                if !fragment.isEmpty {
+                    spans.append(Span(text: fragment, tags: stack))
+                    visible += fragment
+                }
+                let token = text.substring(with: match.range)
+                let lower = token.lowercased()
+                if ["<b>", "<i>", "<u>"].contains(lower) {
+                    stack.append(Tag(name: String(lower.dropFirst().dropLast()), opening: token))
+                } else if lower.hasPrefix("<font ") {
+                    stack.append(Tag(name: "font", opening: token))
+                } else if ["</b>", "</i>", "</u>", "</font>"].contains(lower) {
+                    let name = String(lower.dropFirst(2).dropLast())
+                    guard stack.last?.name == name else { return nil }
+                    stack.removeLast()
+                } else {
+                    // Do not silently corrupt unsupported formatting.
+                    return nil
+                }
+                cursor = NSMaxRange(match.range)
+            }
+            guard stack.isEmpty else { return nil }
+            let tail = text.substring(from: cursor)
+            if !tail.isEmpty {
+                spans.append(Span(text: tail, tags: []))
+                visible += tail
+            }
+            plain = visible
+        }
+
+        func split(at offset: Int) -> (String, String)? {
+            guard (0...plain.count).contains(offset) else { return nil }
+            // Use the full visible string's grapheme boundary even when a combining
+            // character spans two styled runs. Never cut an emoji or surrogate pair.
+            let boundary = plain.index(plain.startIndex, offsetBy: offset)
+            var remaining = plain[..<boundary].utf16.count
+            var left = "", right = ""
+            for span in spans {
+                let nsText = span.text as NSString
+                let count = min(remaining, nsText.length)
+                func wrapped(_ text: String) -> String {
+                    guard !text.isEmpty else { return "" }
+                    return span.tags.map(\.opening).joined() + text
+                        + span.tags.reversed().map { "</\($0.name)>" }.joined()
+                }
+                left += wrapped(nsText.substring(to: count))
+                right += wrapped(nsText.substring(from: count))
+                remaining -= count
+            }
+            return (left, right)
+        }
+    }
+
+    static func canSplit(_ cue: SubtitleCue, at time: Double) -> Bool {
+        cue.start.isFinite && cue.end.isFinite && time.isFinite && cue.start >= 0
+            && time >= cue.start + 0.05 && time <= cue.end - 0.05
+    }
+
+    /// Suggest only when the complete word alignment maps exactly to the source
+    /// (apart from whitespace) and no word crosses the playhead.
+    static func suggestedSourceOffset(_ cue: SubtitleCue, at time: Double) -> Int? {
+        guard canSplit(cue, at: time), let words = cue.words, !words.isEmpty,
+              let source = FormattedText(cue.translationSourceText) else { return nil }
+        let text = source.plain
+        var cursor = text.startIndex
+        var boundary = cursor
+        var previousEnd = cue.start
+        for word in words {
+            let token = word.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !token.isEmpty, word.start.isFinite, word.end.isFinite,
+                  word.start >= previousEnd, word.end >= word.start, word.end <= cue.end,
+                  !(word.start < time && word.end > time),
+                  let range = text.range(of: token, range: cursor..<text.endIndex),
+                  text[cursor..<range.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { return nil }
+            if word.end <= time { boundary = range.upperBound }
+            cursor = range.upperBound
+            previousEnd = word.end
+        }
+        guard text[cursor...].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              text.indices.contains(boundary) || boundary == text.endIndex else { return nil }
+        return text.distance(from: text.startIndex, to: boundary)
+    }
+
+    static func split(_ cue: SubtitleCue, at time: Double, sourceOffset: Int,
+                      translationOffset: Int? = nil) -> (SubtitleCue, SubtitleCue)? {
+        guard canSplit(cue, at: time),
+              let source = FormattedText(cue.translationSourceText),
+              let a = source.split(at: sourceOffset) else { return nil }
+        var first = cue, second = cue
+        first.end = time
+        second.id = UUID()
+        second.index = cue.index + 1
+        second.start = time
+        if let pair = cue.bilingualText {
+            guard let translation = FormattedText(pair.translation),
+                  let offset = translationOffset ?? (translation.plain.isEmpty ? 0 : nil),
+                  let b = translation.split(at: offset) else { return nil }
+            first.setBilingual(.init(source: a.0, translation: b.0, translationFirst: pair.translationFirst))
+            second.setBilingual(.init(source: a.1, translation: b.1, translationFirst: pair.translationFirst))
+        } else {
+            first.text = a.0
+            second.text = a.1
+        }
+        guard [first, second].allSatisfy({ cue in
+            !(FormattedText(cue.text)?.plain ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }) else { return nil }
+        first.words = nil
+        second.words = nil
+        if suggestedSourceOffset(cue, at: time) == sourceOffset, let words = cue.words {
+            let before = words.filter { $0.end <= time }
+            let after = words.filter { $0.end > time }
+            first.words = before.isEmpty ? nil : before
+            second.words = after.isEmpty ? nil : after
+        }
+        return (first, second)
+    }
+}
+
+enum SubtitleBatchEdit {
+    enum Operation {
+        case shift(Double)
+        case speaker(String)
+        case addTag(String, SubtitleCueStyle.Scope)
+        case color(String, SubtitleCueStyle.Scope)
+        case clearStyle(SubtitleCueStyle.Scope)
+    }
+
+    /// Validate the entire selection before returning any changes. Never clamp
+    /// negative times independently, which would silently alter cue durations.
+    static func applying(_ operation: Operation, to cues: [SubtitleCue],
+                         speakerColors: [String: String] = [:]) -> [SubtitleCue]? {
+        var result: [SubtitleCue] = []
+        for original in cues {
+            var cue = original
+            switch operation {
+            case let .shift(delta):
+                guard delta.isFinite, original.start.isFinite, original.end.isFinite,
+                      original.start >= 0, original.end > original.start,
+                      (original.start + delta).isFinite, (original.end + delta).isFinite,
+                      original.start + delta >= 0,
+                      original.end + delta > original.start + delta else { return nil }
+                if delta == 0 { result.append(cue); continue }
+                cue.start += delta
+                cue.end += delta
+                if let words = original.words {
+                    if words.allSatisfy({ $0.start.isFinite && $0.end.isFinite
+                        && $0.start >= original.start && $0.end >= $0.start && $0.end <= original.end }) {
+                        cue.words = words.map { .init(text: $0.text, start: $0.start + delta, end: $0.end + delta) }
+                    } else { cue.words = nil }
+                }
+            case let .speaker(raw):
+                let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                cue.speaker = name.isEmpty ? nil : name
+                if let color = speakerColors[name], !name.isEmpty {
+                    cue = SubtitleCueStyle.applying(.color(color), to: cue)
+                }
+            case let .addTag(tag, scope):
+                guard ["b", "i", "u"].contains(tag) else { return nil }
+                // Mixed selections become uniformly styled instead of inverting
+                // each cue separately. Already styled fields remain unchanged.
+                if !SubtitleCueStyle.hasTag(tag, in: cue, scope: scope) {
+                    cue = SubtitleCueStyle.applying(.toggleTag(tag), to: cue, scope: scope)
+                }
+            case let .color(hex, scope):
+                cue = SubtitleCueStyle.applying(.color(hex), to: cue, scope: scope)
+            case let .clearStyle(scope):
+                cue = SubtitleCueStyle.applying(.clear, to: cue, scope: scope)
+            }
+            result.append(cue)
+        }
+        return result
+    }
+
+    static func replacing(_ originals: [SubtitleCue], with replacements: [SubtitleCue],
+                          in current: [SubtitleCue]) -> [SubtitleCue]? {
+        guard originals.count == replacements.count,
+              Set(originals.map(\.id)).count == originals.count,
+              Set(current.map(\.id)).count == current.count,
+              zip(originals, replacements).allSatisfy({ $0.id == $1.id }) else { return nil }
+        let byID = Dictionary(uniqueKeysWithValues: current.map { ($0.id, $0) })
+        guard originals.allSatisfy({ byID[$0.id] == $0 }) else { return nil }
+        let updates = Dictionary(uniqueKeysWithValues: replacements.map { ($0.id, $0) })
+        return current.map { updates[$0.id] ?? $0 }
+    }
+}
+
+private struct SubtitleBatchRequest: Identifiable {
+    let id = UUID()
+    let fileID: UUID
+    let cues: [SubtitleCue]
+    let speakerColors: [String: String]
+}
+
+private struct SubtitleSplitRequest: Identifiable {
+    let id = UUID()
+    let fileURL: URL
+    let cue: SubtitleCue
+    let time: Double
+}
+
+enum SubtitleSearchScope: String, CaseIterable, Identifiable {
+    case all, source, translation
+    var id: String { rawValue }
+    var titleKey: String { "editor.findScope.\(rawValue)" }
+}
+
+struct SubtitleTextSearch {
+    let query: String
+    let replacement: String
+    let matchCase: Bool
+    let scope: SubtitleSearchScope
+
+    private func ranges(in text: String) -> [Range<String.Index>] {
+        guard !query.isEmpty else { return [] }
+        var result: [Range<String.Index>] = []
+        var remaining = text.startIndex..<text.endIndex
+        let options: String.CompareOptions = matchCase ? [] : [.caseInsensitive, .diacriticInsensitive]
+        while let range = text.range(of: query, options: options, range: remaining), range.lowerBound < range.upperBound {
+            result.append(range)
+            remaining = range.upperBound..<text.endIndex
+        }
+        return result
+    }
+
+    func count(in cue: SubtitleCue) -> Int {
+        guard let pair = cue.bilingualText else {
+            return scope == .translation ? 0 : ranges(in: cue.text).count
+        }
+        return (scope == .translation ? 0 : ranges(in: pair.source).count)
+            + (scope == .source ? 0 : ranges(in: pair.translation).count)
+    }
+
+    func replacing(in cue: SubtitleCue, all: Bool) -> (cue: SubtitleCue, count: Int) {
+        var remaining = all ? Int.max : 1
+        var total = 0
+        func replace(_ text: String) -> String {
+            guard remaining > 0 else { return text }
+            let matches = ranges(in: text).prefix(remaining)
+            guard !matches.isEmpty else { return text }
+            // Build from original slices, preserving Unicode indices and never
+            // searching newly inserted replacement text.
+            var output = ""
+            var cursor = text.startIndex
+            for range in matches {
+                output += text[cursor..<range.lowerBound]
+                output += replacement
+                cursor = range.upperBound
+            }
+            output += text[cursor...]
+            remaining -= matches.count
+            total += matches.count
+            return output
+        }
+        var result = cue
+        if var pair = cue.bilingualText {
+            let originalSource = pair.source
+            if pair.translationFirst {
+                if scope != .source { pair.translation = replace(pair.translation) }
+                if scope != .translation { pair.source = replace(pair.source) }
+            } else {
+                if scope != .translation { pair.source = replace(pair.source) }
+                if scope != .source { pair.translation = replace(pair.translation) }
+            }
+            result.setBilingual(pair)
+            if pair.source != originalSource { result.words = nil }
+        } else if scope != .translation {
+            result.text = replace(cue.text)
+            if result.text != cue.text { result.words = nil }
+        }
+        return total == 0 ? (cue, 0) : (result, total)
+    }
+}
+
+/// Immutable gesture snapshot. Equal-distance ties retain document/edge order.
+struct TimelineSnapIndex: Sendable {
+    struct Edge: Sendable {
+        let time: Double
+        let order: Int
+    }
+    private let edges: [Edge]
+
+    init(times: [Double]) {
+        var sorted: [Edge] = []
+        sorted.reserveCapacity(times.count)
+        for (order, time) in times.enumerated() where time.isFinite {
+            sorted.append(Edge(time: time, order: order))
+        }
+        sorted.sort { $0.time == $1.time ? $0.order < $1.order : $0.time < $1.time }
+        var unique: [Edge] = []
+        for edge in sorted where unique.last?.time != edge.time { unique.append(edge) }
+        edges = unique
+    }
+
+    init(cues: [SubtitleCue], excluding cueID: UUID) {
+        self.init(times: cues.filter { $0.id != cueID }.flatMap { [$0.start, $0.end] })
+    }
+
+    private func nearest(to target: Double) -> Edge? {
+        guard target.isFinite, !edges.isEmpty else { return nil }
+        var low = 0, high = edges.count
+        while low < high {
+            let middle = low + (high - low) / 2
+            if edges[middle].time < target { low = middle + 1 } else { high = middle }
+        }
+        if low == 0 { return edges[0] }
+        if low == edges.count { return edges[low - 1] }
+        let left = edges[low - 1], right = edges[low]
+        let a = abs(left.time - target), b = abs(right.time - target)
+        return a == b ? (left.order < right.order ? left : right) : (a < b ? left : right)
+    }
+
+    func snappedTime(_ target: Double, threshold: Double) -> Double? {
+        guard let edge = nearest(to: target), abs(edge.time - target) <= threshold else { return nil }
+        return edge.time
+    }
+
+    func snappedStart(start: Double, end: Double, threshold: Double) -> Double? {
+        let first = nearest(to: start), last = nearest(to: end)
+        var candidate = first
+        var movingEnd = false
+        if let last {
+            let a = first.map { abs($0.time - start) } ?? .infinity
+            let b = abs(last.time - end)
+            if b < a || (b == a && last.order < (first?.order ?? Int.max)) {
+                candidate = last
+                movingEnd = true
+            }
+        }
+        guard let candidate,
+              abs(candidate.time - (movingEnd ? end : start)) <= threshold else { return nil }
+        return movingEnd ? candidate.time - (end - start) : candidate.time
+    }
+}
+
+struct TimelineDensityBins: Sendable {
+    let id = UUID()
+    let counts: [Int]
+    let speakerCounts: [Int]
+    let maximum: Int
+
+    init(cues: [SubtitleCue], duration: Double, binCount: Int, speaker: String?) {
+        let count = max(1, binCount)
+        var deltas = [Int](repeating: 0, count: count + 1)
+        var speakerDeltas = deltas
+        let duration = duration.isFinite ? max(duration, 0.001) : 0.001
+        func bin(_ time: Double, roundUp: Bool) -> Int {
+            // Clamp before conversion: very large finite timestamps can overflow Int.
+            let scaled = min(Double(count - 1), max(0, (time / duration) * Double(count)))
+            return Int(roundUp ? ceil(scaled) : scaled)
+        }
+        for cue in cues where cue.start.isFinite && cue.end.isFinite {
+            let lower = bin(cue.start, roundUp: false)
+            let upper = max(lower, bin(cue.end, roundUp: true))
+            deltas[lower] += 1
+            deltas[upper + 1] -= 1
+            let name = cue.speaker?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if let speaker, !name.isEmpty, name == speaker {
+                speakerDeltas[lower] += 1
+                speakerDeltas[upper + 1] -= 1
+            }
+        }
+        var running = 0, speaking = 0
+        var counts: [Int] = [], speakerCounts: [Int] = []
+        for index in 0..<count {
+            running += deltas[index]
+            speaking += speakerDeltas[index]
+            counts.append(running)
+            speakerCounts.append(speaking)
+        }
+        self.counts = counts
+        self.speakerCounts = speakerCounts
+        maximum = max(counts.max() ?? 1, 1)
+    }
+}
+
+/// One density resolution per mounted canvas; playback/selection do not invalidate it.
+@MainActor
+final class TimelineDensityCache {
+    private struct Key: Equatable {
+        let revision: UUID
+        let duration: Double
+        let binCount: Int
+        let speaker: String?
+    }
+    private var key: Key?
+    private var bins: TimelineDensityBins?
+
+    func value(cues: [SubtitleCue], revision: UUID, duration: Double,
+               binCount: Int, speaker: String?) -> TimelineDensityBins {
+        let next = Key(revision: revision, duration: duration.isFinite ? duration : 0,
+                       binCount: binCount, speaker: speaker)
+        if key == next, let bins { return bins }
+        let result = TimelineDensityBins(cues: cues, duration: duration, binCount: binCount, speaker: speaker)
+        bins = result
+        key = next
+        return result
+    }
+}
+
+struct TimelineMarkerSet: Equatable, Sendable {
+    struct Dot: Sendable { let cueID: UUID; let time: Double }
+    let id = UUID()
+    let dots: [Dot]
+    private let timesByID: [UUID: Double]
+    static let empty = TimelineMarkerSet([])
+
+    init(_ cues: [SubtitleCue]) {
+        dots = cues.compactMap { cue in
+            let time = cue.start / 2 + cue.end / 2
+            return time.isFinite ? Dot(cueID: cue.id, time: time) : nil
+        }.sorted { $0.time < $1.time }
+        timesByID = Dictionary(dots.map { ($0.cueID, $0.time) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.id == rhs.id }
+    func time(for cueID: UUID) -> Double? { timesByID[cueID] }
+
+    func visible(lower: Double, upper: Double) -> ArraySlice<Dot> {
+        guard lower.isFinite, upper.isFinite, lower <= upper else { return dots[...] }
+        var low = 0, high = dots.count
+        while low < high {
+            let mid = low + (high - low) / 2
+            if dots[mid].time < lower { low = mid + 1 } else { high = mid }
+        }
+        let start = low
+        high = dots.count
+        while low < high {
+            let mid = low + (high - low) / 2
+            if dots[mid].time <= upper { low = mid + 1 } else { high = mid }
+        }
+        return dots[start..<low]
+    }
+}
+
+struct TimelineOverlapMap: Sendable {
+    struct Span: Equatable, Sendable {
+        let start: Double
+        let end: Double
+        let pairs: Int
+        // Equivalent fill opacity to layering one 0.42-opacity rectangle per pair.
+        var fillOpacity: Double { 1 - pow(1 - 0.42, Double(pairs)) }
+        var strokeOpacity: Double { 1 - pow(1 - 0.85, Double(pairs)) }
+    }
+    let spans: [Span]
+
+    init(_ cues: [SubtitleCue]) {
+        var events: [(time: Double, delta: Int)] = []
+        events.reserveCapacity(cues.count * 2)
+        for cue in cues where cue.start.isFinite && cue.end.isFinite && cue.end > cue.start {
+            events.append((cue.start, 1))
+            events.append((cue.end, -1))
+        }
+        events.sort { $0.time < $1.time }
+        var result: [Span] = []
+        var active = 0, index = 0
+        var previous = events.first?.time ?? 0
+        while index < events.count {
+            let time = events[index].time
+            if active >= 2, previous < time {
+                result.append(Span(start: previous, end: time, pairs: active * (active - 1) / 2))
+            }
+            // Process equal-time boundaries together: touching cues don't overlap.
+            while index < events.count, events[index].time == time {
+                active += events[index].delta
+                index += 1
+            }
+            previous = time
+        }
+        spans = result
+    }
+
+    func visible(lower: Double, upper: Double) -> ArraySlice<Span> {
+        guard lower.isFinite, upper.isFinite, lower <= upper else { return spans[...] }
+        var low = 0, high = spans.count
+        while low < high {
+            let mid = low + (high - low) / 2
+            if spans[mid].end <= lower { low = mid + 1 } else { high = mid }
+        }
+        let start = low
+        high = spans.count
+        while low < high {
+            let mid = low + (high - low) / 2
+            if spans[mid].start < upper { low = mid + 1 } else { high = mid }
+        }
+        return spans[start..<low]
+    }
+}
+
+@MainActor
+final class TimelineOverlapCache {
+    private var revision: UUID?
+    private var result = TimelineOverlapMap([])
+    func value(cues: [SubtitleCue], revision: UUID) -> TimelineOverlapMap {
+        if self.revision != revision {
+            result = TimelineOverlapMap(cues)
+            self.revision = revision
+        }
+        return result
+    }
+}
+
+@MainActor
+final class SubtitleSearchCache {
+    struct Key: Equatable {
+        let revision: UUID
+        let query: String
+        let matchCase: Bool
+        let scope: SubtitleSearchScope
+        let literalHighlight: Bool
+    }
+    struct Result {
+        var count = 0
+        var indices: [Int] = []
+        var cues: [SubtitleCue] = []
+        var markers = TimelineMarkerSet.empty
+    }
+    private var key: Key?
+    private var result = Result()
+
+    func value(cues: [SubtitleCue], revision: UUID, search: SubtitleTextSearch, literalHighlight: Bool = false) -> Result {
+        let requested = Key(revision: revision, query: search.query, matchCase: search.matchCase, scope: search.scope, literalHighlight: literalHighlight)
+        guard key != requested else { return result }
+        var updated = Result()
+        if !search.query.isEmpty {
+            for (index, cue) in cues.enumerated() {
+                let count = literalHighlight ? (cue.text.localizedCaseInsensitiveContains(search.query) ? 1 : 0) : search.count(in: cue)
+                if count > 0 {
+                    updated.count += count
+                    updated.indices.append(index)
+                    updated.cues.append(cue)
+                }
+            }
+        }
+        updated.markers = updated.cues.isEmpty ? .empty : TimelineMarkerSet(updated.cues)
+        key = requested
+        result = updated
+        return result
+    }
+}
+
+struct TimelineCenterRequest: Equatable {
     let cueID: SubtitleCue.ID
     let token = UUID()
 }
@@ -32,14 +901,63 @@ private struct TimelineCenterRequest: Equatable {
 enum TimingAdjustmentMode: String, CaseIterable, Identifiable {
     case shift
     case closeGaps
+    case calibrate
 
     var id: String { rawValue }
+}
+
+/// Two corresponding subtitle/media times define one positive affine mapping.
+/// Transform word timings with cues; never repair invalid output by clipping it.
+struct SubtitleTimingCalibration: Equatable {
+    var sourceFirst = 0.0
+    var targetFirst = 0.0
+    var sourceLast = 60.0
+    var targetLast = 60.0
+
+    enum Failure: String, Error {
+        case anchors = "timing.calibration.invalidAnchors"
+        case cue = "timing.calibration.invalidCue"
+        case result = "timing.calibration.invalidResult"
+    }
+
+    var scale: Double? {
+        let values = [sourceFirst, targetFirst, sourceLast, targetLast]
+        guard values.allSatisfy({ $0.isFinite && $0 >= 0 }),
+              sourceLast - sourceFirst >= 0.001, targetLast - targetFirst >= 0.001 else { return nil }
+        let value = (targetLast - targetFirst) / (sourceLast - sourceFirst)
+        return value.isFinite && value > 0 ? value : nil
+    }
+
+    func applying(to cues: [SubtitleCue]) throws -> [SubtitleCue] {
+        guard let scale else { throw Failure.anchors }
+        func map(_ time: Double) throws -> Double {
+            guard time.isFinite, time >= 0, time < Double(Int.max / 1000 - 1) else { throw Failure.cue }
+            let mapped = targetFirst + (time - sourceFirst) * scale
+            guard mapped.isFinite, mapped >= 0, mapped < Double(Int.max / 1000 - 1) else { throw Failure.result }
+            return (mapped * 1000).rounded() / 1000
+        }
+        return try cues.map { cue in
+            guard cue.end > cue.start else { throw Failure.cue }
+            var result = cue
+            result.start = try map(cue.start)
+            result.end = try map(cue.end)
+            // Export normalization enforces 50 ms. Reject shorter results so
+            // the preview and exported timing cannot silently diverge.
+            guard result.end - result.start >= 0.05 - 1e-9 else { throw Failure.result }
+            result.words = try cue.words?.map { word in
+                guard word.end >= word.start else { throw Failure.cue }
+                return try SubtitleWord(text: word.text, start: map(word.start), end: map(word.end))
+            }
+            return result
+        }
+    }
 }
 
 private struct SubtitleUndoSnapshot: Equatable {
     let cues: [SubtitleCue]
     let selectedCueID: SubtitleCue.ID?
     let speakerColors: [String: String]
+    let batchCueIDs: Set<SubtitleCue.ID>
 }
 
 @Observable
@@ -51,7 +969,39 @@ private final class SubtitleUndoController {
     }
 }
 
+/// Per-editor memoization; serialization is independent of playback/selection.
+@MainActor
+final class SubtitlePreviewCache {
+    private struct Key: Equatable {
+        let fileID: UUID
+        let revision: UUID
+        let format: OutputFormat
+    }
+    private var key: Key?
+    private var text = ""
+
+    func value(cues: [SubtitleCue], fileID: UUID, revision: UUID, format: OutputFormat) -> String {
+        let next = Key(fileID: fileID, revision: revision, format: format)
+        if key == next { return text }
+        text = SubtitleDocument.serialize(cues, format: format)
+        key = next
+        return text
+    }
+}
+
 enum SubtitleDocument {
+    static func monolingualCues(_ cues: [SubtitleCue], translated: Bool) -> [SubtitleCue] {
+        cues.map { cue in
+            guard let pair = cue.bilingualText else { return cue }
+            var result = cue
+            result.bilingual = nil
+            let hasTranslation = !pair.translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            result.text = translated && hasTranslation ? pair.translation : pair.source
+            if translated && hasTranslation { result.words = nil }
+            return result
+        }
+    }
+
     static func parse(_ text: String, format: OutputFormat) -> [SubtitleCue] {
         switch format {
         case .srt, .vtt:
@@ -66,7 +1016,7 @@ enum SubtitleDocument {
     }
 
     static func serialize(_ cues: [SubtitleCue], format: OutputFormat) -> String {
-        let normalized = normalize(cues)
+        let normalized = normalizedIfNeeded(cues) ?? cues
         switch format {
         case .srt:
             return normalized.map { cue in
@@ -114,7 +1064,8 @@ enum SubtitleDocument {
                         text: $0.text,
                         confidence: $0.confidence,
                         speaker: normalizedSpeakerName($0.speaker),
-                        words: $0.words
+                        words: $0.words,
+                        bilingual: $0.bilingualText
                     )
                 }
             )
@@ -126,6 +1077,19 @@ enum SubtitleDocument {
             }
             return string + "\n"
         }
+    }
+
+    /// Normalized timing/order can be checked without comparing text or word arrays.
+    static func normalizedIfNeeded(_ cues: [SubtitleCue]) -> [SubtitleCue]? {
+        var previousStart = -Double.infinity
+        for (offset, cue) in cues.enumerated() {
+            guard cue.start.isFinite, cue.end.isFinite, cue.index == offset + 1,
+                  cue.start >= 0, cue.start >= previousStart, cue.end >= cue.start + 0.05 else {
+                return normalize(cues)
+            }
+            previousStart = cue.start
+        }
+        return nil
     }
 
     static func normalize(_ cues: [SubtitleCue]) -> [SubtitleCue] {
@@ -159,8 +1123,12 @@ enum SubtitleDocument {
     }
 
     static func displayText(for cue: SubtitleCue) -> String {
-        let text = cue.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let speaker = normalizedSpeakerName(cue.speaker) else {
+        displayText(text: cue.text, speaker: cue.speaker)
+    }
+
+    static func displayText(text rawText: String, speaker rawSpeaker: String?) -> String {
+        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let speaker = normalizedSpeakerName(rawSpeaker) else {
             return text
         }
         return text.isEmpty ? "\(speaker):" : "\(speaker): \(text)"
@@ -327,7 +1295,8 @@ enum SubtitleDocument {
         }
         return payload.segments.map {
             let speaker = normalizedSpeakerName($0.speaker)
-            let speakerSplit = speaker == nil ? splitSpeakerPrefix(from: $0.text) : (speaker: nil, text: $0.text)
+            let isBilingual = $0.bilingual?.combined == $0.text
+            let speakerSplit = speaker == nil && !isBilingual ? splitSpeakerPrefix(from: $0.text) : (speaker: nil, text: $0.text)
             return SubtitleCue(
                 index: $0.index,
                 start: $0.start,
@@ -335,7 +1304,8 @@ enum SubtitleDocument {
                 text: speakerSplit.text,
                 confidence: $0.confidence,
                 speaker: speaker ?? speakerSplit.speaker,
-                words: $0.words
+                words: $0.words,
+                bilingual: $0.bilingual
             )
         }
     }
@@ -539,6 +1509,7 @@ private struct SubtitleJSONSegment: Codable {
     var confidence: Double?
     var speaker: String?
     var words: [SubtitleWord]?
+    var bilingual: SubtitleBilingualText?
 }
 
 struct SubtitleTermFrequency: Identifiable, Equatable, Sendable {
@@ -579,6 +1550,7 @@ enum SubtitleEmotionStats {
         var counts: [String: Int] = [:]
         var matched = 0
         for cue in cues {
+            if Task.isCancelled { return [] }
             guard let emoji = leadingEmotionEmoji(in: cue.text) else { continue }
             counts[emoji, default: 0] += 1
             matched += 1
@@ -607,6 +1579,7 @@ enum SubtitleTextStats {
         let cleanText = stripMarkup(from: sampledText(text, maxCharacters: maxAnalyzedCharacters))
         var counts: [String: Int] = [:]
         for token in tokenize(cleanText) where !stopWords.contains(token) {
+            if Task.isCancelled { return [] }
             counts[token, default: 0] += 1
         }
         return counts
@@ -625,6 +1598,7 @@ enum SubtitleTextStats {
         guard !cues.isEmpty, maxCharacters > 0 else { return "" }
         var totalCharacters = 0
         for cue in cues {
+            if Task.isCancelled { return "" }
             totalCharacters += cue.text.count + 1
             if totalCharacters > maxCharacters {
                 break
@@ -646,6 +1620,7 @@ enum SubtitleTextStats {
         for section in sections {
             var sectionCharacters = 0
             for cue in section {
+                if Task.isCancelled { return "" }
                 appendSample(
                     cue.text,
                     to: &result,
@@ -706,6 +1681,7 @@ enum SubtitleTextStats {
 
     private static func tokenize(_ text: String) -> [String] {
         let naturalTokens = naturalLanguageTokens(in: text)
+        guard !Task.isCancelled else { return [] }
         if !naturalTokens.isEmpty {
             return naturalTokens
         }
@@ -722,8 +1698,10 @@ enum SubtitleTextStats {
     }
 
     private static func naturalLanguageTokens(in text: String) -> [String] {
+        guard !Task.isCancelled else { return [] }
         let language = dominantLanguage(in: text)
         let tokenizerTokens = tokenizerTerms(in: text, language: language)
+        guard !Task.isCancelled else { return [] }
         let taggerTokens = taggerTerms(in: text, language: language)
         if taggerTokens.count >= tokenizerTokens.count / 2 {
             return taggerTokens
@@ -745,6 +1723,7 @@ enum SubtitleTextStats {
         tokenizer.string = text
         var tokens: [String] = []
         tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
+            if Task.isCancelled { return false }
             let token = normalizedToken(String(text[range]))
             if shouldKeepToken(token) {
                 tokens.append(token)
@@ -769,6 +1748,7 @@ enum SubtitleTextStats {
             scheme: .lexicalClass,
             options: options
         ) { tag, range in
+            if Task.isCancelled { return false }
             let rawToken = String(text[range])
             guard shouldKeepLexicalClass(tag, token: rawToken) else { return true }
             let lemma = tagger.tag(at: range.lowerBound, unit: .word, scheme: .lemma).0?.rawValue
@@ -909,6 +1889,29 @@ extension FileSlot {
     }
 }
 
+/// Playback-only ranges: padding never changes the saved subtitle timestamps.
+struct SubtitleReviewRange: Equatable {
+    let cueID: SubtitleCue.ID
+    let start: Double
+    let end: Double
+
+    static func plan(cues: [SubtitleCue], selectedID: SubtitleCue.ID, padding: Double,
+                     duration: Double, advance: Bool) -> [Self] {
+        guard let index = cues.firstIndex(where: { $0.id == selectedID }) else { return [] }
+        let context = padding.isFinite ? min(2, max(0, padding)) : 0
+        let limit = duration.isFinite && duration > 0 ? duration : Double.greatestFiniteMagnitude
+        let candidates = advance ? Array(cues[index...]) : [cues[index]]
+        return candidates.compactMap { cue in
+            guard cue.start.isFinite, cue.end.isFinite, cue.start >= 0,
+                  cue.end > cue.start, cue.start < limit else { return nil }
+            let start = max(0, cue.start - context)
+            let end = min(limit, cue.end + context)
+            guard end.isFinite, end > start else { return nil }
+            return Self(cueID: cue.id, start: start, end: end)
+        }
+    }
+}
+
 // MARK: - Shared playback controller
 
 @MainActor
@@ -923,8 +1926,32 @@ final class PlaybackController {
 
     @ObservationIgnored nonisolated(unsafe) private var timeObserverToken: Any?
     @ObservationIgnored nonisolated(unsafe) private var rateObservation: NSKeyValueObservation?
+    @ObservationIgnored nonisolated(unsafe) private var endObserverToken: (any NSObjectProtocol)?
     private var currentURL: URL?
     private var playbackEndTime: Double?
+    private var loopStartTime: Double?
+    private(set) var isLooping = false
+    private(set) var activeReviewCueID: SubtitleCue.ID?
+    private var reviewRanges: [SubtitleReviewRange] = []
+    private var reviewIndex = 0
+    private var rangeSeekInFlight = false
+    private var rangeGeneration = UUID()
+    private var directSeekGeneration = UUID()
+    private var directSeekInFlight = false
+    var isReviewing: Bool { activeReviewCueID != nil }
+
+    private func clearRangePlayback() {
+        directSeekGeneration = UUID()
+        directSeekInFlight = false
+        playbackEndTime = nil
+        loopStartTime = nil
+        isLooping = false
+        activeReviewCueID = nil
+        reviewRanges = []
+        reviewIndex = 0
+        rangeSeekInFlight = false
+        rangeGeneration = UUID()
+    }
 
     init() {
         player.automaticallyWaitsToMinimizeStalling = true
@@ -935,6 +1962,7 @@ final class PlaybackController {
         if let token = timeObserverToken {
             player.removeTimeObserver(token)
         }
+        if let endObserverToken { NotificationCenter.default.removeObserver(endObserverToken) }
         rateObservation?.invalidate()
         rateObservation = nil
         player.pause()
@@ -947,7 +1975,7 @@ final class PlaybackController {
         currentTime = 0
         duration = 0
         hasVideo = false
-        playbackEndTime = nil
+        clearRangePlayback()
         player.pause()
         player.replaceCurrentItem(with: nil)
 
@@ -985,40 +2013,100 @@ final class PlaybackController {
         let target = max(0, seconds.isFinite ? seconds : 0)
         let clamped = duration > 0 ? min(target, duration) : target
         currentTime = clamped
+        clearRangePlayback()
         if pause {
-            playbackEndTime = nil
             player.pause()
         }
         let time = CMTime(seconds: clamped, preferredTimescale: 600)
-        player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
+        seekPlayer(to: time, tolerance: .zero)
     }
 
     func scrub(to seconds: Double) {
         let target = max(0, seconds.isFinite ? seconds : 0)
         let clamped = duration > 0 ? min(target, duration) : target
         currentTime = clamped
-        playbackEndTime = nil
+        clearRangePlayback()
         player.pause()
         let time = CMTime(seconds: clamped, preferredTimescale: 600)
         let tolerance = CMTime(seconds: 0.08, preferredTimescale: 600)
-        player.seek(to: time, toleranceBefore: tolerance, toleranceAfter: tolerance)
+        seekPlayer(to: time, tolerance: tolerance)
+    }
+
+    private func seekPlayer(to time: CMTime, tolerance: CMTime) {
+        let generation = UUID()
+        directSeekGeneration = generation
+        directSeekInFlight = player.currentItem != nil
+        player.currentItem?.cancelPendingSeeks()
+        player.seek(to: time, toleranceBefore: tolerance, toleranceAfter: tolerance) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.directSeekGeneration == generation else { return }
+                self.directSeekInFlight = false
+            }
+        }
     }
 
     func togglePlayPause() {
-        if player.timeControlStatus == .playing {
-            playbackEndTime = nil
+        if player.timeControlStatus == .playing || playbackEndTime != nil {
+            clearRangePlayback()
             player.pause()
         } else {
-            playbackEndTime = nil
+            clearRangePlayback()
             player.play()
         }
     }
 
-    func playRange(start: Double, end: Double) {
-        guard end > start else { return }
+    func playRange(start: Double, end: Double, loop: Bool = false) {
+        guard start.isFinite, end.isFinite else { return }
+        let lower = max(0, start)
+        let upper = duration > 0 ? min(end, duration) : end
+        guard upper > lower else { return }
+        clearRangePlayback()
+        beginRange(start: lower, end: upper, loop: loop)
+    }
+
+    func playReview(cues: [SubtitleCue], selectedID: SubtitleCue.ID, padding: Double,
+                    advance: Bool, loop: Bool = false) {
+        let plan = SubtitleReviewRange.plan(cues: cues, selectedID: selectedID,
+                                           padding: padding, duration: duration, advance: advance && !loop)
+        guard let first = plan.first else { return }
+        clearRangePlayback()
+        reviewRanges = plan
+        activeReviewCueID = first.cueID
+        beginRange(start: first.start, end: first.end, loop: loop)
+    }
+
+    private func beginRange(start: Double, end: Double, loop: Bool) {
         playbackEndTime = end
-        seek(to: start, pause: false)
-        player.play()
+        loopStartTime = loop ? start : nil
+        isLooping = loop
+        rangeSeekInFlight = true
+        rangeGeneration = UUID()
+        let generation = rangeGeneration
+        currentTime = start
+        player.pause()
+        player.seek(to: CMTime(seconds: start, preferredTimescale: 600),
+                    toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
+            Task { @MainActor in
+                guard let self, self.rangeGeneration == generation else { return }
+                self.rangeSeekInFlight = false
+                if finished { self.player.play() }
+                else { self.clearRangePlayback() }
+            }
+        }
+    }
+
+    private func finishRange(at end: Double) {
+        guard !rangeSeekInFlight else { return }
+        if let start = loopStartTime {
+            beginRange(start: start, end: end, loop: true)
+        } else if reviewIndex + 1 < reviewRanges.count {
+            reviewIndex += 1
+            let next = reviewRanges[reviewIndex]
+            activeReviewCueID = next.cueID
+            beginRange(start: next.start, end: next.end, loop: false)
+        } else {
+            seek(to: end, pause: true)
+        }
     }
 
     private func attachObservers() {
@@ -1029,13 +2117,24 @@ final class PlaybackController {
         ) { [weak self] time in
             let seconds = time.seconds
             MainActor.assumeIsolated {
-                guard let self else { return }
+                guard let self, !self.rangeSeekInFlight, !self.directSeekInFlight else { return }
                 if seconds.isFinite {
                     self.currentTime = max(0, seconds)
                 }
                 if let endTime = self.playbackEndTime, seconds >= endTime {
-                    self.seek(to: endTime, pause: true)
+                    self.finishRange(at: endTime)
                 }
+            }
+        }
+        endObserverToken = NotificationCenter.default.addObserver(
+            forName: AVPlayerItem.didPlayToEndTimeNotification, object: nil, queue: .main
+        ) { [weak self] notification in
+            let endedItemID = (notification.object as? AVPlayerItem).map(ObjectIdentifier.init)
+            MainActor.assumeIsolated {
+                guard let self, let endedItemID,
+                      endedItemID == self.player.currentItem.map(ObjectIdentifier.init),
+                      let end = self.playbackEndTime else { return }
+                self.finishRange(at: end)
             }
         }
         rateObservation = player.observe(\.rate, options: [.initial, .new]) { [weak self] player, _ in
@@ -1054,6 +2153,8 @@ struct SubtitleEditorPanel: View {
     let playback: PlaybackController
     var onTranslateCue: ((SubtitleCue.ID, TranslationLanguageChoice, TranslationOutputMode) -> Void)? = nil
     @State private var inlineTranslationLanguage: TranslationLanguageChoice = .common[2]
+    @AppStorage("msub.review.padding") private var reviewPadding = 0.25
+    @AppStorage("msub.review.advance") private var reviewAutoAdvance = false
 
     @Environment(APIClient.self) private var api
     @Environment(BackendService.self) private var backend
@@ -1061,6 +2162,7 @@ struct SubtitleEditorPanel: View {
     @Environment(\.undoManager) private var undoManager
 
     @State private var undoController = SubtitleUndoController()
+    @State private var previewCache = SubtitlePreviewCache()
     @State private var waveform = WaveformSamples([])
     @State private var isLoadingWaveform = false
     @State private var timelineZoom = 1.0
@@ -1069,16 +2171,22 @@ struct SubtitleEditorPanel: View {
     @State private var timelineCueDragUndoSnapshot: SubtitleUndoSnapshot?
     @State private var textEditUndoBurst: (cueID: SubtitleCue.ID, lastEdit: Date)?
     @State private var isTimingAdjustmentPresented = false
+    @State private var splitRequest: SubtitleSplitRequest?
+    @State private var isBatchSelecting = false
+    @State private var batchCueIDs: Set<SubtitleCue.ID> = []
+    @State private var batchRequest: SubtitleBatchRequest?
     @State private var timingAdjustmentMode: TimingAdjustmentMode = .shift
     @State private var timingShiftSeconds = 0.0
     @State private var timingGapSeconds = 0.0
     @State private var findText = ""
     @State private var replacementText = ""
+    @State private var findScope: SubtitleSearchScope = .all
     @State private var matchCase = false
     @State private var findStatus = ""
     @State private var isFindReplaceExpanded = false
     @SceneStorage("ui.isTimelineExpanded") private var isTimelineExpanded = false
     @State private var styleColor = Color.yellow
+    @State private var styleScope: SubtitleCueStyle.Scope = .all
     @State private var speakerStyleColor = Color.yellow
     @State private var selectedTextRange: NSRange?
     @State private var waveformSourceKey: String?
@@ -1094,6 +2202,10 @@ struct SubtitleEditorPanel: View {
     @State private var editorColumnHeight: CGFloat = 300
     @State private var cachedOriginalCuesByID: [SubtitleCue.ID: SubtitleCue] = [:]
     @State private var cachedSpeakerColorsByName: [String: Color] = [:]
+    @State private var cueIndexCache = SubtitleCueIndexCache()
+    @State private var searchCache = SubtitleSearchCache()
+    @State private var highlightCache = SubtitleSearchCache()
+    @State private var overlapCache = TimelineOverlapCache()
     @FocusState private var isSpeakerEditorFocused: Bool
     @FocusState private var isSubtitleListFocused: Bool
     @FocusState private var isFindFieldFocused: Bool
@@ -1101,24 +2213,11 @@ struct SubtitleEditorPanel: View {
     private static let waveformResolutionSteps = [180, 360, 720, 1_440, 2_880, 5_760, 11_520, 23_040, 46_080, 92_160, 131_072, 262_144, 524_288, 1_048_576]
 
     private var duration: Double {
-        let cueEnd = Self.maxCueEnd(in: slot.cues)
-        return max(slot.duration, cueEnd + 1.0)
+        max(slot.duration, cueIndexData.maximumEnd + 1.0)
     }
 
-    private static func maxCueEnd(in cues: [SubtitleCue]) -> Double {
-        var cueEnd: Double = 0.001
-        for cue in cues where cue.end.isFinite && cue.end > cueEnd {
-            cueEnd = cue.end
-        }
-        return cueEnd
-    }
-
-    private static func cueIDsMatch(_ lhs: [SubtitleCue], _ rhs: [SubtitleCue]) -> Bool {
-        guard lhs.count == rhs.count else { return false }
-        for (left, right) in zip(lhs, rhs) where left.id != right.id {
-            return false
-        }
-        return true
+    private var cueIndexData: SubtitleCueIndex {
+        cueIndexCache.value(for: slot.cues, revision: slot.cuesRevision)
     }
 
     nonisolated private static func joinedCueText(_ cues: [SubtitleCue]) -> String {
@@ -1139,7 +2238,7 @@ struct SubtitleEditorPanel: View {
 
     private var selectedCueIndex: Int? {
         guard let selectedCueID = slot.selectedCueID else { return nil }
-        return slot.cues.firstIndex(where: { $0.id == selectedCueID })
+        return cueIndex(for: selectedCueID)
     }
 
     private var maxTimelineZoom: Double {
@@ -1148,20 +2247,11 @@ struct SubtitleEditorPanel: View {
 
     private var activeFindHighlightTerm: String? {
         guard isFindReplaceExpanded else { return nil }
-        let trimmed = findText.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        return findText.isEmpty ? nil : findText
     }
 
     private var speakerNames: [String] {
-        var seen = Set<String>()
-        var names: [String] = []
-        for cue in slot.cues {
-            guard let speaker = SubtitleDocument.normalizedSpeakerName(cue.speaker),
-                  !seen.contains(speaker) else { continue }
-            seen.insert(speaker)
-            names.append(speaker)
-        }
-        return names
+        cueIndexData.speakers
     }
 
     private var activeTimelineSpeakerName: String? {
@@ -1193,7 +2283,7 @@ struct SubtitleEditorPanel: View {
         return Self.waveformResolutionSteps.first { $0 >= desired } ?? Self.waveformResolutionSteps.last ?? 720
     }
 
-    var body: some View {
+    private var editorLayout: some View {
         VStack(alignment: .leading, spacing: 12) {
             if slot.cues.isEmpty {
                 ContentUnavailableView(
@@ -1213,6 +2303,15 @@ struct SubtitleEditorPanel: View {
                     VStack(spacing: 10) {
                         selectedCueEditor
                         findReplaceBar
+                        SubtitleQualityPanel(cues: slot.cues, cuesRevision: slot.cuesRevision,
+                                             selectedCueID: slot.selectedCueID, language: language) { cueID in
+                            if cueID == slot.selectedCueID, let cue = slot.cues.first(where: { $0.id == cueID }) {
+                                playback.seek(to: cue.start, pause: true)
+                            }
+                            slot.selectedCueID = cueID
+                            timelineCenterRequest = TimelineCenterRequest(cueID: cueID)
+                        }
+                        .id(slot.id)
                     }
                     .frame(width: 320)
                     .background {
@@ -1230,12 +2329,17 @@ struct SubtitleEditorPanel: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var editorWithStateUpdates: some View {
+        editorLayout
         .task(id: slot.url) {
             await loadWaveformIfNeeded()
         }
         .onAppear {
             configureUndoController()
             refreshSlotCaches()
+            scheduleTermStatsSync(for: slot.cues)
         }
         .onChange(of: slotCacheSignal) { _, _ in
             refreshSlotCaches()
@@ -1264,6 +2368,26 @@ struct SubtitleEditorPanel: View {
                 ensureSelectedCueIsValid()
             }
         }
+        .onChange(of: slot.outputFormat) { _, _ in
+            syncPreviewText()
+        }
+        .onChange(of: slot.cuesRevision) { _, _ in
+            scheduleTermStatsSync(for: slot.cues)
+            if playback.isReviewing { playback.seek(to: playback.currentTime, pause: true) }
+            if !batchCueIDs.isEmpty {
+                batchCueIDs.formIntersection(Set(slot.cues.map(\.id)))
+            }
+        }
+        .onChange(of: slot.id) { _, _ in
+            isBatchSelecting = false
+            batchCueIDs = []
+            batchRequest = nil
+        }
+        .onChange(of: playback.activeReviewCueID) { _, cueID in
+            guard let cueID, slot.cues.contains(where: { $0.id == cueID }) else { return }
+            slot.selectedCueID = cueID
+            timelineCenterRequest = TimelineCenterRequest(cueID: cueID)
+        }
         .onChange(of: slot.selectedCueID) { _, newValue in
             if let editingSpeakerCueID {
                 commitSpeakerEdit(for: editingSpeakerCueID)
@@ -1271,11 +2395,13 @@ struct SubtitleEditorPanel: View {
             guard let newValue,
                   let cue = slot.cues.first(where: { $0.id == newValue }) else { return }
             selectedTextRange = nil
-            let start = cue.start
-            Task { @MainActor in
-                playback.seek(to: start, pause: true)
-            }
+            guard playback.activeReviewCueID != newValue else { return }
+            playback.seek(to: cue.start, pause: true)
         }
+    }
+
+    private var editorWithCueCommands: some View {
+        editorWithStateUpdates
         .onReceive(NotificationCenter.default.publisher(for: .msubDeleteSelectedCueRequested)) { _ in
             guard let cueID = slot.selectedCueID else { return }
             deleteCue(cueID)
@@ -1296,6 +2422,10 @@ struct SubtitleEditorPanel: View {
             guard let cueID = slot.selectedCueID, canResetCue(cueID) else { return }
             resetCue(cueID)
         }
+    }
+
+    private var editorWithTimelineCommands: some View {
+        editorWithCueCommands
         .onReceive(NotificationCenter.default.publisher(for: .msubAdjustTimingRequested)) { _ in
             guard !slot.cues.isEmpty else { return }
             isTimingAdjustmentPresented = true
@@ -1322,14 +2452,23 @@ struct SubtitleEditorPanel: View {
                 isFindFieldFocused = true
             }
         }
-        .onDisappear {
-            if let editingSpeakerCueID {
-                commitSpeakerEdit(for: editingSpeakerCueID)
+    }
+
+    var body: some View {
+        editorWithTimelineCommands
+        .onDisappear(perform: finishEditorSession)
+        .sheet(item: $batchRequest) { request in
+            SubtitleBatchEditSheet(cues: request.cues, speakerColors: request.speakerColors, speakerNames: speakerNames,
+                                   language: language, isCurrent: batchRequestIsCurrent(request)) { operation in
+                applyBatchEdit(request, operation: operation)
             }
-            previewSyncTask?.cancel()
-            termStatsTask?.cancel()
-            waveformReloadTask?.cancel()
-            syncPreviewText(for: slot.cues)
+        }
+        .sheet(item: $splitRequest) { request in
+            SubtitleSplitSheet(cue: request.cue, time: request.time, language: language,
+                               isCurrent: slot.url == request.fileURL
+                                   && slot.cues.contains(request.cue) && transcribingCueID == nil) { source, translation in
+                applySplit(request, sourceOffset: source, translationOffset: translation)
+            }
         }
         .sheet(isPresented: $isTimingAdjustmentPresented) {
             TimingAdjustmentSheet(
@@ -1338,9 +2477,22 @@ struct SubtitleEditorPanel: View {
                 mode: $timingAdjustmentMode,
                 shiftSeconds: $timingShiftSeconds,
                 gapSeconds: $timingGapSeconds,
-                apply: applyTimingAdjustment
+                apply: applyTimingAdjustment,
+                cues: slot.cues,
+                calibrate: applyTimingCalibration
             )
         }
+    }
+
+    private func finishEditorSession() {
+        if playback.isLooping || playback.isReviewing { playback.seek(to: playback.currentTime, pause: true) }
+        if let editingSpeakerCueID {
+            commitSpeakerEdit(for: editingSpeakerCueID)
+        }
+        previewSyncTask?.cancel()
+        termStatsTask?.cancel()
+        waveformReloadTask?.cancel()
+        syncPreviewText()
     }
 
     private func configureUndoController() {
@@ -1353,7 +2505,8 @@ struct SubtitleEditorPanel: View {
         SubtitleUndoSnapshot(
             cues: slot.cues,
             selectedCueID: slot.selectedCueID,
-            speakerColors: slot.speakerColors
+            speakerColors: slot.speakerColors,
+            batchCueIDs: batchCueIDs
         )
     }
 
@@ -1392,6 +2545,8 @@ struct SubtitleEditorPanel: View {
         timelineCueDragUndoSnapshot = nil
         textEditUndoBurst = nil
         slot.cues = snapshot.cues
+        batchCueIDs = snapshot.batchCueIDs.intersection(Set(snapshot.cues.map(\.id)))
+        isBatchSelecting = !batchCueIDs.isEmpty
         slot.speakerColors = snapshot.speakerColors
         if let selectedCueID = snapshot.selectedCueID,
            snapshot.cues.contains(where: { $0.id == selectedCueID }) {
@@ -1400,11 +2555,11 @@ struct SubtitleEditorPanel: View {
             slot.selectedCueID = snapshot.cues.first?.id
         }
         selectedTextRange = nil
-        syncPreviewText(for: slot.cues)
-        scheduleTermStatsSync(for: slot.cues)
+        syncPreviewText()
     }
 
     private func registerTimelineCueDragUndoIfNeeded() {
+        previewSyncTask?.cancel()
         if timelineCueDragUndoSnapshot == nil {
             timelineCueDragUndoSnapshot = makeUndoSnapshot()
         }
@@ -1413,7 +2568,8 @@ struct SubtitleEditorPanel: View {
     private func finishTimelineCueDragUndo() {
         guard let snapshot = timelineCueDragUndoSnapshot else { return }
         timelineCueDragUndoSnapshot = nil
-        if snapshot != makeUndoSnapshot() {
+        // Merely selecting a handle must not add an undo entry.
+        if snapshot.cues != slot.cues {
             registerUndo("undo.adjustTiming", before: snapshot)
         }
         scheduleCueTimingSync(for: slot.cues)
@@ -1427,28 +2583,31 @@ struct SubtitleEditorPanel: View {
 
     private func scheduleCueTimingSync(for cues: [SubtitleCue]) {
         previewSyncTask?.cancel()
+        let fileID = slot.id
+        let revision = slot.cuesRevision
         previewSyncTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(220))
-            guard !Task.isCancelled else { return }
-            let normalized = SubtitleDocument.normalize(cues)
-            if Self.cueIDsMatch(slot.cues, cues), normalized != slot.cues {
-                slot.cues = normalized
-            }
-            syncPreviewText(for: normalized)
+            do { try await Task.sleep(for: .milliseconds(220)) } catch { return }
+            guard !Task.isCancelled, slot.id == fileID, slot.cuesRevision == revision else { return }
+            if let normalized = SubtitleDocument.normalizedIfNeeded(cues) { slot.cues = normalized }
+            syncPreviewText()
         }
     }
 
-    private func schedulePreviewTextSync(for cues: [SubtitleCue]) {
+    private func schedulePreviewTextSync() {
         previewSyncTask?.cancel()
+        let fileID = slot.id
+        let revision = slot.cuesRevision
         previewSyncTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(220))
-            guard !Task.isCancelled else { return }
-            syncPreviewText(for: cues)
+            do { try await Task.sleep(for: .milliseconds(220)) } catch { return }
+            guard !Task.isCancelled, slot.id == fileID, slot.cuesRevision == revision else { return }
+            syncPreviewText()
         }
     }
 
-    private func syncPreviewText(for cues: [SubtitleCue]) {
-        slot.previewText = SubtitleDocument.serialize(cues, format: slot.outputFormat)
+    private func syncPreviewText() {
+        let text = previewCache.value(cues: slot.cues, fileID: slot.id,
+                                      revision: slot.cuesRevision, format: slot.outputFormat)
+        if slot.previewText != text { slot.previewText = text }
     }
 
     private func ensureSelectedCueIsValid() {
@@ -1460,16 +2619,21 @@ struct SubtitleEditorPanel: View {
 
     private func scheduleTermStatsSync(for cues: [SubtitleCue]) {
         termStatsTask?.cancel()
+        let fileID = slot.id
+        let revision = slot.cuesRevision
         termStatsTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(700))
-            guard !Task.isCancelled else { return }
-            let terms = await Task.detached(priority: .utility) { [cues] in
-                SubtitleTextStats.topTerms(in: cues, limit: 8)
-            }.value
-            let emotions = await Task.detached(priority: .utility) { [cues] in
-                SubtitleEmotionStats.frequencies(in: cues)
-            }.value
-            guard !Task.isCancelled else { return }
+            do { try await Task.sleep(for: .milliseconds(700)) } catch { return }
+            guard !Task.isCancelled, slot.id == fileID, slot.cuesRevision == revision else { return }
+            let worker = Task.detached(priority: .utility) { () -> ([SubtitleTermFrequency], [SubtitleEmotionFrequency]) in
+                guard !Task.isCancelled else { return ([], []) }
+                let terms = SubtitleTextStats.topTerms(in: cues, limit: 8)
+                guard !Task.isCancelled else { return ([], []) }
+                return (terms, SubtitleEmotionStats.frequencies(in: cues))
+            }
+            let (terms, emotions) = await withTaskCancellationHandler {
+                await worker.value
+            } onCancel: { worker.cancel() }
+            guard !Task.isCancelled, slot.id == fileID, slot.cuesRevision == revision else { return }
             slot.frequentTerms = terms
             slot.emotionFrequencies = emotions
         }
@@ -1482,7 +2646,7 @@ struct SubtitleEditorPanel: View {
                     .font(.subheadline.weight(.semibold))
                 Spacer()
                 if isLoadingWaveform {
-                    ProgressView()
+                    MSubSpinner()
                         .controlSize(.small)
                 }
                 if !isTimelineExpanded {
@@ -1491,7 +2655,6 @@ struct SubtitleEditorPanel: View {
                     } label: {
                         Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
                     }
-                    .buttonStyle(.borderless)
                     .help(Copy.text(playback.isPlaying ? "editor.pause" : "editor.play", language: language))
                 }
                 Text(timecodeLabel)
@@ -1504,7 +2667,6 @@ struct SubtitleEditorPanel: View {
                 } label: {
                     Image(systemName: isTimelineExpanded ? "chevron.up.circle" : "chevron.down.circle")
                 }
-                .buttonStyle(.borderless)
                 .help(Copy.text(isTimelineExpanded ? "editor.collapseTimeline" : "editor.expandTimeline", language: language))
             }
 
@@ -1515,7 +2677,6 @@ struct SubtitleEditorPanel: View {
                     } label: {
                         Image(systemName: "minus.magnifyingglass")
                     }
-                    .buttonStyle(.borderless)
                     .help(Copy.text("editor.zoomOut", language: language))
 
                     TimelineZoomSlider(
@@ -1538,7 +2699,6 @@ struct SubtitleEditorPanel: View {
                     } label: {
                         Image(systemName: "plus.magnifyingglass")
                     }
-                    .buttonStyle(.borderless)
                     .help(Copy.text("editor.zoomIn", language: language))
 
                     Spacer(minLength: 8)
@@ -1548,7 +2708,6 @@ struct SubtitleEditorPanel: View {
                     } label: {
                         Image(systemName: "play.rectangle")
                     }
-                    .buttonStyle(.borderless)
                     .disabled(selectedCueIndex == nil)
                     .help(Copy.text("editor.playCurrent.help", language: language))
 
@@ -1557,7 +2716,6 @@ struct SubtitleEditorPanel: View {
                     } label: {
                         Image(systemName: "plus.rectangle")
                     }
-                    .buttonStyle(.borderless)
                     .accessibilityLabel(Copy.text("editor.addAtPlayhead", language: language))
                     .help(Copy.text("editor.addAtPlayhead.help", language: language))
 
@@ -1566,15 +2724,19 @@ struct SubtitleEditorPanel: View {
                     } label: {
                         Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
                     }
-                    .buttonStyle(.borderless)
                     .help(Copy.text(playback.isPlaying ? "editor.pause" : "editor.play", language: language))
                 }
 
                 PlaybackZoomableTimeline(
+                    cuesRevision: slot.cuesRevision,
+                    cueIndex: cueIndexData,
+                    overlaps: overlapCache.value(cues: slot.cues, revision: slot.cuesRevision),
                     cues: $slot.cues,
                     selectedCueID: $slot.selectedCueID,
                     highlightTerm: $selectedFrequentTerm,
                     findTerm: activeFindHighlightTerm,
+                    findMarkers: activeFindHighlightTerm == nil ? .empty : searchResults.markers,
+                    highlightMarkers: highlightMarkers,
                     waveform: waveform,
                     duration: duration,
                     zoom: $timelineZoom,
@@ -1598,10 +2760,13 @@ struct SubtitleEditorPanel: View {
                 .frame(height: 128)
             } else {
                 PlaybackCompactTimelineStrip(
+                    cuesRevision: slot.cuesRevision,
                     cues: slot.cues,
                     selectedCueID: $slot.selectedCueID,
                     highlightTerm: $selectedFrequentTerm,
                     findTerm: activeFindHighlightTerm,
+                    findMarkers: activeFindHighlightTerm == nil ? .empty : searchResults.markers,
+                    highlightMarkers: highlightMarkers,
                     waveform: waveform,
                     duration: duration,
                     playback: playback,
@@ -1613,9 +2778,9 @@ struct SubtitleEditorPanel: View {
                 .frame(height: 34)
             }
         }
+        .msubCompactActions()
         .padding(isTimelineExpanded ? 12 : 10)
-        .background(.quinary, in: RoundedRectangle(cornerRadius: 10))
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 10))
+        .msubPanel(cornerRadius: 10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .onChange(of: maxTimelineZoom) { _, newValue in
             timelineZoom = min(timelineZoom, newValue)
@@ -1626,100 +2791,177 @@ struct SubtitleEditorPanel: View {
         let selectedCueID = slot.selectedCueID
         let originalCuesByID = cachedOriginalCuesByID
         let speakerColorsByName = cachedSpeakerColorsByName
-        let canCycleSpeakers = slot.cues.contains { SubtitleDocument.normalizedSpeakerName($0.speaker) != nil }
+        let canCycleSpeakers = !speakerNames.isEmpty
 
-        return ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 8) {
-                    ForEach($slot.cues) { $cue in
-                        let originalCue = originalCuesByID[cue.id]
-                        SubtitleCueBlockRow(
-                            cue: $cue,
-                            isSelected: cue.id == selectedCueID,
-                            canReset: canResetCue(cue, original: originalCue),
-                            select: { selectCueFromBlock(cue.id) },
-                            reset: { resetCue(cue.id) },
-                            duplicate: { duplicateCue(cue.id) },
-                            insertBefore: { insertCue(before: cue.id) },
-                            insertAfter: { insertCue(after: cue.id) },
-                            closeGap: { closeGap(around: cue.id) },
-                            delete: { deleteCue(cue.id) },
-                            deleteMatching: { deleteMatchingCues(referenceCueID: cue.id) },
-                            language: language,
-                            speakerColor: speakerColor(forCue: cue, colorCache: speakerColorsByName),
-                            cycleSpeaker: canCycleSpeakers ? { cycleSpeaker(for: cue.id) } : nil
-                        )
-                        .id(cue.id)
+        return VStack(spacing: 8) {
+            batchSelectionBar
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 8) {
+                        ForEach(slot.cues) { cue in
+                            let originalCue = originalCuesByID[cue.id]
+                            HStack(alignment: .top, spacing: 6) {
+                                if isBatchSelecting {
+                                    Toggle(String(format: Copy.text("editor.batch.selectCue", language: language), cue.index),
+                                           isOn: Binding(get: { batchCueIDs.contains(cue.id) }, set: { selected in
+                                               if selected { batchCueIDs.insert(cue.id) }
+                                               else { batchCueIDs.remove(cue.id) }
+                                           }))
+                                        .toggleStyle(.checkbox)
+                                        .labelsHidden()
+                                        .padding(.top, 12)
+                                }
+                                SubtitleCueBlockRow(
+                                    cue: cue,
+                                    isSelected: cue.id == selectedCueID,
+                                    canReset: canResetCue(cue, original: originalCue),
+                                    select: { selectCueFromBlock(cue.id) },
+                                    reset: { resetCue(cue.id) },
+                                    duplicate: { duplicateCue(cue.id) },
+                                    insertBefore: { insertCue(before: cue.id) },
+                                    insertAfter: { insertCue(after: cue.id) },
+                                    closeGap: { closeGap(around: cue.id) },
+                                    delete: { deleteCue(cue.id) },
+                                    deleteMatching: { deleteMatchingCues(referenceCueID: cue.id) },
+                                    language: language,
+                                    speakerColor: speakerColor(forCue: cue, colorCache: speakerColorsByName),
+                                    cycleSpeaker: canCycleSpeakers ? { cycleSpeaker(for: cue.id) } : nil
+                                )
+                            }
+                            .id(cue.id)
+                        }
                     }
+                    .padding(2)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(2)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding(2)
-            .background(.quinary, in: RoundedRectangle(cornerRadius: 10))
-            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 10))
-            .focusable()
-            .focusEffectDisabled()
-            .focused($isSubtitleListFocused)
-            .onKeyPress(phases: .down) { press in
-                let cmd = press.modifiers.contains(.command)
-                let shift = press.modifiers.contains(.shift)
-                switch press.key {
-                case .upArrow:
-                    cmd ? selectBoundaryCue(first: true) : selectAdjacentCue(offset: -1)
-                    return .handled
-                case .downArrow:
-                    cmd ? selectBoundaryCue(first: false) : selectAdjacentCue(offset: 1)
-                    return .handled
-                case .leftArrow:
-                    if cmd {
-                        jumpToAdjacentCue(offset: -1)
-                    } else {
-                        seekRelative(shift ? -5.0 : -1.0)
+                .msubPanel(cornerRadius: 10)
+                .focusable()
+                .focusEffectDisabled()
+                .focused($isSubtitleListFocused)
+                .onKeyPress(phases: .down) { press in
+                    let cmd = press.modifiers.contains(.command)
+                    let shift = press.modifiers.contains(.shift)
+                    switch press.key {
+                    case KeyEquivalent("a") where cmd && isBatchSelecting:
+                        batchCueIDs = Set(slot.cues.map(\.id))
+                        return .handled
+                    case .escape where isBatchSelecting:
+                        isBatchSelecting = false
+                        batchCueIDs = []
+                        return .handled
+                    case .upArrow:
+                        cmd ? selectBoundaryCue(first: true) : selectAdjacentCue(offset: -1)
+                        return .handled
+                    case .downArrow:
+                        cmd ? selectBoundaryCue(first: false) : selectAdjacentCue(offset: 1)
+                        return .handled
+                    case .leftArrow:
+                        if cmd {
+                            jumpToAdjacentCue(offset: -1)
+                        } else {
+                            seekRelative(shift ? -5.0 : -1.0)
+                        }
+                        return .handled
+                    case .rightArrow:
+                        if cmd {
+                            jumpToAdjacentCue(offset: 1)
+                        } else {
+                            seekRelative(shift ? 5.0 : 1.0)
+                        }
+                        return .handled
+                    case .home:
+                        selectBoundaryCue(first: true)
+                        return .handled
+                    case .end:
+                        selectBoundaryCue(first: false)
+                        return .handled
+                    case .space:
+                        playback.togglePlayPause()
+                        return .handled
+                    case KeyEquivalent("k") where cmd:
+                        insertCueAfterSelection()
+                        return .handled
+                    case KeyEquivalent(";") where cmd:
+                        setSelectedCueStartToPlayhead()
+                        return .handled
+                    case KeyEquivalent("'") where cmd:
+                        setSelectedCueEndToPlayhead()
+                        return .handled
+                    default:
+                        return .ignored
                     }
-                    return .handled
-                case .rightArrow:
-                    if cmd {
-                        jumpToAdjacentCue(offset: 1)
-                    } else {
-                        seekRelative(shift ? 5.0 : 1.0)
-                    }
-                    return .handled
-                case .home:
-                    selectBoundaryCue(first: true)
-                    return .handled
-                case .end:
-                    selectBoundaryCue(first: false)
-                    return .handled
-                case .space:
-                    playback.togglePlayPause()
-                    return .handled
-                case KeyEquivalent("k") where cmd:
-                    insertCueAfterSelection()
-                    return .handled
-                case KeyEquivalent(";") where cmd:
-                    setSelectedCueStartToPlayhead()
-                    return .handled
-                case KeyEquivalent("'") where cmd:
-                    setSelectedCueEndToPlayhead()
-                    return .handled
-                default:
-                    return .ignored
                 }
-            }
-            .onChange(of: slot.selectedCueID) { _, newValue in
-                guard let newValue else { return }
-                scheduleCueListScroll(to: newValue, proxy: proxy, initial: false)
-            }
-            .onAppear {
-                guard let selectedID = slot.selectedCueID else { return }
-                scheduleCueListScroll(to: selectedID, proxy: proxy, initial: true)
-            }
-            .onDisappear {
-                cueListScrollTask?.cancel()
-                cueListScrollTask = nil
+                .onChange(of: slot.selectedCueID) { _, newValue in
+                    guard let newValue else { return }
+                    scheduleCueListScroll(to: newValue, proxy: proxy, initial: false)
+                }
+                .onAppear {
+                    guard let selectedID = slot.selectedCueID else { return }
+                    scheduleCueListScroll(to: selectedID, proxy: proxy, initial: true)
+                }
+                .onDisappear {
+                    cueListScrollTask?.cancel()
+                    cueListScrollTask = nil
+                }
             }
         }
+    }
+
+    private var batchSelectionBar: some View {
+        HStack(spacing: 8) {
+            Toggle(isOn: $isBatchSelecting) {
+                Label(Copy.text("editor.batch.select", language: language), systemImage: "checklist")
+            }
+            .toggleStyle(.button)
+            .onChange(of: isBatchSelecting) { _, enabled in
+                if !enabled { batchCueIDs = [] }
+            }
+            Spacer(minLength: 0)
+            if isBatchSelecting {
+                Text(String(format: Copy.text("editor.batch.count", language: language), batchCueIDs.count))
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Menu {
+                    Button(Copy.text("editor.batch.all", language: language)) { batchCueIDs = Set(slot.cues.map(\.id)) }
+                    Button(Copy.text("editor.batch.none", language: language)) { batchCueIDs = [] }
+                } label: {
+                    Label(Copy.text("editor.batch.select", language: language), systemImage: "ellipsis.circle")
+                        .labelStyle(.iconOnly)
+                }
+                .fixedSize()
+                Button {
+                    let cues = slot.cues.filter { batchCueIDs.contains($0.id) }
+                    guard !cues.isEmpty, transcribingCueID == nil else { return }
+                    playback.seek(to: playback.currentTime, pause: true)
+                    batchRequest = .init(fileID: slot.id, cues: cues, speakerColors: slot.speakerColors)
+                } label: {
+                    Label(Copy.text("editor.batch.title", language: language), systemImage: "slider.horizontal.3")
+                        .labelStyle(.iconOnly)
+                }
+                .help(Copy.text("editor.batch.title", language: language))
+                .disabled(batchCueIDs.isEmpty || transcribingCueID != nil)
+            }
+        }
+        .msubCompactActions()
+    }
+
+    private func batchRequestIsCurrent(_ request: SubtitleBatchRequest) -> Bool {
+        slot.id == request.fileID && transcribingCueID == nil && slot.speakerColors == request.speakerColors
+            && SubtitleBatchEdit.replacing(request.cues, with: request.cues, in: slot.cues) != nil
+    }
+
+    private func applyBatchEdit(_ request: SubtitleBatchRequest, operation: SubtitleBatchEdit.Operation) {
+        guard batchRequestIsCurrent(request),
+              let changed = SubtitleBatchEdit.applying(operation, to: request.cues, speakerColors: request.speakerColors),
+              changed != request.cues,
+              let cues = SubtitleBatchEdit.replacing(request.cues, with: changed, in: slot.cues) else { return }
+        let snapshot = makeUndoSnapshot()
+        previewSyncTask?.cancel()
+        textEditUndoBurst = nil
+        selectedTextRange = nil
+        slot.cues = SubtitleDocument.normalize(cues)
+        registerUndo("undo.batchEdit", before: snapshot)
+        scheduleCueTimingSync(for: slot.cues)
     }
 
     private func scheduleCueListScroll(to cueID: SubtitleCue.ID, proxy: ScrollViewProxy, initial: Bool) {
@@ -1766,6 +3008,14 @@ struct SubtitleEditorPanel: View {
 
             if isFindReplaceExpanded {
                 VStack(alignment: .leading, spacing: 8) {
+                    Picker(Copy.text("editor.findScope", language: language), selection: $findScope) {
+                        ForEach(SubtitleSearchScope.allCases) { scope in
+                            Text(Copy.text(scope.titleKey, language: language)).tag(scope)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .help(Copy.text("editor.findScope.help", language: language))
+
                     TextField(Copy.text("editor.find", language: language), text: $findText)
                         .textFieldStyle(.roundedBorder)
                         .focused($isFindFieldFocused)
@@ -1821,15 +3071,17 @@ struct SubtitleEditorPanel: View {
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
-        .controlSize(.small)
+        .msubCompactActions()
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quinary, in: RoundedRectangle(cornerRadius: 10))
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 10))
+        .msubPanel(cornerRadius: 10)
         .onChange(of: findText) { _, _ in
             findStatus = ""
         }
         .onChange(of: matchCase) { _, _ in
+            findStatus = ""
+        }
+        .onChange(of: findScope) { _, _ in
             findStatus = ""
         }
     }
@@ -1842,6 +3094,50 @@ struct SubtitleEditorPanel: View {
             return Copy.text("editor.findHint", language: language)
         }
         return String(format: Copy.text("editor.findCount", language: language), occurrenceCount())
+    }
+
+    private func reviewPlaybackControls(cue: SubtitleCue) -> some View {
+        HStack(spacing: 8) {
+            Group {
+                Button {
+                    if playback.isReviewing || playback.isLooping {
+                        playback.seek(to: playback.currentTime, pause: true)
+                    } else {
+                        playback.playReview(cues: slot.cues, selectedID: cue.id,
+                                            padding: reviewPadding, advance: reviewAutoAdvance)
+                    }
+                } label: {
+                    Label(Copy.text(playback.isReviewing || playback.isLooping ? "review.stop" : "review.play", language: language),
+                          systemImage: playback.isReviewing || playback.isLooping ? "stop.fill" : "play.fill")
+                }
+                Button {
+                    playback.playReview(cues: slot.cues, selectedID: cue.id,
+                                        padding: reviewPadding, advance: false, loop: true)
+                } label: {
+                    Label(Copy.text("review.loop", language: language), systemImage: "repeat.1")
+                }
+                .disabled(playback.isLooping)
+            }
+            .disabled(!cue.start.isFinite || !cue.end.isFinite || cue.start < 0 || cue.end <= cue.start)
+            Menu {
+                Picker(Copy.text("review.padding", language: language), selection: $reviewPadding) {
+                    ForEach([0.0, 0.25, 0.5, 1.0], id: \.self) { value in
+                        Text(value, format: .number.precision(.fractionLength(0...2))).tag(value)
+                    }
+                }
+                .pickerStyle(.menu)
+                Toggle(Copy.text("review.advance", language: language), isOn: $reviewAutoAdvance)
+            } label: {
+                Label(Copy.text("review.options", language: language), systemImage: "slider.horizontal.3")
+                    .labelStyle(.iconOnly)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .accessibilityLabel(Copy.text("review.options", language: language))
+            .help(Copy.text("review.options", language: language) + "\n" + Copy.text("review.help", language: language))
+            Spacer(minLength: 0)
+        }
+        .msubCompactActions()
     }
 
     @ViewBuilder
@@ -1863,6 +3159,8 @@ struct SubtitleEditorPanel: View {
                         editedFields: editedFields(for: selectedCueID)
                     )
                 }
+
+                reviewPlaybackControls(cue: selectedCue)
 
                 HStack(spacing: 6) {
                     Button {
@@ -1902,10 +3200,7 @@ struct SubtitleEditorPanel: View {
 
                 speakerControls(cueID: selectedCueID, cue: selectedCue)
 
-                SelectableTextEditor(text: cueTextBinding(for: selectedCueID), selection: $selectedTextRange) {}
-                    .frame(height: 118)
-                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary))
+                bilingualCueEditor(cue: selectedCue)
 
                 if let onTranslateCue {
                     HStack(spacing: 6) {
@@ -1978,8 +3273,7 @@ struct SubtitleEditorPanel: View {
                 reTranscribeCueButton(cueID: selectedCueID, cueIsEmpty: slot.cues[selectedCueIndex].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             .padding(12)
-            .background(.quinary, in: RoundedRectangle(cornerRadius: 10))
-            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 10))
+            .msubPanel(cornerRadius: 10)
         } else {
             VStack(alignment: .leading, spacing: 8) {
                 Text(Copy.text("editor.selected", language: language))
@@ -1990,8 +3284,7 @@ struct SubtitleEditorPanel: View {
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.quinary, in: RoundedRectangle(cornerRadius: 10))
-            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 10))
+            .msubPanel(cornerRadius: 10)
         }
     }
 
@@ -2146,7 +3439,7 @@ struct SubtitleEditorPanel: View {
             } label: {
                 if isBusy {
                     HStack(spacing: 6) {
-                        ProgressView()
+                        MSubSpinner()
                             .controlSize(.small)
                         Text(Copy.text("editor.transcribingCue", language: language))
                     }
@@ -2179,18 +3472,32 @@ struct SubtitleEditorPanel: View {
 
     private var subtitleStyleControls: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Text(Copy.text("editor.style", language: language))
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+            HStack {
+                Text(Copy.text("editor.style", language: language))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 4)
+                if let selectedCueIndex, slot.cues[selectedCueIndex].bilingualText != nil {
+                    Picker(Copy.text("editor.style.scope", language: language), selection: $styleScope) {
+                        ForEach(SubtitleCueStyle.Scope.allCases) { scope in
+                            Text(Copy.text(scope.titleKey, language: language)).tag(scope)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .fixedSize()
+                    .msubCompactActions()
+                    .help(Copy.text("editor.style.scope.help", language: language))
+                }
+            }
 
             HStack(spacing: 6) {
                 Button {
                     toggleMarkupTag("b")
                 } label: {
                     Image(systemName: "bold")
-                        .frame(maxWidth: .infinity, minHeight: 22)
+                        .frame(maxWidth: .infinity, minHeight: 14)
                 }
-                .buttonStyle(.bordered)
                 .tint(hasOuterMarkupTag("b") ? .accentColor : nil)
                 .help(Copy.text("editor.style.bold.help", language: language))
 
@@ -2198,9 +3505,8 @@ struct SubtitleEditorPanel: View {
                     toggleMarkupTag("i")
                 } label: {
                     Image(systemName: "italic")
-                        .frame(maxWidth: .infinity, minHeight: 22)
+                        .frame(maxWidth: .infinity, minHeight: 14)
                 }
-                .buttonStyle(.bordered)
                 .tint(hasOuterMarkupTag("i") ? .accentColor : nil)
                 .help(Copy.text("editor.style.italic.help", language: language))
 
@@ -2208,9 +3514,8 @@ struct SubtitleEditorPanel: View {
                     toggleMarkupTag("u")
                 } label: {
                     Image(systemName: "underline")
-                        .frame(maxWidth: .infinity, minHeight: 22)
+                        .frame(maxWidth: .infinity, minHeight: 14)
                 }
-                .buttonStyle(.bordered)
                 .tint(hasOuterMarkupTag("u") ? .accentColor : nil)
                 .help(Copy.text("editor.style.underline.help", language: language))
 
@@ -2223,9 +3528,8 @@ struct SubtitleEditorPanel: View {
                     applyCueColor(styleColor)
                 } label: {
                     Image(systemName: "paintpalette")
-                        .frame(maxWidth: .infinity, minHeight: 22)
+                        .frame(maxWidth: .infinity, minHeight: 14)
                 }
-                .buttonStyle(.bordered)
                 .tint(hasOuterFontColor ? .accentColor : nil)
                 .help(Copy.text("editor.style.applyColor.help", language: language))
 
@@ -2233,12 +3537,11 @@ struct SubtitleEditorPanel: View {
                     clearCueStyle()
                 } label: {
                     Image(systemName: "eraser")
-                        .frame(maxWidth: .infinity, minHeight: 22)
+                        .frame(maxWidth: .infinity, minHeight: 14)
                 }
-                .buttonStyle(.bordered)
                 .help(Copy.text("editor.style.clear.help", language: language))
             }
-            .controlSize(.small)
+            .msubCompactActions()
         }
     }
 
@@ -2311,6 +3614,119 @@ struct SubtitleEditorPanel: View {
         )
     }
 
+    @ViewBuilder
+    private func bilingualCueEditor(cue: SubtitleCue) -> some View {
+        HStack {
+            Text(Copy.text(cue.bilingualText == nil ? "bilingual.text" : "bilingual.title", language: language))
+                .font(.caption).foregroundStyle(.secondary)
+            Spacer()
+            Menu {
+                Button(Copy.text("editor.split.title", language: language)) {
+                    presentSplit(cue)
+                }
+                .disabled(!SubtitleCueSplit.canSplit(cue, at: playback.currentTime) || transcribingCueID != nil)
+                .help(Copy.text("editor.split.menuHelp", language: language))
+                Divider()
+                Button(Copy.text("editor.mergeNext", language: language)) { mergeWithNext(cue.id) }
+                    .disabled(mergeCandidate(for: cue.id) == nil || transcribingCueID != nil)
+            } label: {
+                Label(Copy.text("editor.cueActions", language: language), systemImage: "ellipsis.circle")
+                    .labelStyle(.iconOnly)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help(Copy.text("editor.cueActions", language: language))
+            Menu {
+                if let pair = cue.bilingualText {
+                    Button(Copy.text("bilingual.reverse", language: language)) {
+                        var changed = pair
+                        changed.translationFirst.toggle()
+                        updateBilingual(cueID: cue.id, value: changed, typing: false)
+                    }
+                } else {
+                    Button(Copy.text("bilingual.enable", language: language)) {
+                        updateBilingual(cueID: cue.id, value: .init(source: cue.text, translation: ""), typing: false)
+                    }
+                }
+                Divider()
+                Button(Copy.text("bilingual.exportSource", language: language)) { exportBilingualLane(translated: false) }
+                Button(Copy.text("bilingual.exportTranslation", language: language)) { exportBilingualLane(translated: true) }
+            } label: {
+                Label(Copy.text("bilingual.title", language: language), systemImage: "character.bubble")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+        }
+        if cue.bilingualText != nil {
+            Text(Copy.text("bilingual.source", language: language)).font(.caption)
+            TextEditor(text: bilingualBinding(cueID: cue.id, source: true))
+                .scrollContentBackground(.hidden)
+                .padding(4)
+                .frame(height: 76)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary).allowsHitTesting(false))
+                .accessibilityLabel(Copy.text("bilingual.source", language: language))
+            Text(Copy.text("bilingual.translation", language: language)).font(.caption)
+            TextEditor(text: bilingualBinding(cueID: cue.id, source: false))
+                .scrollContentBackground(.hidden)
+                .padding(4)
+                .frame(height: 76)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary).allowsHitTesting(false))
+                .accessibilityLabel(Copy.text("bilingual.translation", language: language))
+            Text(Copy.text("bilingual.help", language: language))
+                .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            SelectableTextEditor(text: cueTextBinding(for: cue.id), selection: $selectedTextRange) {}
+                .frame(height: 118)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary))
+        }
+    }
+
+    private func bilingualBinding(cueID: SubtitleCue.ID, source: Bool) -> Binding<String> {
+        Binding {
+            guard let index = cueIndex(for: cueID), let pair = slot.cues[index].bilingualText else { return "" }
+            return source ? pair.source : pair.translation
+        } set: { text in
+            guard let index = cueIndex(for: cueID), var pair = slot.cues[index].bilingualText else { return }
+            if source { pair.source = text } else { pair.translation = text }
+            updateBilingual(cueID: cueID, value: pair, typing: true)
+        }
+    }
+
+    private func updateBilingual(cueID: SubtitleCue.ID, value: SubtitleBilingualText, typing: Bool) {
+        guard let index = cueIndex(for: cueID), slot.cues[index].bilingualText != value else { return }
+        let now = Date()
+        let continues = typing && (textEditUndoBurst.map { $0.cueID == cueID && now.timeIntervalSince($0.lastEdit) < 2 } ?? false)
+        let snapshot = continues ? nil : makeUndoSnapshot()
+        slot.cues[index].setBilingual(value)
+        selectedTextRange = nil
+        if let snapshot { registerUndo("undo.editSubtitle", before: snapshot) }
+        textEditUndoBurst = typing ? (cueID: cueID, lastEdit: now) : nil
+        schedulePreviewTextSync()
+    }
+
+    private func exportBilingualLane(translated: Bool) {
+        let format = slot.outputFormat
+        let cues = SubtitleDocument.monolingualCues(slot.cues, translated: translated)
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = slot.url.deletingPathExtension().lastPathComponent
+            + (translated ? ".translation." : ".source.") + format.rawValue
+        panel.allowedContentTypes = [UTType(filenameExtension: format.rawValue) ?? .plainText]
+        panel.canCreateDirectories = true
+        panel.message = Copy.text("bilingual.exportHelp", language: language)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try SubtitleDocument.serialize(cues, format: format).write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            NSAlert(error: error).runModal()
+        }
+    }
+
     private func cueTextBinding(for cueID: SubtitleCue.ID) -> Binding<String> {
         Binding(
             get: {
@@ -2337,8 +3753,7 @@ struct SubtitleEditorPanel: View {
                     registerUndo("undo.editSubtitle", before: snapshot)
                 }
                 textEditUndoBurst = (cueID: cueID, lastEdit: now)
-                schedulePreviewTextSync(for: slot.cues)
-                scheduleTermStatsSync(for: slot.cues)
+                schedulePreviewTextSync()
             }
         )
     }
@@ -2359,8 +3774,7 @@ struct SubtitleEditorPanel: View {
             if shouldRegisterUndo {
                 registerUndo("undo.editSpeaker", before: snapshot)
             }
-            schedulePreviewTextSync(for: slot.cues)
-            scheduleTermStatsSync(for: slot.cues)
+            schedulePreviewTextSync()
         }
     }
 
@@ -2394,7 +3808,7 @@ struct SubtitleEditorPanel: View {
             guard SubtitleDocument.normalizedSpeakerName(slot.cues[index].speaker) == old else { continue }
             slot.cues[index].speaker = normalizedNew
             if let targetColor {
-                slot.cues[index].text = fontColoredText(slot.cues[index].text, hex: targetColor)
+                slot.cues[index] = SubtitleCueStyle.applying(.color(targetColor), to: slot.cues[index])
             }
             didChange = true
             // Mirror global speaker rename / recolor in originalCues so it isn't
@@ -2404,9 +3818,9 @@ struct SubtitleEditorPanel: View {
                     slot.originalCues[originalIndex].speaker = normalizedNew
                 }
                 if let targetColor {
-                    let updatedOriginal = fontColoredText(slot.originalCues[originalIndex].text, hex: targetColor)
-                    if updatedOriginal != slot.originalCues[originalIndex].text {
-                        slot.originalCues[originalIndex].text = updatedOriginal
+                    let updatedOriginal = SubtitleCueStyle.applying(.color(targetColor), to: slot.originalCues[originalIndex])
+                    if updatedOriginal != slot.originalCues[originalIndex] {
+                        slot.originalCues[originalIndex] = updatedOriginal
                     }
                 }
             }
@@ -2415,8 +3829,7 @@ struct SubtitleEditorPanel: View {
             registerUndo("undo.editSpeaker", before: snapshot)
         }
         if didChange {
-            schedulePreviewTextSync(for: slot.cues)
-            scheduleTermStatsSync(for: slot.cues)
+            schedulePreviewTextSync()
         }
     }
 
@@ -2468,17 +3881,17 @@ struct SubtitleEditorPanel: View {
         }
         for index in slot.cues.indices {
             guard SubtitleDocument.normalizedSpeakerName(slot.cues[index].speaker) == targetSpeaker else { continue }
-            let updated = fontColoredText(slot.cues[index].text, hex: hex)
-            if updated != slot.cues[index].text {
-                slot.cues[index].text = updated
+            let updated = SubtitleCueStyle.applying(.color(hex), to: slot.cues[index])
+            if updated != slot.cues[index] {
+                slot.cues[index] = updated
                 didChange = true
             }
             // Mirror the global speaker-color change in originalCues so it isn't
             // detected as a per-cue edit by canResetCue / editedFields.
             if let originalIndex = originalIndexByID[slot.cues[index].id] {
-                let updatedOriginal = fontColoredText(slot.originalCues[originalIndex].text, hex: hex)
-                if updatedOriginal != slot.originalCues[originalIndex].text {
-                    slot.originalCues[originalIndex].text = updatedOriginal
+                let updatedOriginal = SubtitleCueStyle.applying(.color(hex), to: slot.originalCues[originalIndex])
+                if updatedOriginal != slot.originalCues[originalIndex] {
+                    slot.originalCues[originalIndex] = updatedOriginal
                 }
             }
         }
@@ -2486,8 +3899,7 @@ struct SubtitleEditorPanel: View {
             registerUndo("undo.editSpeaker", before: snapshot)
         }
         if didChange {
-            schedulePreviewTextSync(for: slot.cues)
-            scheduleTermStatsSync(for: slot.cues)
+            schedulePreviewTextSync()
         }
     }
 
@@ -2531,15 +3943,15 @@ struct SubtitleEditorPanel: View {
             return false
         }
         let cueID = slot.cues[index].id
-        let updated = fontColoredText(slot.cues[index].text, hex: hex)
-        let changedCue = updated != slot.cues[index].text
+        let updated = SubtitleCueStyle.applying(.color(hex), to: slot.cues[index])
+        let changedCue = updated != slot.cues[index]
         if changedCue {
-            slot.cues[index].text = updated
+            slot.cues[index] = updated
         }
         if let originalIndex = slot.originalCues.firstIndex(where: { $0.id == cueID }) {
-            let updatedOriginal = fontColoredText(slot.originalCues[originalIndex].text, hex: hex)
-            if updatedOriginal != slot.originalCues[originalIndex].text {
-                slot.originalCues[originalIndex].text = updatedOriginal
+            let updatedOriginal = SubtitleCueStyle.applying(.color(hex), to: slot.originalCues[originalIndex])
+            if updatedOriginal != slot.originalCues[originalIndex] {
+                slot.originalCues[originalIndex] = updatedOriginal
             }
         }
         return changedCue
@@ -2744,7 +4156,19 @@ struct SubtitleEditorPanel: View {
             shiftAllCues(by: timingShiftSeconds)
         case .closeGaps:
             closeAllGaps(targetGap: timingGapSeconds)
+        case .calibrate:
+            break // The sheet supplies its validated two-point mapping separately.
         }
+    }
+
+    private func applyTimingCalibration(_ calibration: SubtitleTimingCalibration) {
+        guard let adjusted = try? calibration.applying(to: slot.cues), adjusted != slot.cues else { return }
+        let snapshot = makeUndoSnapshot()
+        previewSyncTask?.cancel()
+        playback.seek(to: playback.currentTime, pause: true)
+        slot.cues = adjusted
+        registerUndo("undo.adjustTiming", before: snapshot)
+        syncPreviewText()
     }
 
     private func shiftAllCues(by seconds: Double) {
@@ -2761,7 +4185,7 @@ struct SubtitleEditorPanel: View {
             return copy
         })
         registerUndo("undo.adjustTiming", before: snapshot)
-        syncPreviewText(for: slot.cues)
+        syncPreviewText()
     }
 
     private func closeAllGaps(targetGap rawGap: Double) {
@@ -2789,7 +4213,7 @@ struct SubtitleEditorPanel: View {
         if snapshot != makeUndoSnapshot() {
             registerUndo("undo.adjustTiming", before: snapshot)
         }
-        syncPreviewText(for: slot.cues)
+        syncPreviewText()
     }
 
     private func canResetCue(_ cueID: SubtitleCue.ID) -> Bool {
@@ -2816,15 +4240,15 @@ struct SubtitleEditorPanel: View {
     }
 
     private struct SlotCacheSignal: Equatable {
-        let cuesCount: Int
-        let originalCuesCount: Int
+        let fileID: UUID
+        let originalRevision: UUID
         let speakerColors: [String: String]
     }
 
     private var slotCacheSignal: SlotCacheSignal {
         SlotCacheSignal(
-            cuesCount: slot.cues.count,
-            originalCuesCount: slot.originalCues.count,
+            fileID: slot.id,
+            originalRevision: slot.originalCuesRevision,
             speakerColors: slot.speakerColors
         )
     }
@@ -2871,7 +4295,7 @@ struct SubtitleEditorPanel: View {
     }
 
     private func cueIndex(for cueID: SubtitleCue.ID) -> Int? {
-        slot.cues.firstIndex { $0.id == cueID }
+        cueIndexData.positions[cueID]
     }
 
     private func resetSelectedCue() {
@@ -2889,13 +4313,6 @@ struct SubtitleEditorPanel: View {
         transcribingCueID = cueID
         transcribeError = nil
         defer { if transcribingCueID == cueID { transcribingCueID = nil } }
-
-        let isReady = await backend.ensureRunning(timeout: 25.0)
-        api.baseURL = backend.baseURL
-        guard isReady else {
-            transcribeError = backend.message
-            return
-        }
 
         guard let cueClip = await extractCueClip(start: cue.start, end: cue.end) else {
             transcribeError = "Audio clip extraction failed"
@@ -2917,6 +4334,32 @@ struct SubtitleEditorPanel: View {
                 return
             }
 
+            if settings.canUseNativeQwen, let directory = settings.nativeQwenModelDirectory {
+                do {
+                    let options = NativeQwenService.Options(
+                        modelDirectory: directory,
+                        language: settings.recognitionLanguage == .auto ? nil : settings.recognitionLanguage.rawValue,
+                        context: settings.asrContext, maxTokens: settings.mimoMaxTokens,
+                        lineCharacters: settings.lineChars
+                    )
+                    let cues = try await NativeQwenService.shared.transcribeClip(audioURL: cueClip.url, options: options)
+                    try Task.checkCancellation()
+                    applyRetranscribedCueOutput(SubtitleDocument.serialize(cues, format: slot.outputFormat), cueID: cueID)
+                    await NativeQwenService.shared.release()
+                    return
+                } catch {
+                    await NativeQwenService.shared.release()
+                    try Task.checkCancellation()
+                    if error is CancellationError { throw error }
+                    AppLog.api.error("Native cue fallback: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+            let isReady = await backend.ensureRunning(timeout: 25.0)
+            api.baseURL = backend.baseURL
+            guard isReady else {
+                transcribeError = backend.message
+                return
+            }
             let text = try await transcribeCueClip(cueClip)
             applyRetranscribedCueOutput(text, cueID: cueID)
         } catch {
@@ -2998,11 +4441,21 @@ struct SubtitleEditorPanel: View {
         if snapshot != makeUndoSnapshot() {
             registerUndo("undo.editSubtitle", before: snapshot)
         }
-        schedulePreviewTextSync(for: slot.cues)
-        scheduleTermStatsSync(for: slot.cues)
+        schedulePreviewTextSync()
     }
 
     private func extractCueClip(start: Double, end: Double) async -> (url: URL, duration: Double)? {
+        // Crop the original media before any whole-file compatibility conversion.
+        let margin: Double = 0.2
+        let safeStart = max(0, start - margin)
+        let safeDuration = max(0.4, end + margin - safeStart)
+        do {
+            let pcm = try await NativeAudioExporter.shared.extract(
+                source: slot.url, start: safeStart, duration: safeDuration)
+            return (pcm.url, pcm.duration)
+        } catch {
+            if Task.isCancelled || error is CancellationError { return nil }
+        }
         let audioURL = await AudioSource.resolve(slot.url)
 
         let cachesDir: URL
@@ -3018,11 +4471,6 @@ struct SubtitleEditorPanel: View {
         }
         try? FileManager.default.createDirectory(at: cachesDir, withIntermediateDirectories: true)
         let dest = cachesDir.appendingPathComponent("\(UUID().uuidString).m4a")
-
-        // A small margin so the model has audio context at each edge.
-        let margin: Double = 0.2
-        let safeStart = max(0, start - margin)
-        let safeDuration = max(0.4, (end - start) + margin * 2)
 
         if let result = await clipViaAVFoundation(
             source: audioURL,
@@ -3099,6 +4547,7 @@ struct SubtitleEditorPanel: View {
         slot.cues[selectedCueIndex].start = original.start
         slot.cues[selectedCueIndex].end = original.end
         slot.cues[selectedCueIndex].text = original.text
+        slot.cues[selectedCueIndex].bilingual = original.bilingualText
         slot.cues[selectedCueIndex].confidence = original.confidence
         slot.cues[selectedCueIndex].speaker = original.speaker
         slot.cues = SubtitleDocument.normalize(slot.cues)
@@ -3107,15 +4556,54 @@ struct SubtitleEditorPanel: View {
             registerUndo("undo.resetCue", before: snapshot)
         }
         scheduleCueTimingSync(for: slot.cues)
-        scheduleTermStatsSync(for: slot.cues)
+    }
+
+    private func presentSplit(_ cue: SubtitleCue) {
+        let time = playback.currentTime
+        guard transcribingCueID == nil, SubtitleCueSplit.canSplit(cue, at: time) else { return }
+        playback.seek(to: time, pause: true)
+        splitRequest = .init(fileURL: slot.url, cue: cue, time: time)
+    }
+
+    private func applySplit(_ request: SubtitleSplitRequest, sourceOffset: Int, translationOffset: Int?) {
+        guard slot.url == request.fileURL, transcribingCueID == nil,
+              let index = cueIndex(for: request.cue.id), slot.cues[index] == request.cue,
+              let (first, second) = SubtitleCueSplit.split(request.cue, at: request.time,
+                  sourceOffset: sourceOffset, translationOffset: translationOffset) else { return }
+        let snapshot = makeUndoSnapshot()
+        previewSyncTask?.cancel()
+        selectedTextRange = nil
+        textEditUndoBurst = nil
+        slot.cues.replaceSubrange(index...index, with: [first, second])
+        slot.cues = SubtitleDocument.normalize(slot.cues)
+        slot.selectedCueID = first.id
+        registerUndo("undo.splitCue", before: snapshot)
+        scheduleCueTimingSync(for: slot.cues)
+    }
+
+    private func mergeCandidate(for cueID: SubtitleCue.ID) -> SubtitleCue? {
+        guard let index = cueIndex(for: cueID), slot.cues.indices.contains(index + 1) else { return nil }
+        return SubtitleCueMerge.merged(slot.cues[index], slot.cues[index + 1])
+    }
+
+    private func mergeWithNext(_ cueID: SubtitleCue.ID) {
+        guard transcribingCueID == nil, let index = cueIndex(for: cueID),
+              let merged = mergeCandidate(for: cueID) else { return }
+        let snapshot = makeUndoSnapshot()
+        previewSyncTask?.cancel()
+        selectedTextRange = nil
+        textEditUndoBurst = nil
+        slot.cues[index] = merged
+        slot.cues.remove(at: index + 1)
+        slot.cues = SubtitleDocument.normalize(slot.cues)
+        slot.selectedCueID = merged.id
+        registerUndo("undo.mergeCues", before: snapshot)
+        scheduleCueTimingSync(for: slot.cues)
     }
 
     private func duplicateCue(_ cueID: SubtitleCue.ID) {
         guard let index = cueIndex(for: cueID) else { return }
-        let source = slot.cues[index]
-        let start = source.end
-        let end = start + max(0.5, source.duration)
-        insertCue(at: index + 1, start: start, end: end, text: source.text, confidence: source.confidence, speaker: source.speaker)
+        insertCue(slot.cues[index].duplicatedAfterEnd(), at: index + 1)
     }
 
     private func insertCue(before cueID: SubtitleCue.ID) {
@@ -3151,8 +4639,6 @@ struct SubtitleEditorPanel: View {
         confidence: Double? = nil,
         speaker: String? = nil
     ) {
-        let snapshot = makeUndoSnapshot()
-        previewSyncTask?.cancel()
         var cue = SubtitleCue(
             index: insertionIndex + 1,
             start: max(0, start),
@@ -3165,13 +4651,20 @@ struct SubtitleEditorPanel: View {
            let hex = slot.speakerColors[speaker] {
             cue.text = fontColoredText(cue.text, hex: hex)
         }
+        insertCue(cue, at: insertionIndex)
+    }
+
+    private func insertCue(_ cue: SubtitleCue, at insertionIndex: Int) {
+        let snapshot = makeUndoSnapshot()
+        previewSyncTask?.cancel()
+        selectedTextRange = nil
+        textEditUndoBurst = nil
         let safeIndex = min(max(0, insertionIndex), slot.cues.count)
         slot.cues.insert(cue, at: safeIndex)
         slot.cues = SubtitleDocument.normalize(slot.cues)
         slot.selectedCueID = cue.id
         registerUndo("undo.insertCue", before: snapshot)
         scheduleCueTimingSync(for: slot.cues)
-        scheduleTermStatsSync(for: slot.cues)
     }
 
     private func closeGap(around cueID: SubtitleCue.ID) {
@@ -3209,7 +4702,6 @@ struct SubtitleEditorPanel: View {
         }
         registerUndo("undo.deleteCue", before: snapshot)
         scheduleCueTimingSync(for: slot.cues)
-        scheduleTermStatsSync(for: slot.cues)
     }
 
     private func deleteMatchingCues(referenceCueID: SubtitleCue.ID) {
@@ -3237,19 +4729,15 @@ struct SubtitleEditorPanel: View {
         }
         registerUndo("undo.deleteMatchingCues", before: snapshot)
         scheduleCueTimingSync(for: slot.cues)
-        scheduleTermStatsSync(for: slot.cues)
     }
 
     private func findNext() {
         guard !findText.isEmpty, !slot.cues.isEmpty else { return }
         let startIndex = selectedCueIndex.map { $0 + 1 } ?? 0
-        for offset in 0..<slot.cues.count {
-            let index = (startIndex + offset) % slot.cues.count
-            if containsMatch(slot.cues[index].text) {
-                slot.selectedCueID = slot.cues[index].id
-                findStatus = String(format: Copy.text("editor.findSelected", language: language), slot.cues[index].index)
-                return
-            }
+        if let index = searchResults.indices.first(where: { $0 >= startIndex }) ?? searchResults.indices.first {
+            slot.selectedCueID = slot.cues[index].id
+            findStatus = String(format: Copy.text("editor.findSelected", language: language), slot.cues[index].index)
+            return
         }
         findStatus = Copy.text("editor.findNoMatch", language: language)
         NSSound.beep()
@@ -3262,10 +4750,14 @@ struct SubtitleEditorPanel: View {
             return
         }
         let snapshot = makeUndoSnapshot()
-        if replaceFirst(in: &slot.cues[selectedCueIndex].text) {
-            registerUndo("undo.replaceText", before: snapshot)
-            schedulePreviewTextSync(for: slot.cues)
-            scheduleTermStatsSync(for: slot.cues)
+        let result = textSearch.replacing(in: slot.cues[selectedCueIndex], all: false)
+        if result.count > 0 {
+            if result.cue != slot.cues[selectedCueIndex] {
+                slot.cues[selectedCueIndex] = result.cue
+                selectedTextRange = nil
+                registerUndo("undo.replaceText", before: snapshot)
+            }
+            schedulePreviewTextSync()
             findStatus = String(format: Copy.text("editor.replaceOneCount", language: language), 1)
             return
         }
@@ -3277,12 +4769,14 @@ struct SubtitleEditorPanel: View {
         let snapshot = makeUndoSnapshot()
         var total = 0
         for index in slot.cues.indices {
-            total += replaceAllMatches(in: &slot.cues[index].text)
+            let result = textSearch.replacing(in: slot.cues[index], all: true)
+            total += result.count
+            slot.cues[index] = result.cue
         }
-        if total > 0 {
+        if total > 0, snapshot != makeUndoSnapshot() {
+            selectedTextRange = nil
             registerUndo("undo.replaceText", before: snapshot)
-            schedulePreviewTextSync(for: slot.cues)
-            scheduleTermStatsSync(for: slot.cues)
+            schedulePreviewTextSync()
         }
         findStatus = String(format: Copy.text("editor.replaceAllCount", language: language), total)
         if total == 0 {
@@ -3290,56 +4784,22 @@ struct SubtitleEditorPanel: View {
         }
     }
 
+    private var textSearch: SubtitleTextSearch {
+        SubtitleTextSearch(query: findText, replacement: replacementText, matchCase: matchCase, scope: findScope)
+    }
+
+    private var highlightMarkers: TimelineMarkerSet {
+        let search = SubtitleTextSearch(query: selectedFrequentTerm ?? "", replacement: "", matchCase: false, scope: .all)
+        return highlightCache.value(cues: slot.cues, revision: slot.cuesRevision,
+                                    search: search, literalHighlight: true).markers
+    }
+
+    private var searchResults: SubtitleSearchCache.Result {
+        searchCache.value(cues: slot.cues, revision: slot.cuesRevision, search: textSearch)
+    }
+
     private func occurrenceCount() -> Int {
-        guard !findText.isEmpty else { return 0 }
-        return slot.cues.reduce(0) { count, cue in
-            count + ranges(in: cue.text).count
-        }
-    }
-
-    private func containsMatch(_ text: String) -> Bool {
-        text.range(of: findText, options: searchOptions) != nil
-    }
-
-    private func replaceFirst(in text: inout String) -> Bool {
-        guard let range = text.range(of: findText, options: searchOptions) else { return false }
-        text.replaceSubrange(range, with: replacementText)
-        return true
-    }
-
-    private func replaceAllMatches(in text: inout String) -> Int {
-        var count = 0
-        var searchStartOffset = 0
-        while searchStartOffset <= text.count {
-            let start = text.index(text.startIndex, offsetBy: searchStartOffset)
-            guard let range = text.range(
-                of: findText,
-                options: searchOptions,
-                range: start..<text.endIndex
-            ) else {
-                break
-            }
-            let offset = text.distance(from: text.startIndex, to: range.lowerBound)
-            text.replaceSubrange(range, with: replacementText)
-            count += 1
-            searchStartOffset = min(text.count, offset + replacementText.count)
-        }
-        return count
-    }
-
-    private func ranges(in text: String) -> [Range<String.Index>] {
-        guard !findText.isEmpty else { return [] }
-        var ranges: [Range<String.Index>] = []
-        var searchRange = text.startIndex..<text.endIndex
-        while let range = text.range(of: findText, options: searchOptions, range: searchRange) {
-            ranges.append(range)
-            searchRange = range.upperBound..<text.endIndex
-        }
-        return ranges
-    }
-
-    private var searchOptions: String.CompareOptions {
-        matchCase ? [] : [.caseInsensitive, .diacriticInsensitive]
+        searchResults.count
     }
 
     private func playSelectedCue() {
@@ -3350,6 +4810,10 @@ struct SubtitleEditorPanel: View {
 
     private func toggleMarkupTag(_ tag: String) {
         guard let selectedCueIndex else { return }
+        if slot.cues[selectedCueIndex].bilingualText != nil {
+            commitBilingualStyle(.toggleTag(tag))
+            return
+        }
         var text = slot.cues[selectedCueIndex].text
         guard !text.isEmpty else { return }
 
@@ -3373,6 +4837,10 @@ struct SubtitleEditorPanel: View {
 
     private func applyCueColor(_ color: Color) {
         guard let selectedCueIndex else { return }
+        if slot.cues[selectedCueIndex].bilingualText != nil {
+            commitBilingualStyle(.color(hexString(for: color)))
+            return
+        }
         var text = slot.cues[selectedCueIndex].text
         guard !text.isEmpty else { return }
         let hex = hexString(for: color)
@@ -3392,6 +4860,10 @@ struct SubtitleEditorPanel: View {
 
     private func clearCueStyle() {
         guard let selectedCueIndex else { return }
+        if slot.cues[selectedCueIndex].bilingualText != nil {
+            commitBilingualStyle(.clear)
+            return
+        }
         var text = slot.cues[selectedCueIndex].text
         guard !text.isEmpty else { return }
 
@@ -3412,6 +4884,18 @@ struct SubtitleEditorPanel: View {
         commitStyleText(clearMarkup(in: text), selection: nil)
     }
 
+    private func commitBilingualStyle(_ operation: SubtitleCueStyle.Operation) {
+        guard let selectedCueIndex else { return }
+        let current = slot.cues[selectedCueIndex]
+        let updated = SubtitleCueStyle.applying(operation, to: current, scope: styleScope)
+        guard updated != current else { return }
+        let snapshot = makeUndoSnapshot()
+        slot.cues[selectedCueIndex] = updated
+        selectedTextRange = nil
+        registerUndo("undo.styleSubtitle", before: snapshot)
+        schedulePreviewTextSync()
+    }
+
     private func commitStyleText(_ text: String, selection: NSRange?) {
         guard let selectedCueIndex else { return }
         guard text != slot.cues[selectedCueIndex].text else { return }
@@ -3419,8 +4903,7 @@ struct SubtitleEditorPanel: View {
         slot.cues[selectedCueIndex].text = text
         selectedTextRange = selection
         registerUndo("undo.styleSubtitle", before: snapshot)
-        schedulePreviewTextSync(for: slot.cues)
-        scheduleTermStatsSync(for: slot.cues)
+        schedulePreviewTextSync()
     }
 
     private func activeStyleSelection(in text: String) -> NSRange? {
@@ -3540,46 +5023,22 @@ struct SubtitleEditorPanel: View {
     }
 
     private func clearMarkup(in text: String) -> String {
-        var text = text.replacingOccurrences(
-            of: #"<font\b[^>]*>"#,
-            with: "",
-            options: [.regularExpression, .caseInsensitive]
-        )
-        for tag in ["b", "i", "u", "font"] {
-            text = text.replacingOccurrences(
-                of: "</\(tag)>",
-                with: "",
-                options: [.caseInsensitive]
-            )
-            text = text.replacingOccurrences(
-                of: "<\(tag)>",
-                with: "",
-                options: [.caseInsensitive]
-            )
-        }
-        return text
+        SubtitleCueStyle.clearMarkup(in: text)
     }
 
     private func fontMarkupRemoved(from text: String) -> String {
-        text.replacingOccurrences(
-            of: #"<font\b[^>]*>"#,
-            with: "",
-            options: [.regularExpression, .caseInsensitive]
-        )
-        .replacingOccurrences(
-            of: "</font>",
-            with: "",
-            options: [.caseInsensitive]
-        )
+        SubtitleCueStyle.fontMarkupRemoved(from: text)
     }
 
     private func fontColoredText(_ text: String, hex: String) -> String {
-        let body = fontMarkupRemoved(from: text).trimmingCharacters(in: .whitespacesAndNewlines)
-        return body.isEmpty ? "" : "<font color=\"\(hex)\">\(body)</font>"
+        SubtitleCueStyle.fontColoredText(text, hex: hex)
     }
 
     private func hasOuterMarkupTag(_ tag: String) -> Bool {
         guard let selectedCueIndex else { return false }
+        if slot.cues[selectedCueIndex].bilingualText != nil {
+            return SubtitleCueStyle.hasTag(tag, in: slot.cues[selectedCueIndex], scope: styleScope)
+        }
         let text = slot.cues[selectedCueIndex].text
         if let selection = activeStyleSelection(in: text),
            let range = Range(selection, in: text) {
@@ -3591,6 +5050,9 @@ struct SubtitleEditorPanel: View {
 
     private var hasOuterFontColor: Bool {
         guard let selectedCueIndex else { return false }
+        if slot.cues[selectedCueIndex].bilingualText != nil {
+            return SubtitleCueStyle.hasColor(in: slot.cues[selectedCueIndex], scope: styleScope)
+        }
         let text = slot.cues[selectedCueIndex].text
         if let selection = activeStyleSelection(in: text),
            let range = Range(selection, in: text) {
@@ -3601,28 +5063,11 @@ struct SubtitleEditorPanel: View {
     }
 
     private func unwrappedMarkupText(_ text: String, tag: String) -> String? {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lower = trimmed.lowercased()
-        let open = "<\(tag)>"
-        let close = "</\(tag)>"
-        guard lower.hasPrefix(open), lower.hasSuffix(close) else { return nil }
-        let start = trimmed.index(trimmed.startIndex, offsetBy: open.count)
-        let end = trimmed.index(trimmed.endIndex, offsetBy: -close.count)
-        guard start <= end else { return nil }
-        return String(trimmed[start..<end])
+        SubtitleCueStyle.unwrappedMarkupText(text, tag: tag)
     }
 
     private func unwrappedFontText(_ text: String) -> String? {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lower = trimmed.lowercased()
-        guard lower.hasPrefix("<font "), lower.hasSuffix("</font>"),
-              let openEnd = trimmed.firstIndex(of: ">") else {
-            return nil
-        }
-        let start = trimmed.index(after: openEnd)
-        let end = trimmed.index(trimmed.endIndex, offsetBy: -"</font>".count)
-        guard start <= end else { return nil }
-        return String(trimmed[start..<end])
+        SubtitleCueStyle.unwrappedFontText(text)
     }
 
     private func hexString(for color: Color) -> String {
@@ -3653,2563 +5098,10 @@ struct SubtitleEditorPanel: View {
     }
 }
 
-private struct TimelineZoomSlider: NSViewRepresentable {
-    @Binding var value: Double
-    @Binding var isDragging: Bool
-    let range: ClosedRange<Double>
-    let step: Double
-
-    private final class TrackingSlider: NSSlider {
-        var onTrackingBegan: (() -> Void)?
-        var onTrackingEnded: (() -> Void)?
-
-        override func mouseDown(with event: NSEvent) {
-            onTrackingBegan?()
-            super.mouseDown(with: event)
-            onTrackingEnded?()
-        }
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(parent: self)
-    }
-
-    func makeNSView(context: Context) -> NSSlider {
-        let slider = TrackingSlider(
-            value: normalizedValue(for: value),
-            minValue: 0,
-            maxValue: 1,
-            target: context.coordinator,
-            action: #selector(Coordinator.valueChanged(_:))
-        )
-        slider.isContinuous = true
-        slider.numberOfTickMarks = 0
-        slider.allowsTickMarkValuesOnly = false
-        slider.controlSize = .small
-        slider.onTrackingBegan = {
-            context.coordinator.parent.isDragging = true
-        }
-        slider.onTrackingEnded = {
-            context.coordinator.parent.isDragging = false
-        }
-        return slider
-    }
-
-    func updateNSView(_ slider: NSSlider, context: Context) {
-        context.coordinator.parent = self
-        if let slider = slider as? TrackingSlider {
-            slider.onTrackingBegan = {
-                context.coordinator.parent.isDragging = true
-            }
-            slider.onTrackingEnded = {
-                context.coordinator.parent.isDragging = false
-            }
-        }
-        let normalized = normalizedValue(for: value)
-        if abs(slider.doubleValue - normalized) > 0.0001 {
-            slider.doubleValue = normalized
-        }
-    }
-
-    private func normalizedValue(for rawValue: Double) -> Double {
-        let bounds = sanitizedBounds
-        guard bounds.upper > bounds.lower else { return 0 }
-        let clampedValue = clamp(rawValue, bounds.lower, bounds.upper)
-        return clamp(log(clampedValue / bounds.lower) / log(bounds.upper / bounds.lower), 0, 1)
-    }
-
-    private func value(for normalized: Double) -> Double {
-        let bounds = sanitizedBounds
-        guard bounds.upper > bounds.lower else { return bounds.lower }
-        let rawValue = bounds.lower * pow(bounds.upper / bounds.lower, clamp(normalized, 0, 1))
-        guard step > 0 else { return clamp(rawValue, bounds.lower, bounds.upper) }
-        let steppedValue = (rawValue / step).rounded() * step
-        return clamp(steppedValue, bounds.lower, bounds.upper)
-    }
-
-    private var sanitizedBounds: (lower: Double, upper: Double) {
-        let lower = max(0.0001, min(range.lowerBound, range.upperBound))
-        let upper = max(lower, max(range.lowerBound, range.upperBound))
-        return (lower, upper)
-    }
-
-    private func clamp(_ value: Double, _ lower: Double, _ upper: Double) -> Double {
-        min(max(value, lower), upper)
-    }
-
-    @MainActor
-    final class Coordinator: NSObject {
-        var parent: TimelineZoomSlider
-
-        init(parent: TimelineZoomSlider) {
-            self.parent = parent
-        }
-
-        @objc func valueChanged(_ sender: NSSlider) {
-            parent.value = parent.value(for: sender.doubleValue)
-        }
-    }
-}
-
-private struct PlaybackZoomableTimeline: View {
-    @Binding var cues: [SubtitleCue]
-    @Binding var selectedCueID: SubtitleCue.ID?
-    @Binding var highlightTerm: String?
-    let findTerm: String?
-
-    let waveform: WaveformSamples
-    let duration: Double
-    @Binding var zoom: Double
-    let zoomRange: ClosedRange<Double>
-    let playback: PlaybackController
-    let centerRequest: TimelineCenterRequest?
-    @Binding var isSliderZooming: Bool
-    let activeSpeakerName: String?
-    let speakerColors: [String: String]
-    let language: AppLanguage
-    let onSeek: (Double) -> Void
-    let onScrub: (Double) -> Void
-    let onCueTimingEditBegan: () -> Void
-    let onCueTimingEditEnded: () -> Void
-    let cueActions: TimelineCueActions
-
-    var body: some View {
-        ZoomableTimeline(
-            cues: $cues,
-            selectedCueID: $selectedCueID,
-            highlightTerm: $highlightTerm,
-            findTerm: findTerm,
-            waveform: waveform,
-            duration: duration,
-            zoom: $zoom,
-            zoomRange: zoomRange,
-            currentTime: playback.currentTime,
-            centerRequest: centerRequest,
-            isSliderZooming: $isSliderZooming,
-            activeSpeakerName: activeSpeakerName,
-            speakerColors: speakerColors,
-            language: language,
-            onSeek: onSeek,
-            onScrub: onScrub,
-            onCueTimingEditBegan: onCueTimingEditBegan,
-            onCueTimingEditEnded: onCueTimingEditEnded,
-            cueActions: cueActions
-        )
-    }
-}
-
-private struct PlaybackCompactTimelineStrip: View {
-    let cues: [SubtitleCue]
-    @Binding var selectedCueID: SubtitleCue.ID?
-    @Binding var highlightTerm: String?
-    let findTerm: String?
-    let waveform: WaveformSamples
-    let duration: Double
-    let playback: PlaybackController
-    let activeSpeakerName: String?
-    let onSeek: (Double) -> Void
-
-    var body: some View {
-        CompactTimelineStrip(
-            cues: cues,
-            selectedCueID: $selectedCueID,
-            highlightTerm: $highlightTerm,
-            findTerm: findTerm,
-            waveform: waveform,
-            duration: duration,
-            currentTime: playback.currentTime,
-            activeSpeakerName: activeSpeakerName,
-            onSeek: onSeek
-        )
-    }
-}
-
-private struct ZoomableTimeline: View {
-    @Binding var cues: [SubtitleCue]
-    @Binding var selectedCueID: SubtitleCue.ID?
-    @Binding var highlightTerm: String?
-    let findTerm: String?
-
-    let waveform: WaveformSamples
-    let duration: Double
-    @Binding var zoom: Double
-    let zoomRange: ClosedRange<Double>
-    let currentTime: Double
-    let centerRequest: TimelineCenterRequest?
-    @Binding var isSliderZooming: Bool
-    let activeSpeakerName: String?
-    let speakerColors: [String: String]
-    let language: AppLanguage
-    let onSeek: (Double) -> Void
-    let onScrub: (Double) -> Void
-    let onCueTimingEditBegan: () -> Void
-    let onCueTimingEditEnded: () -> Void
-    let cueActions: TimelineCueActions
-
-    @State private var isHandleDragging = false
-    @State private var scrollPosition = ScrollPosition()
-    @State private var visibleContentOffsetX: CGFloat = 0
-    @State private var visibleFractionRange: ClosedRange<Double> = 0...1
-    @State private var magnifySession: ZoomAnchorSession?
-    @State private var sliderZoomSession: ZoomAnchorSession?
-    @State private var sliderZoomCleanupTask: Task<Void, Never>?
-
-    private struct ZoomAnchorSession: Equatable {
-        let baselineZoom: Double
-        let anchorFraction: Double
-        let anchorScreenX: CGFloat
-        let viewportWidth: CGFloat
-    }
-
-    var body: some View {
-        GeometryReader { proxy in
-            let viewportWidth = proxy.size.width
-            let contentWidth = max(viewportWidth, viewportWidth * zoom)
-            let initialVisibleRange = 0...min(1, 1 / max(zoom, 1))
-            let effectiveVisibleRange = visibleFractionRange == 0...1 && zoom > 1 ? initialVisibleRange : visibleFractionRange
-
-            ScrollView(.horizontal, showsIndicators: true) {
-                WaveformTimelineEditor(
-                    cues: $cues,
-                    selectedCueID: $selectedCueID,
-                    isHandleDragging: $isHandleDragging,
-                    highlightTerm: $highlightTerm,
-                    findTerm: findTerm,
-                    waveform: waveform,
-                    duration: duration,
-                    zoom: zoom,
-                    currentTime: currentTime,
-                    activeSpeakerName: activeSpeakerName,
-                    speakerColors: speakerColors,
-                    language: language,
-                    visibleFractionRange: effectiveVisibleRange,
-                    onSeek: onSeek,
-                    onScrub: onScrub,
-                    onCueTimingEditBegan: onCueTimingEditBegan,
-                    onCueTimingEditEnded: onCueTimingEditEnded,
-                    cueActions: cueActions
-                )
-                .frame(width: contentWidth, height: proxy.size.height)
-            }
-            .scrollDisabled(isHandleDragging || magnifySession != nil || sliderZoomSession != nil)
-            .scrollPosition($scrollPosition)
-            .gesture(makeMagnifyGesture(viewport: viewportWidth))
-            .onScrollGeometryChange(for: ClosedRange<Double>.self) { geometry in
-                let contentWidth = max(geometry.contentSize.width, 1)
-                let visibleRect = geometry.visibleRect
-                let lower = quantizedFraction(Double(visibleRect.minX / contentWidth))
-                let upper = max(lower, quantizedFraction(Double(visibleRect.maxX / contentWidth)))
-                return lower...upper
-            } action: { oldValue, newValue in
-                guard abs(newValue.lowerBound - oldValue.lowerBound) > 0.0002
-                    || abs(newValue.upperBound - oldValue.upperBound) > 0.0002 else { return }
-                visibleFractionRange = newValue
-            }
-            .onScrollGeometryChange(for: CGFloat.self) { geometry in
-                max(0, geometry.visibleRect.minX)
-            } action: { _, newValue in
-                visibleContentOffsetX = newValue
-            }
-            .onChange(of: centerRequest) { _, request in
-                guard magnifySession == nil,
-                      sliderZoomSession == nil else { return }
-                centerOnSelectedCue(viewport: viewportWidth, content: contentWidth, animated: true, cueID: request?.cueID)
-            }
-            .onChange(of: zoom) { oldZoom, newZoom in
-                guard magnifySession == nil else { return }
-                if isSliderZooming || sliderZoomSession != nil {
-                    let session = sliderZoomSession ?? makePlayheadZoomSession(viewport: viewportWidth, baselineZoom: oldZoom)
-                    sliderZoomSession = session
-                    anchorZoomSession(session, newZoom: newZoom)
-                }
-            }
-            .onChange(of: isSliderZooming) { _, newValue in
-                if newValue {
-                    sliderZoomCleanupTask?.cancel()
-                    sliderZoomSession = makePlayheadZoomSession(viewport: viewportWidth, baselineZoom: zoom)
-                } else {
-                    scheduleSliderZoomSessionCleanup()
-                }
-            }
-        }
-    }
-
-    private func centerOnSelectedCue(viewport: CGFloat, content: CGFloat, animated: Bool, cueID: SubtitleCue.ID?) {
-        guard let cueID,
-              let cue = cues.first(where: { $0.id == cueID }) else { return }
-        let cueCenterX = xPosition((cue.start + cue.end) / 2, width: content)
-        let target = max(0, min(content - viewport, cueCenterX - viewport / 2))
-        let scroll = {
-            visibleContentOffsetX = target
-            scrollPosition.scrollTo(x: target)
-        }
-        if animated {
-            withAnimation(.easeInOut(duration: 0.22)) { scroll() }
-        } else {
-            DispatchQueue.main.async { scroll() }
-        }
-    }
-
-    private func makePlayheadZoomSession(viewport: CGFloat, baselineZoom: Double) -> ZoomAnchorSession {
-        let safeViewport = max(viewport, 1)
-        let anchorFraction = min(max(currentTime / max(duration, 0.001), 0), 1)
-        let contentWidth = max(safeViewport, safeViewport * baselineZoom)
-        let playheadScreenX = CGFloat(anchorFraction) * contentWidth - visibleContentOffsetX
-        return ZoomAnchorSession(
-            baselineZoom: baselineZoom,
-            anchorFraction: anchorFraction,
-            anchorScreenX: min(max(0, playheadScreenX), safeViewport),
-            viewportWidth: safeViewport
-        )
-    }
-
-    private func anchorZoomSession(_ session: ZoomAnchorSession, newZoom: Double) {
-        let newContentWidth = max(session.viewportWidth, session.viewportWidth * newZoom)
-        let target = CGFloat(session.anchorFraction) * newContentWidth - session.anchorScreenX
-        let maxOffset = max(0, newContentWidth - session.viewportWidth)
-        let clamped = min(max(0, target), maxOffset)
-        visibleContentOffsetX = clamped
-        scrollPosition.scrollTo(x: clamped)
-    }
-
-    private func scheduleSliderZoomSessionCleanup() {
-        let session = sliderZoomSession
-        sliderZoomCleanupTask?.cancel()
-        sliderZoomCleanupTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(120))
-            guard !Task.isCancelled,
-                  !isSliderZooming,
-                  sliderZoomSession == session else { return }
-            sliderZoomSession = nil
-        }
-    }
-
-    private func makeMagnifyGesture(viewport: CGFloat) -> some Gesture {
-        MagnifyGesture(minimumScaleDelta: 0.01)
-            .onChanged { value in
-                let safeViewport = max(viewport, 1)
-                let session: ZoomAnchorSession
-                if let existing = magnifySession {
-                    session = existing
-                } else {
-                    let startX = max(0, min(safeViewport, value.startLocation.x))
-                    let visibleSpan = max(0, visibleFractionRange.upperBound - visibleFractionRange.lowerBound)
-                    let anchor = visibleFractionRange.lowerBound + (startX / safeViewport) * visibleSpan
-                    let created = ZoomAnchorSession(
-                        baselineZoom: zoom,
-                        anchorFraction: min(1, max(0, anchor)),
-                        anchorScreenX: startX,
-                        viewportWidth: safeViewport
-                    )
-                    magnifySession = created
-                    session = created
-                }
-
-                let proposed = session.baselineZoom * Double(value.magnification)
-                let newZoom = min(zoomRange.upperBound, max(zoomRange.lowerBound, proposed))
-                zoom = newZoom
-                anchorZoomSession(session, newZoom: newZoom)
-            }
-            .onEnded { _ in
-                magnifySession = nil
-            }
-    }
-
-    private func xPosition(_ seconds: Double, width: CGFloat) -> CGFloat {
-        CGFloat(max(0, min(seconds / max(duration, 0.001), 1))) * width
-    }
-
-    private func quantizedFraction(_ value: Double) -> Double {
-        let clamped = max(0, min(1, value))
-        return (clamped * 10_000).rounded() / 10_000
-    }
-}
-
-private struct TimelineDotsCanvas: View {
-    let cues: [SubtitleCue]
-    let term: String
-    let duration: Double
-    let topY: CGFloat
-    let baseDiameter: CGFloat
-    let emphasizedDiameter: CGFloat
-    let baseColor: Color
-    let emphasizedColor: Color
-    let emphasizedCueID: SubtitleCue.ID?
-
-    var body: some View {
-        GeometryReader { proxy in
-            ZStack(alignment: .topLeading) {
-                // Base dots — drawn in Canvas (cheap, many)
-                Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: true) { context, size in
-                    var basePath = Path()
-                    for cue in cues where cue.text.localizedCaseInsensitiveContains(term) {
-                        if cue.id == emphasizedCueID { continue }
-                        let mid = (cue.start + cue.end) / 2
-                        let x = CGFloat(max(0, min(mid / max(duration, 0.001), 1))) * size.width
-                        let rect = CGRect(
-                            x: x - baseDiameter / 2,
-                            y: topY,
-                            width: baseDiameter,
-                            height: baseDiameter
-                        )
-                        basePath.addEllipse(in: rect)
-                    }
-                    context.fill(basePath, with: .color(baseColor))
-                }
-
-                // Emphasized dot — a real SwiftUI view so position changes animate.
-                if let emphasizedCue {
-                    let mid = (emphasizedCue.start + emphasizedCue.end) / 2
-                    let x = CGFloat(max(0, min(mid / max(duration, 0.001), 1))) * proxy.size.width
-                    ZStack {
-                        Circle()
-                            .fill(emphasizedColor.opacity(0.35))
-                            .frame(width: emphasizedDiameter + 4, height: emphasizedDiameter + 4)
-                        Circle()
-                            .fill(emphasizedColor)
-                            .frame(width: emphasizedDiameter, height: emphasizedDiameter)
-                            .overlay(Circle().stroke(.white.opacity(0.9), lineWidth: 1))
-                    }
-                    .position(x: x, y: topY + emphasizedDiameter / 2)
-                    .transition(.scale(scale: 0.4).combined(with: .opacity))
-                }
-            }
-            .animation(.spring(response: 0.4, dampingFraction: 0.75), value: emphasizedCueID)
-        }
-    }
-
-    private var emphasizedCue: SubtitleCue? {
-        guard let id = emphasizedCueID else { return nil }
-        return cues.first { $0.id == id }
-    }
-}
-
-private struct CueDensityCanvas: View, Equatable {
-    enum Layout: Equatable {
-        case compact(height: CGFloat)
-        case expanded(top: CGFloat, height: CGFloat)
-    }
-
-    let cues: [SubtitleCue]
-    let duration: Double
-    let width: CGFloat
-    let activeSpeakerName: String?
-    let layout: Layout
-
-    var body: some View {
-        Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: true) { context, _ in
-            let binCount = densityBinCount
-            var deltas = [Int](repeating: 0, count: binCount + 1)
-            var speakerDeltas = [Int](repeating: 0, count: binCount + 1)
-
-            for cue in cues {
-                let lower = max(0, min(binCount - 1, Int((cue.start / max(duration, 0.001)) * Double(binCount))))
-                let upper = max(lower, min(binCount - 1, Int(ceil((cue.end / max(duration, 0.001)) * Double(binCount)))))
-                deltas[lower] += 1
-                if upper + 1 < deltas.count {
-                    deltas[upper + 1] -= 1
-                }
-                if speakerMatchesActive(cue) {
-                    speakerDeltas[lower] += 1
-                    if upper + 1 < speakerDeltas.count {
-                        speakerDeltas[upper + 1] -= 1
-                    }
-                }
-            }
-
-            var bins = [Int](repeating: 0, count: binCount)
-            var runningCount = 0
-            for index in 0..<binCount {
-                runningCount += deltas[index]
-                bins[index] = runningCount
-            }
-            let maxCount = max(bins.max() ?? 1, 1)
-            let binWidth = width / CGFloat(binCount)
-            for (index, count) in bins.enumerated() where count > 0 {
-                let intensity = min(1.0, Double(count) / Double(maxCount))
-                let rect = densityRect(index: index, binWidth: binWidth, intensity: intensity)
-                context.fill(
-                    Path(roundedRect: rect, cornerRadius: 2),
-                    with: .color(Color.teal.opacity(baseOpacity + opacityRange * intensity))
-                )
-            }
-
-            if activeSpeakerName != nil {
-                var runningSpeakerCount = 0
-                for index in 0..<binCount {
-                    runningSpeakerCount += speakerDeltas[index]
-                    guard runningSpeakerCount > 0 else { continue }
-                    context.fill(
-                        Path(roundedRect: speakerRect(index: index, binWidth: binWidth), cornerRadius: 2),
-                        with: .color(Color.teal.opacity(0.34))
-                    )
-                }
-            }
-        }
-    }
-
-    var densityBinCount: Int {
-        switch layout {
-        case .compact:
-            return max(20, min(180, Int(width / 4)))
-        case .expanded:
-            return max(24, min(260, Int(width / 3)))
-        }
-    }
-
-    private var baseOpacity: Double {
-        switch layout {
-        case .compact: return 0.18
-        case .expanded: return 0.18
-        }
-    }
-
-    private var opacityRange: Double {
-        switch layout {
-        case .compact: return 0.32
-        case .expanded: return 0.36
-        }
-    }
-
-    private func densityRect(index: Int, binWidth: CGFloat, intensity: Double) -> CGRect {
-        switch layout {
-        case .compact(let height):
-            let blockHeight = (height - 10) * (0.3 + 0.6 * intensity)
-            return CGRect(
-                x: CGFloat(index) * binWidth,
-                y: (height - blockHeight) / 2,
-                width: max(1, binWidth * 0.82),
-                height: blockHeight
-            )
-        case .expanded(let top, let height):
-            let blockHeight = height * (0.35 + 0.55 * intensity)
-            return CGRect(
-                x: CGFloat(index) * binWidth,
-                y: top + (height - blockHeight) / 2,
-                width: max(1, binWidth * 0.82),
-                height: blockHeight
-            )
-        }
-    }
-
-    private func speakerRect(index: Int, binWidth: CGFloat) -> CGRect {
-        switch layout {
-        case .compact(let height):
-            return CGRect(
-                x: CGFloat(index) * binWidth,
-                y: 4,
-                width: max(1, binWidth * 0.82),
-                height: height - 8
-            )
-        case .expanded(let top, let height):
-            return CGRect(
-                x: CGFloat(index) * binWidth,
-                y: top,
-                width: max(1, binWidth * 0.82),
-                height: height
-            )
-        }
-    }
-
-    private func speakerMatchesActive(_ cue: SubtitleCue) -> Bool {
-        guard let activeSpeakerName else { return false }
-        return SubtitleDocument.normalizedSpeakerName(cue.speaker) == activeSpeakerName
-    }
-}
-
-private struct CompactTimelineStrip: View {
-    let cues: [SubtitleCue]
-    @Binding var selectedCueID: SubtitleCue.ID?
-    @Binding var highlightTerm: String?
-    let findTerm: String?
-    let waveform: WaveformSamples
-    let duration: Double
-    let currentTime: Double
-    let activeSpeakerName: String?
-    let onSeek: (Double) -> Void
-
-    var body: some View {
-        GeometryReader { proxy in
-            let width = proxy.size.width
-            let height = proxy.size.height
-
-            ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 7)
-                    .fill(Color(nsColor: .textBackgroundColor))
-
-                ZStack {
-                    WaveformCanvas(
-                        samples: waveform,
-                        visibleFractionRange: 0...1,
-                        color: Color.accentColor.opacity(0.28),
-                        verticalPadding: 6,
-                        minimumBarWidth: 2
-                    )
-                        .equatable()
-                        .id(ObjectIdentifier(waveform))
-                        .transition(.opacity)
-                }
-                .animation(.easeInOut(duration: 0.3), value: ObjectIdentifier(waveform))
-                .allowsHitTesting(false)
-
-                if cues.count > 240 {
-                    compactDensityCanvas(width: width, height: height)
-                        .allowsHitTesting(false)
-                    if let selectedCue {
-                        compactSelectedDensityOverlay(cue: selectedCue, width: width, height: height)
-                            .allowsHitTesting(false)
-                            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .center)))
-                    }
-                } else {
-                    compactCueCanvas(width: width, height: height)
-                        .allowsHitTesting(false)
-                }
-
-                if let term = activeHighlightTerm {
-                    TimelineDotsCanvas(
-                        cues: cues,
-                        term: term,
-                        duration: duration,
-                        topY: 3,
-                        baseDiameter: 6,
-                        emphasizedDiameter: 6,
-                        baseColor: .yellow,
-                        emphasizedColor: .yellow,
-                        emphasizedCueID: nil
-                    )
-                    .allowsHitTesting(false)
-                    .transition(.opacity)
-                }
-
-                if let term = activeFindTerm {
-                    TimelineDotsCanvas(
-                        cues: cues,
-                        term: term,
-                        duration: duration,
-                        topY: 3,
-                        baseDiameter: 6,
-                        emphasizedDiameter: 10,
-                        baseColor: .green,
-                        emphasizedColor: .green,
-                        emphasizedCueID: selectedCueID
-                    )
-                    .allowsHitTesting(false)
-                    .transition(.opacity)
-                }
-
-                if duration > 0 {
-                    Rectangle()
-                        .fill(Color.red.opacity(0.85))
-                        .frame(width: 1.5, height: height - 6)
-                        .offset(x: xPosition(currentTime, width: width))
-                        .allowsHitTesting(false)
-                }
-            }
-            .contentShape(Rectangle())
-            .gesture(
-                SpatialTapGesture(coordinateSpace: .local)
-                    .onEnded { value in
-                        let seconds = clamp(Double(value.location.x / max(width, 1)) * duration, 0, duration)
-                        if let cue = cue(at: seconds) {
-                            selectedCueID = cue.id
-                        } else {
-                            onSeek(seconds)
-                        }
-                    }
-            )
-            .animation(.easeInOut(duration: 0.22), value: highlightTerm)
-            .animation(.easeInOut(duration: 0.22), value: findTerm)
-        }
-    }
-
-    private var activeHighlightTerm: String? {
-        guard let term = highlightTerm, !term.isEmpty else { return nil }
-        return term
-    }
-
-    private var activeFindTerm: String? {
-        guard let term = findTerm, !term.isEmpty else { return nil }
-        return term
-    }
-
-    private func cue(at seconds: Double) -> SubtitleCue? {
-        cues.last { cue in
-            seconds >= cue.start && seconds <= cue.end
-        }
-    }
-
-    private var selectedCue: SubtitleCue? {
-        guard let selectedCueID else { return nil }
-        return cues.first { $0.id == selectedCueID }
-    }
-
-    private func compactCueCanvas(width: CGFloat, height: CGFloat) -> some View {
-        Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: true) { context, _ in
-            for cue in cues {
-                let selected = cue.id == selectedCueID
-                let speakerMatched = speakerMatchesActive(cue)
-                let blockHeight = selected ? height - 10 : height - 16
-                let startX = xPosition(cue.start, width: width)
-                let endX = xPosition(cue.end, width: width)
-                let rect = CGRect(
-                    x: startX,
-                    y: (height - blockHeight) / 2,
-                    width: max(2, endX - startX),
-                    height: blockHeight
-                )
-                context.fill(
-                    Path(roundedRect: rect, cornerRadius: 2),
-                    with: .color(compactCueFillColor(selected: selected, speakerMatched: speakerMatched))
-                )
-            }
-        }
-    }
-
-    private func compactDensityCanvas(width: CGFloat, height: CGFloat) -> some View {
-        CueDensityCanvas(
-            cues: cues,
-            duration: duration,
-            width: width,
-            activeSpeakerName: activeSpeakerName,
-            layout: .compact(height: height)
-        )
-        .equatable()
-    }
-
-    private func compactSelectedDensityOverlay(cue: SubtitleCue, width: CGFloat, height: CGFloat) -> some View {
-        let binCount = max(20, min(180, Int(width / 4)))
-        let lower = max(0, min(binCount - 1, Int((cue.start / max(duration, 0.001)) * Double(binCount))))
-        let binWidth = width / CGFloat(binCount)
-        return RoundedRectangle(cornerRadius: 2)
-            .fill(Color.accentColor.opacity(0.5))
-            .frame(width: max(2, binWidth), height: height - 8)
-            .offset(x: CGFloat(lower) * binWidth, y: 4)
-            .animation(.easeInOut(duration: 0.16), value: cue.id)
-    }
-
-    private func xPosition(_ seconds: Double, width: CGFloat) -> CGFloat {
-        CGFloat(max(0, min(seconds / max(duration, 0.001), 1))) * width
-    }
-
-    private func compactCueFillColor(selected: Bool, speakerMatched: Bool) -> Color {
-        if selected {
-            return Color.accentColor.opacity(speakerMatched ? 0.68 : 0.55)
-        }
-        return Color.teal.opacity(speakerMatched ? 0.42 : 0.28)
-    }
-
-    private func speakerMatchesActive(_ cue: SubtitleCue) -> Bool {
-        guard let activeSpeakerName else { return false }
-        return SubtitleDocument.normalizedSpeakerName(cue.speaker) == activeSpeakerName
-    }
-
-    private func clamp(_ value: Double, _ lower: Double, _ upper: Double) -> Double {
-        if upper <= lower { return lower }
-        return min(max(value, lower), upper)
-    }
-}
-
-@MainActor
-struct TimelineCueActions {
-    let canReset: @MainActor (SubtitleCue.ID) -> Bool
-    let reset: @MainActor (SubtitleCue.ID) -> Void
-    let duplicate: @MainActor (SubtitleCue.ID) -> Void
-    let insertBefore: @MainActor (SubtitleCue.ID) -> Void
-    let insertAfter: @MainActor (SubtitleCue.ID) -> Void
-    let closeGap: @MainActor (SubtitleCue.ID) -> Void
-    let delete: @MainActor (SubtitleCue.ID) -> Void
-    let deleteMatching: @MainActor (SubtitleCue.ID) -> Void
-}
-
-@MainActor
-@ViewBuilder
-private func cueContextMenu(for cue: SubtitleCue, language: AppLanguage, actions: TimelineCueActions) -> some View {
-    Button {
-        actions.reset(cue.id)
-    } label: {
-        Label(Copy.text("editor.resetCue", language: language), systemImage: "arrow.counterclockwise")
-    }
-    .disabled(!actions.canReset(cue.id))
-
-    Button {
-        actions.duplicate(cue.id)
-    } label: {
-        Label(Copy.text("editor.duplicateCue", language: language), systemImage: "plus.square.on.square")
-    }
-
-    Divider()
-
-    Button {
-        actions.insertBefore(cue.id)
-    } label: {
-        Label(Copy.text("editor.addBefore", language: language), systemImage: "arrow.up.to.line.compact")
-    }
-
-    Button {
-        actions.insertAfter(cue.id)
-    } label: {
-        Label(Copy.text("editor.addAfter", language: language), systemImage: "arrow.down.to.line.compact")
-    }
-
-    Button {
-        actions.closeGap(cue.id)
-    } label: {
-        Label(Copy.text("editor.closeGap", language: language), systemImage: "arrow.left.and.right")
-    }
-
-    Divider()
-
-    Button(role: .destructive) {
-        actions.deleteMatching(cue.id)
-    } label: {
-        Label(Copy.text("editor.deleteMatchingCues", language: language), systemImage: "trash.slash")
-    }
-
-    Button(role: .destructive) {
-        actions.delete(cue.id)
-    } label: {
-        Label(Copy.text("editor.deleteCue", language: language), systemImage: "trash")
-    }
-}
-
-private struct WaveformTimelineEditor: View {
-    @Binding var cues: [SubtitleCue]
-    @Binding var selectedCueID: SubtitleCue.ID?
-    @Binding var isHandleDragging: Bool
-    @Binding var highlightTerm: String?
-    let findTerm: String?
-
-    let waveform: WaveformSamples
-    let duration: Double
-    let zoom: Double
-    let currentTime: Double
-    let activeSpeakerName: String?
-    let speakerColors: [String: String]
-    let language: AppLanguage
-    let visibleFractionRange: ClosedRange<Double>
-    let onSeek: (Double) -> Void
-    let onScrub: (Double) -> Void
-    let onCueTimingEditBegan: () -> Void
-    let onCueTimingEditEnded: () -> Void
-    let cueActions: TimelineCueActions
-
-    @State private var dragSession: HandleDragSession?
-    @State private var moveSession: CueMoveSession?
-    @State private var hoveredCueID: SubtitleCue.ID?
-
-    private struct HandleDragSession {
-        let cueID: SubtitleCue.ID
-        let edge: Edge
-        let initialStart: Double
-        let initialEnd: Double
-        var isSnapped: Bool = false
-    }
-
-    private struct CueMoveSession {
-        let cueID: SubtitleCue.ID
-        let initialStart: Double
-        let initialEnd: Double
-        var isSnapped: Bool = false
-    }
-
-    private enum Edge { case start, end }
-
-    // Layout constants
-    private let cueTopOffset: CGFloat = 22
-    private let cueHeight: CGFloat = 64
-    private let handleHitWidth: CGFloat = 16
-    private let handleVisualWidth: CGFloat = 5
-    private let handleHitHeightExtra: CGFloat = 12
-    private let moveHandleHitHeight: CGFloat = 22
-    private let moveHandleVisualWidth: CGFloat = 34
-    private let moveHandleVisualHeight: CGFloat = 4
-    private let cursorDragHeight: CGFloat = 20
-    private let rulerHeight: CGFloat = 22
-    private let waveformBottomGap: CGFloat = 4
-
-    var body: some View {
-        GeometryReader { proxy in
-            let width = proxy.size.width
-            let height = proxy.size.height
-            let detailedCues = shouldRenderDetailedCues(width: width)
-            let visibleCueRange = detailedCues ? visibleCueRange() : cues.indices
-
-            ZStack(alignment: .topLeading) {
-                background
-                    .contentShape(Rectangle())
-
-                ZStack {
-                    WaveformCanvas(
-                        samples: waveform,
-                        visibleFractionRange: visibleFractionRange,
-                        color: Color.accentColor.opacity(0.38),
-                        verticalPadding: 14,
-                        minimumBarWidth: 2,
-                        bottomPadding: rulerHeight + waveformBottomGap
-                    )
-                        .equatable()
-                        .id(ObjectIdentifier(waveform))
-                        .transition(.opacity)
-                }
-                .animation(.easeInOut(duration: 0.3), value: ObjectIdentifier(waveform))
-                .allowsHitTesting(false)
-
-                TimeRulerCanvas(
-                    duration: duration,
-                    visibleFractionRange: visibleFractionRange,
-                    language: language
-                )
-                .equatable()
-                .frame(width: width, height: rulerHeight)
-                .offset(y: height - rulerHeight)
-                .allowsHitTesting(false)
-
-                ZStack(alignment: .topLeading) {
-                    if detailedCues {
-                        ZStack(alignment: .topLeading) {
-                            cueBlocksCanvas(width: width, cueRange: visibleCueRange)
-                                .allowsHitTesting(false)
-                            cueOverlapCanvas(width: width, cueRange: visibleCueRange)
-                                .allowsHitTesting(false)
-                            cueHitOverlays(width: width, cueRange: visibleCueRange)
-
-                            if let selectedCue {
-                                selectedCueOverlay(cue: selectedCue, width: width)
-                                    .id(selectedCue.id)
-                                    .transition(
-                                        .scale(scale: 0.94, anchor: .center)
-                                            .combined(with: .opacity)
-                                            .animation(.spring(response: 0.28, dampingFraction: 0.88))
-                                    )
-                            }
-
-                            if let selectedCueBinding {
-                                handles(cue: selectedCueBinding, width: width)
-                            }
-                        }
-                        .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .center)))
-                    } else {
-                        cueDensityCanvas(width: width)
-                            .allowsHitTesting(false)
-                            .transition(.opacity.combined(with: .scale(scale: 0.995, anchor: .center)))
-                        if let selectedCue {
-                            densitySelectedCueOverlay(cue: selectedCue, width: width)
-                                .allowsHitTesting(false)
-                                .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .center)))
-                        }
-                    }
-                }
-                .animation(.easeInOut(duration: 0.22), value: detailedCues)
-
-                if let term = activeHighlightTerm {
-                    TimelineDotsCanvas(
-                        cues: cues,
-                        term: term,
-                        duration: duration,
-                        topY: 6,
-                        baseDiameter: 7,
-                        emphasizedDiameter: 7,
-                        baseColor: .yellow,
-                        emphasizedColor: .yellow,
-                        emphasizedCueID: nil
-                    )
-                    .frame(width: width)
-                    .allowsHitTesting(false)
-                    .transition(.opacity)
-                }
-
-                if let term = activeFindTerm {
-                    TimelineDotsCanvas(
-                        cues: cues,
-                        term: term,
-                        duration: duration,
-                        topY: 6,
-                        baseDiameter: 7,
-                        emphasizedDiameter: 11,
-                        baseColor: .green,
-                        emphasizedColor: .green,
-                        emphasizedCueID: selectedCueID
-                    )
-                    .frame(width: width)
-                    .allowsHitTesting(false)
-                    .transition(.opacity)
-                }
-
-                if duration > 0 {
-                    playbackCursor(width: width, height: height)
-                        .allowsHitTesting(false)
-                    cursorDragLayer(width: width)
-                }
-            }
-            .contentShape(Rectangle())
-            .simultaneousGesture(
-                SpatialTapGesture(coordinateSpace: .local)
-                    .onEnded { value in
-                        handleTimelineTap(at: value.location, width: width, height: height)
-                    }
-            )
-            .animation(.easeInOut(duration: 0.22), value: highlightTerm)
-            .animation(.easeInOut(duration: 0.22), value: findTerm)
-        }
-    }
-
-    private var activeHighlightTerm: String? {
-        guard let term = highlightTerm, !term.isEmpty else { return nil }
-        return term
-    }
-
-    private var activeFindTerm: String? {
-        guard let term = findTerm, !term.isEmpty else { return nil }
-        return term
-    }
-
-    private func shouldRenderDetailedCues(width: CGFloat) -> Bool {
-        guard !cues.isEmpty else { return true }
-        if cues.count <= 180 { return true }
-        let speechSeconds = cues.reduce(0.0) { $0 + max(0, $1.duration) }
-        let averagePixelWidth = CGFloat(speechSeconds / max(duration, 0.001)) * width / CGFloat(cues.count)
-        return averagePixelWidth >= 5.0
-    }
-
-    private func visibleCueRange() -> Range<Array<SubtitleCue>.Index> {
-        guard !cues.isEmpty else { return cues.indices }
-        let visibleStart = visibleFractionRange.lowerBound * duration
-        let visibleEnd = visibleFractionRange.upperBound * duration
-        let padding = max(1.0, (visibleEnd - visibleStart) * 0.15)
-        let lowerTime = max(0, visibleStart - padding)
-        let upperTime = min(max(duration, visibleEnd), visibleEnd + padding)
-
-        var lower = cues.startIndex
-        var upper = cues.endIndex
-        while lower < upper {
-            let middle = lower + (upper - lower) / 2
-            if cues[middle].end < lowerTime {
-                lower = middle + 1
-            } else {
-                upper = middle
-            }
-        }
-
-        var end = lower
-        while end < cues.endIndex, cues[end].start <= upperTime {
-            end += 1
-        }
-        return lower..<end
-    }
-
-    private var background: some View {
-        RoundedRectangle(cornerRadius: 8)
-            .fill(Color(nsColor: .textBackgroundColor))
-    }
-
-    private var selectedCue: SubtitleCue? {
-        guard let selectedCueID else { return nil }
-        return cues.first { $0.id == selectedCueID }
-    }
-
-    private var selectedCueBinding: Binding<SubtitleCue>? {
-        guard let selectedCueID,
-              let index = cues.firstIndex(where: { $0.id == selectedCueID }) else {
-            return nil
-        }
-        return $cues[index]
-    }
-
-    private func cueBlocksCanvas(width: CGFloat, cueRange: Range<Array<SubtitleCue>.Index>) -> some View {
-        Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: true) { context, _ in
-            var lowConfidenceMarker: GraphicsContext.ResolvedText?
-            for cue in cues[cueRange] {
-                let selected = cue.id == selectedCueID
-                let hovered = !selected && cue.id == hoveredCueID
-                let speakerMatched = speakerMatchesActive(cue)
-                let startX = xPosition(cue.start, width: width)
-                let endX = xPosition(cue.end, width: width)
-                let cueWidth = max(2, endX - startX)
-                let rect = CGRect(x: startX, y: cueTopOffset, width: cueWidth, height: cueHeight)
-                let path = Path(roundedRect: rect, cornerRadius: 5)
-                context.fill(path, with: .color(cueFillColor(selected: selected, speakerMatched: speakerMatched, hovered: hovered)))
-                context.stroke(
-                    path,
-                    with: .color(cueStrokeColor(selected: selected, speakerMatched: speakerMatched)),
-                    lineWidth: selected ? 1.6 : 0.8
-                )
-                if !selected, let lineColor = speakerColor(for: cue) {
-                    let lineRect = CGRect(
-                        x: rect.minX + 3,
-                        y: rect.maxY - 5,
-                        width: max(0, rect.width - 6),
-                        height: 3
-                    )
-                    context.fill(
-                        Path(roundedRect: lineRect, cornerRadius: 1.5),
-                        with: .color(lineColor.opacity(0.9))
-                    )
-                }
-                if let confidence = cue.confidence,
-                   confidence < SubtitleConfidence.lowThreshold,
-                   cueWidth >= 12 {
-                    if lowConfidenceMarker == nil {
-                        lowConfidenceMarker = context.resolve(
-                            Text("?")
-                                .font(.system(size: 10, weight: .bold))
-                                .foregroundStyle(.orange)
-                        )
-                    }
-                    if let marker = lowConfidenceMarker {
-                        context.draw(
-                            marker,
-                            at: CGPoint(x: rect.minX + 7, y: rect.minY + 8)
-                        )
-                    }
-                }
-            }
-        }
-    }
-
-    /// Renders red translucent rectangles wherever two cues overlap in time, so the
-    /// user can immediately see conflicting timings while dragging.
-    private func cueOverlapCanvas(width: CGFloat, cueRange: Range<Array<SubtitleCue>.Index>) -> some View {
-        Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: true) { context, _ in
-            let visible = Array(cues[cueRange])
-            guard visible.count > 1 else { return }
-            for i in 0..<visible.count {
-                for j in (i + 1)..<visible.count {
-                    let lower = max(visible[i].start, visible[j].start)
-                    let upper = min(visible[i].end, visible[j].end)
-                    guard lower < upper else { continue }
-                    let startX = xPosition(lower, width: width)
-                    let endX = xPosition(upper, width: width)
-                    let rect = CGRect(
-                        x: startX,
-                        y: cueTopOffset,
-                        width: max(2, endX - startX),
-                        height: cueHeight
-                    )
-                    let path = Path(roundedRect: rect, cornerRadius: 3)
-                    context.fill(path, with: .color(.red.opacity(0.42)))
-                    context.stroke(path, with: .color(.red.opacity(0.85)), lineWidth: 1)
-                }
-            }
-        }
-    }
-
-    private func cueDensityCanvas(width: CGFloat) -> some View {
-        CueDensityCanvas(
-            cues: cues,
-            duration: duration,
-            width: width,
-            activeSpeakerName: activeSpeakerName,
-            layout: .expanded(top: cueTopOffset, height: cueHeight)
-        )
-        .equatable()
-    }
-
-    private func densitySelectedCueOverlay(cue: SubtitleCue, width: CGFloat) -> some View {
-        let binCount = max(24, min(260, Int(width / 3)))
-        let lower = max(0, min(binCount - 1, Int((cue.start / max(duration, 0.001)) * Double(binCount))))
-        let binWidth = width / CGFloat(binCount)
-        return RoundedRectangle(cornerRadius: 3)
-            .stroke(Color.accentColor, lineWidth: 1.4)
-            .frame(width: max(2, binWidth), height: cueHeight)
-            .offset(x: CGFloat(lower) * binWidth, y: cueTopOffset)
-            .animation(.easeInOut(duration: 0.16), value: cue.id)
-    }
-
-    private func selectedCueOverlay(cue: SubtitleCue, width: CGFloat) -> some View {
-        let startX = xPosition(cue.start, width: width)
-        let endX = xPosition(cue.end, width: width)
-        let cueWidth = max(2, endX - startX)
-        let hitWidth = max(24, cueWidth)
-        let hitOffset = max(0, startX - (hitWidth - cueWidth) / 2)
-        let visualOffset = startX - hitOffset
-        let moving = moveSession?.cueID == cue.id
-
-        return ZStack(alignment: .leading) {
-            Color.white.opacity(0.001)
-                .frame(width: hitWidth, height: cueHeight)
-
-            RoundedRectangle(cornerRadius: 5)
-                .fill(Color.accentColor.opacity(0.28))
-                .frame(width: cueWidth, height: cueHeight)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 5)
-                        .stroke(
-                            Color.accentColor,
-                            lineWidth: 1.6
-                        )
-                )
-                .offset(x: visualOffset)
-            if let lineColor = speakerColor(for: cue) {
-                Capsule()
-                    .fill(lineColor.opacity(0.92))
-                    .frame(width: max(0, cueWidth - 6), height: 3)
-                    .offset(x: visualOffset + 3, y: cueHeight / 2 - 6)
-            }
-            wordTickMarks(for: cue, startX: startX, endX: endX, width: width)
-                .offset(x: visualOffset - startX)
-            Text("\(cue.index)")
-                .font(.caption2.monospacedDigit().bold())
-                .foregroundStyle(.secondary)
-                .padding(.leading, visualOffset + 5)
-                .lineLimit(1)
-        }
-        .frame(width: hitWidth, height: cueHeight, alignment: .leading)
-        .contentShape(Rectangle())
-        .offset(y: moving ? -2 : 0)
-        .offset(x: hitOffset, y: cueTopOffset)
-        .zIndex(3)
-        .shadow(
-            color: Color.black.opacity(moving ? 0.22 : 0),
-            radius: moving ? 9 : 0,
-            x: 0,
-            y: moving ? 6 : 0
-        )
-        .shadow(
-            color: Color.accentColor.opacity(moving ? 0.28 : 0),
-            radius: moving ? 7 : 0
-        )
-        .help(cueTooltip(cue))
-        .contextMenu {
-            cueContextMenu(for: cue, language: language, actions: cueActions)
-        }
-        .animation(.spring(response: 0.22, dampingFraction: 0.74), value: moving)
-    }
-
-    private func cueHitOverlays(width: CGFloat, cueRange: Range<Array<SubtitleCue>.Index>) -> some View {
-        ZStack(alignment: .topLeading) {
-            ForEach(cues[cueRange]) { cue in
-                let startX = xPosition(cue.start, width: width)
-                let endX = xPosition(cue.end, width: width)
-                let blockWidth = max(2, endX - startX)
-                Color.white.opacity(0.001)
-                    .frame(width: blockWidth, height: cueHeight)
-                    .contentShape(Rectangle())
-                    .offset(x: startX, y: cueTopOffset)
-                    .help(cueTooltip(cue))
-                    .onHover { hovering in
-                        if hovering {
-                            hoveredCueID = cue.id
-                        } else if hoveredCueID == cue.id {
-                            hoveredCueID = nil
-                        }
-                    }
-                    .onTapGesture {
-                        withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
-                            selectedCueID = cue.id
-                        }
-                    }
-                    .contextMenu {
-                        cueContextMenu(for: cue, language: language, actions: cueActions)
-                    }
-            }
-        }
-        .zIndex(2)
-    }
-
-    private func handles(cue: Binding<SubtitleCue>, width: CGFloat) -> some View {
-        let startX = xPosition(cue.wrappedValue.start, width: width)
-        let endX = xPosition(cue.wrappedValue.end, width: width)
-        let selected = cue.wrappedValue.id == selectedCueID
-        let handleHitHeight = cueHeight + handleHitHeightExtra
-        let handleYOffset = cueTopOffset - handleHitHeightExtra / 2
-        let cueWidth = max(2, endX - startX)
-        let moveHitWidth = max(1, cueWidth)
-        let moveHitX = startX
-        let moveHitY = cueTopOffset - moveHandleHitHeight / 2 + 4
-        let activeID = dragSession?.cueID
-        let activeEdge = dragSession?.edge
-        let startDragging = activeID == cue.wrappedValue.id && activeEdge == .start
-        let endDragging = activeID == cue.wrappedValue.id && activeEdge == .end
-        let moving = moveSession?.cueID == cue.wrappedValue.id
-
-        return ZStack(alignment: .topLeading) {
-            moveHandleArea(blockWidth: cueWidth, dragging: moving)
-                .frame(width: moveHitWidth, height: moveHandleHitHeight)
-                .offset(x: moveHitX, y: moveHitY)
-                .gesture(moveCueGesture(for: cue, width: width))
-                .help(Copy.text("editor.moveCue.help", language: language))
-
-            handleHitArea(selected: selected, dragging: startDragging)
-                .frame(width: handleHitWidth, height: handleHitHeight)
-                .offset(x: startX - handleHitWidth / 2, y: handleYOffset)
-                .gesture(handleDragGesture(for: cue, edge: .start, width: width))
-                .help(Copy.text("editor.handleStart.help", language: language))
-
-            handleHitArea(selected: selected, dragging: endDragging)
-                .frame(width: handleHitWidth, height: handleHitHeight)
-                .offset(x: endX - handleHitWidth / 2, y: handleYOffset)
-                .gesture(handleDragGesture(for: cue, edge: .end, width: width))
-                .help(Copy.text("editor.handleEnd.help", language: language))
-        }
-        // Sit above both cueHitOverlays (z=2) and selectedCueOverlay (z=3) so the
-        // handle's hit area (which straddles the cue boundary) isn't swallowed by
-        // an adjacent cue's overlay.
-        .zIndex(4)
-    }
-
-    private func moveHandleArea(blockWidth: CGFloat, dragging: Bool) -> some View {
-        let horizontalInset = blockWidth >= 4 ? min(6, max(1, blockWidth * 0.18)) : 0
-        let availableWidth = max(0, blockWidth - horizontalInset * 2)
-        let minimumPreferredWidth = min(10, availableWidth)
-        let restingWidth = min(
-            moveHandleVisualWidth,
-            max(minimumPreferredWidth, blockWidth * 0.42),
-            availableWidth
-        )
-        let draggingWidth = min(
-            moveHandleVisualWidth + 12,
-            max(restingWidth, blockWidth * 0.52),
-            availableWidth
-        )
-        return ZStack {
-            Color.white.opacity(0.001)
-            Capsule()
-                .fill(Color.accentColor.opacity(dragging ? 1.0 : 0.82))
-                .frame(
-                    width: dragging ? draggingWidth : restingWidth,
-                    height: dragging ? moveHandleVisualHeight + 1 : moveHandleVisualHeight
-                )
-                .shadow(color: .accentColor.opacity(dragging ? 0.45 : 0), radius: dragging ? 5 : 0)
-                .shadow(color: .black.opacity(dragging ? 0.16 : 0), radius: dragging ? 4 : 0, y: dragging ? 2 : 0)
-        }
-        .contentShape(Rectangle())
-        .animation(.spring(response: 0.2, dampingFraction: 0.72), value: dragging)
-        .onHover { hovering in
-            if hovering {
-                NSCursor.resizeLeftRight.push()
-            } else {
-                NSCursor.pop()
-            }
-        }
-    }
-
-    private func handleHitArea(selected: Bool, dragging: Bool) -> some View {
-        ZStack {
-            Color.white.opacity(0.001)
-            Capsule()
-                .fill(Color.accentColor.opacity(dragging ? 1.0 : (selected ? 0.95 : 0.7)))
-                .frame(width: dragging ? handleVisualWidth + 2 : handleVisualWidth, height: cueHeight)
-                .shadow(color: .accentColor.opacity(dragging ? 0.55 : 0), radius: dragging ? 4 : 0)
-        }
-        .contentShape(Rectangle())
-        .animation(.easeOut(duration: 0.12), value: dragging)
-        .onHover { hovering in
-            if hovering {
-                NSCursor.resizeLeftRight.push()
-            } else {
-                NSCursor.pop()
-            }
-        }
-    }
-
-    private func handleDragGesture(for cue: Binding<SubtitleCue>, edge: Edge, width: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 0, coordinateSpace: .local)
-            .onChanged { value in
-                var noAnimation = Transaction()
-                noAnimation.animation = nil
-                noAnimation.disablesAnimations = true
-                withTransaction(noAnimation) {
-                    isHandleDragging = true
-                    if dragSession?.cueID != cue.wrappedValue.id || dragSession?.edge != edge {
-                        onCueTimingEditBegan()
-                        selectedCueID = cue.wrappedValue.id
-                        dragSession = HandleDragSession(
-                            cueID: cue.wrappedValue.id,
-                            edge: edge,
-                            initialStart: cue.wrappedValue.start,
-                            initialEnd: cue.wrappedValue.end
-                        )
-                    }
-                    guard let session = dragSession else { return }
-                    let delta = Double(value.translation.width / max(width, 1)) * duration
-                    let rawTarget: Double
-                    switch edge {
-                    case .start:
-                        rawTarget = session.initialStart + delta
-                    case .end:
-                        rawTarget = session.initialEnd + delta
-                    }
-                    let snapResult = snappedTime(
-                        rawTarget,
-                        excluding: cue.wrappedValue.id,
-                        width: width,
-                        wordBoundaries: wordBoundaryTimes(for: cue.wrappedValue)
-                    )
-                    if snapResult.didSnap && !session.isSnapped {
-                        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
-                    }
-                    dragSession?.isSnapped = snapResult.didSnap
-                    switch edge {
-                    case .start:
-                        cue.wrappedValue.start = max(0, min(snapResult.time, cue.wrappedValue.end - 0.05))
-                    case .end:
-                        let upper = duration > 0 ? duration : snapResult.time
-                        cue.wrappedValue.end = max(cue.wrappedValue.start + 0.05, min(upper, snapResult.time))
-                    }
-                }
-            }
-            .onEnded { _ in
-                dragSession = nil
-                isHandleDragging = false
-                cues = SubtitleDocument.normalize(cues)
-                onCueTimingEditEnded()
-            }
-    }
-
-    private func moveCueGesture(for cue: Binding<SubtitleCue>, width: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 0, coordinateSpace: .local)
-            .onChanged { value in
-                if moveSession?.cueID != cue.wrappedValue.id {
-                    onCueTimingEditBegan()
-                    selectedCueID = cue.wrappedValue.id
-                    withAnimation(.spring(response: 0.22, dampingFraction: 0.74)) {
-                        moveSession = CueMoveSession(
-                            cueID: cue.wrappedValue.id,
-                            initialStart: cue.wrappedValue.start,
-                            initialEnd: cue.wrappedValue.end
-                        )
-                    }
-                }
-
-                var noAnimation = Transaction()
-                noAnimation.animation = nil
-                noAnimation.disablesAnimations = true
-                withTransaction(noAnimation) {
-                    isHandleDragging = true
-                    guard let session = moveSession else { return }
-                    let cueDuration = max(0.05, session.initialEnd - session.initialStart)
-                    let delta = Double(value.translation.width / max(width, 1)) * duration
-                    let upperStart = max(0, duration - cueDuration)
-                    let rawStart = clamp(session.initialStart + delta, 0, upperStart)
-                    let snapResult = snappedCueMove(
-                        start: rawStart,
-                        end: rawStart + cueDuration,
-                        excluding: cue.wrappedValue.id,
-                        width: width
-                    )
-                    if snapResult.didSnap && !session.isSnapped {
-                        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
-                    }
-                    moveSession?.isSnapped = snapResult.didSnap
-                    cue.wrappedValue.start = snapResult.start
-                    cue.wrappedValue.end = snapResult.end
-                }
-            }
-            .onEnded { _ in
-                withAnimation(.spring(response: 0.22, dampingFraction: 0.78)) {
-                    moveSession = nil
-                }
-                isHandleDragging = false
-                cues = SubtitleDocument.normalize(cues)
-                onCueTimingEditEnded()
-            }
-    }
-
-    /// Returns `target` snapped to the nearest other cue edge within ~5px on screen,
-    /// plus a flag indicating whether the snap engaged. Caller is responsible for firing
-    /// haptic only on the snap-engagement transition.
-    ///
-    /// `wordBoundaries` (word-level timestamps of the dragged cue) act as a
-    /// secondary snap target with a tighter threshold: cue edges always win,
-    /// so the existing cue-block snapping behavior is unchanged.
-    private func snappedTime(
-        _ target: Double,
-        excluding cueID: SubtitleCue.ID,
-        width: CGFloat,
-        wordBoundaries: [Double] = []
-    ) -> (time: Double, didSnap: Bool) {
-        let snapPixels: CGFloat = 5
-        let secondsPerPixel = duration / Double(max(width, 1))
-        let threshold = secondsPerPixel * Double(snapPixels)
-        var bestEdge: Double?
-        var bestDistance: Double = .infinity
-        for other in cues where other.id != cueID {
-            for edge in [other.start, other.end] {
-                let dist = abs(edge - target)
-                if dist < bestDistance {
-                    bestDistance = dist
-                    bestEdge = edge
-                }
-            }
-        }
-        if let bestEdge, bestDistance <= threshold {
-            return (bestEdge, true)
-        }
-        if !wordBoundaries.isEmpty {
-            let wordThreshold = secondsPerPixel * 4
-            var bestWord: Double?
-            var bestWordDistance: Double = .infinity
-            for boundary in wordBoundaries {
-                let dist = abs(boundary - target)
-                if dist < bestWordDistance {
-                    bestWordDistance = dist
-                    bestWord = boundary
-                }
-            }
-            if let bestWord, bestWordDistance <= wordThreshold {
-                return (bestWord, true)
-            }
-        }
-        return (target, false)
-    }
-
-    private func wordBoundaryTimes(for cue: SubtitleCue) -> [Double] {
-        guard let words = cue.words, !words.isEmpty else { return [] }
-        var times: Set<Double> = []
-        for word in words {
-            times.insert(word.start)
-            times.insert(word.end)
-        }
-        return Array(times)
-    }
-
-    /// Thin tick marks at word starts inside the selected cue block. Rendered
-    /// with a single Canvas (no per-word views) and skipped entirely when the
-    /// zoom level would make ticks denser than ~6 px apart.
-    @ViewBuilder
-    private func wordTickMarks(for cue: SubtitleCue, startX: CGFloat, endX: CGFloat, width: CGFloat) -> some View {
-        let boundaries = interiorWordTickTimes(for: cue)
-        let cueWidth = max(2, endX - startX)
-        if !boundaries.isEmpty, cueWidth / CGFloat(boundaries.count + 1) >= 6 {
-            Canvas { context, size in
-                for time in boundaries {
-                    let x = xPosition(time, width: width) - startX
-                    guard x > 2, x < cueWidth - 2 else { continue }
-                    let tick = CGRect(x: x - 0.5, y: size.height * 0.3, width: 1, height: size.height * 0.4)
-                    context.fill(Path(tick), with: .color(Color.accentColor.opacity(0.55)))
-                }
-            }
-            .frame(width: cueWidth, height: cueHeight)
-            .offset(x: startX)
-            .allowsHitTesting(false)
-        }
-    }
-
-    private func interiorWordTickTimes(for cue: SubtitleCue) -> [Double] {
-        guard let words = cue.words, words.count > 1 else { return [] }
-        return words.dropFirst().map(\.start)
-    }
-
-    private func snappedCueMove(
-        start: Double,
-        end: Double,
-        excluding cueID: SubtitleCue.ID,
-        width: CGFloat
-    ) -> (start: Double, end: Double, didSnap: Bool) {
-        let cueDuration = max(0.05, end - start)
-        let upperStart = max(0, duration - cueDuration)
-        let clampedStart = clamp(start, 0, upperStart)
-        let clampedEnd = clampedStart + cueDuration
-        let snapPixels: CGFloat = 5
-        let secondsPerPixel = duration / Double(max(width, 1))
-        let threshold = secondsPerPixel * Double(snapPixels)
-        var bestStart: Double?
-        var bestDistance = Double.infinity
-
-        for other in cues where other.id != cueID {
-            for edge in [other.start, other.end] {
-                let startDistance = abs(edge - clampedStart)
-                if startDistance < bestDistance {
-                    bestDistance = startDistance
-                    bestStart = edge
-                }
-
-                let endDistance = abs(edge - clampedEnd)
-                if endDistance < bestDistance {
-                    bestDistance = endDistance
-                    bestStart = edge - cueDuration
-                }
-            }
-        }
-
-        if let bestStart, bestDistance <= threshold {
-            let snappedStart = clamp(bestStart, 0, upperStart)
-            return (snappedStart, snappedStart + cueDuration, true)
-        }
-        return (clampedStart, clampedEnd, false)
-    }
-
-    private func playbackCursor(width: CGFloat, height: CGFloat) -> some View {
-        let cursorX = xPosition(currentTime, width: width)
-        return ZStack(alignment: .topLeading) {
-            Rectangle()
-                .fill(Color.red.opacity(0.9))
-                .frame(width: 1.5, height: max(1, height - rulerHeight - 4))
-                .offset(x: cursorX - 0.75, y: 3)
-            PlaybackCursorHead()
-                .fill(Color.red)
-                .frame(width: 11, height: 8)
-                .offset(x: cursorX - 5.5, y: 0)
-        }
-    }
-
-    private func cursorDragLayer(width: CGFloat) -> some View {
-        Rectangle()
-            .fill(Color.white.opacity(0.001))
-            .frame(width: width, height: cursorDragHeight)
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0, coordinateSpace: .local)
-                    .onChanged { value in
-                        isHandleDragging = true
-                        onScrub(time(atX: value.location.x, width: width))
-                    }
-                    .onEnded { value in
-                        isHandleDragging = false
-                        onSeek(time(atX: value.location.x, width: width))
-                    }
-            )
-            .help(Copy.text("editor.cursorDrag.help", language: language))
-    }
-
-    private func cueTooltip(_ cue: SubtitleCue) -> String {
-        let times = "\(SubtitleDocument.displayTime(cue.start)) → \(SubtitleDocument.displayTime(cue.end))"
-        let preview = cue.text.replacingOccurrences(of: "\n", with: " ")
-        return "#\(cue.index)  \(times)\n\(preview)"
-    }
-
-    private func handleTimelineTap(at location: CGPoint, width: CGFloat, height: CGFloat) {
-        let seconds = time(atX: location.x, width: width)
-        if location.y <= cursorDragHeight {
-            return
-        }
-        if location.y >= height - rulerHeight {
-            onSeek(seconds)
-            return
-        }
-        if let cue = cue(at: seconds) {
-            withAnimation(.spring(response: 0.26, dampingFraction: 0.72)) {
-                selectedCueID = cue.id
-            }
-        } else {
-            onSeek(seconds)
-        }
-    }
-
-    private func time(atX x: CGFloat, width: CGFloat) -> Double {
-        clamp(Double(x / max(width, 1)) * duration, 0, duration)
-    }
-
-    private func cue(at seconds: Double) -> SubtitleCue? {
-        cues.last { cue in
-            seconds >= cue.start && seconds <= cue.end
-        }
-    }
-
-    private func xPosition(_ seconds: Double, width: CGFloat) -> CGFloat {
-        CGFloat(max(0, min(seconds / max(duration, 0.001), 1))) * width
-    }
-
-    private func cueFillColor(selected: Bool, speakerMatched: Bool, hovered: Bool = false) -> Color {
-        if selected {
-            return Color.accentColor.opacity(speakerMatched ? 0.36 : 0.28)
-        }
-        let base = speakerMatched ? 0.34 : 0.22
-        let hoverBoost = hovered ? 0.16 : 0.0
-        return Color.teal.opacity(base + hoverBoost)
-    }
-
-    private func cueStrokeColor(selected: Bool, speakerMatched: Bool) -> Color {
-        if selected {
-            return Color.accentColor
-        }
-        return Color.teal.opacity(speakerMatched ? 0.75 : 0.55)
-    }
-
-    private func speakerMatchesActive(_ cue: SubtitleCue) -> Bool {
-        guard let activeSpeakerName else { return false }
-        return SubtitleDocument.normalizedSpeakerName(cue.speaker) == activeSpeakerName
-    }
-
-    private func speakerColor(for cue: SubtitleCue) -> Color? {
-        guard let speaker = SubtitleDocument.normalizedSpeakerName(cue.speaker),
-              let hex = speakerColors[speaker] else {
-            return nil
-        }
-        return TimelineSpeakerColor.color(fromHex: hex)
-    }
-
-    private func clamp(_ value: Double, _ lower: Double, _ upper: Double) -> Double {
-        if upper <= lower { return lower }
-        return min(max(value, lower), upper)
-    }
-}
-
-private enum TimelineSpeakerColor {
-    static func color(fromHex raw: String) -> Color? {
-        let hex = raw.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
-        let expanded: String
-        if hex.count == 3 {
-            expanded = hex.map { "\($0)\($0)" }.joined()
-        } else {
-            expanded = hex
-        }
-        guard expanded.count == 6,
-              let rgb = Int(expanded, radix: 16) else {
-            return nil
-        }
-        return Color(
-            red: Double((rgb >> 16) & 0xFF) / 255.0,
-            green: Double((rgb >> 8) & 0xFF) / 255.0,
-            blue: Double(rgb & 0xFF) / 255.0
-        )
-    }
-}
-
-private struct PlaybackCursorHead: Shape {
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        path.move(to: CGPoint(x: rect.midX, y: rect.maxY))
-        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY))
-        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
-        path.closeSubpath()
-        return path
-    }
-}
-
-private struct TimeRulerCanvas: View, Equatable {
-    nonisolated let duration: Double
-    nonisolated let visibleFractionRange: ClosedRange<Double>
-    nonisolated let language: AppLanguage
-
-    private let intervals: [Double] = [1, 5, 10, 30, 60, 120, 300, 600, 1800, 3600]
-    private let minimumMajorTickSpacing: CGFloat = 72
-
-    nonisolated static func == (lhs: TimeRulerCanvas, rhs: TimeRulerCanvas) -> Bool {
-        lhs.duration == rhs.duration
-            && lhs.visibleFractionRange == rhs.visibleFractionRange
-            && lhs.language == rhs.language
-    }
-
-    var body: some View {
-        Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: true) { context, size in
-            drawRuler(in: &context, size: size)
-        }
-    }
-
-    private func drawRuler(in context: inout GraphicsContext, size: CGSize) {
-        guard duration > 0, size.width > 1 else { return }
-        let width = max(size.width, 1)
-        let height = max(size.height, 1)
-        let startTime = max(0, visibleFractionRange.lowerBound * duration)
-        let endTime = min(duration, max(startTime, visibleFractionRange.upperBound * duration))
-        let interval = tickInterval(width: width)
-        let firstTick = ceil(startTime / interval) * interval
-        let baselineY = height - 5
-        let textY = max(9, height - 17)
-
-        var baseline = Path()
-        baseline.move(to: CGPoint(x: 0, y: baselineY))
-        baseline.addLine(to: CGPoint(x: width, y: baselineY))
-        context.stroke(baseline, with: .color(Color.secondary.opacity(0.28)), lineWidth: 0.8)
-
-        var tick = firstTick
-        var renderedTicks = 0
-        while tick <= endTime + 0.001, renderedTicks < 240 {
-            let x = CGFloat(tick / max(duration, 0.001)) * width
-            var path = Path()
-            path.move(to: CGPoint(x: x, y: baselineY))
-            path.addLine(to: CGPoint(x: x, y: 4))
-            context.stroke(path, with: .color(Color.secondary.opacity(0.45)), lineWidth: 0.8)
-
-            let label = Text(SubtitleDocument.displayTime(tick))
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
-            context.draw(label, at: CGPoint(x: x + 3, y: textY), anchor: .leading)
-            renderedTicks += 1
-            tick += interval
-        }
-    }
-
-    private func tickInterval(width: CGFloat) -> Double {
-        let pixelsPerSecond = width / CGFloat(max(duration, 0.001))
-        for interval in intervals where CGFloat(interval) * pixelsPerSecond >= minimumMajorTickSpacing {
-            return interval
-        }
-        return intervals.last ?? 120
-    }
-}
-
-private struct StyledSubtitleText: View, Equatable {
-    nonisolated let text: String
-    nonisolated let font: Font
-    nonisolated let lineLimit: Int?
-
-    init(_ text: String, font: Font = .body, lineLimit: Int? = nil) {
-        self.text = text
-        self.font = font
-        self.lineLimit = lineLimit
-    }
-
-    var body: some View {
-        Text(SubtitleMarkupRenderer.attributedString(from: text))
-            .font(font)
-            .lineLimit(lineLimit)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-
-    nonisolated static func == (lhs: StyledSubtitleText, rhs: StyledSubtitleText) -> Bool {
-        lhs.text == rhs.text && lhs.lineLimit == rhs.lineLimit
-    }
-}
-
-private enum SubtitleMarkupRenderer {
-    private struct StyleState {
-        var boldDepth = 0
-        var italicDepth = 0
-        var underlineDepth = 0
-        var colorStack: [Color] = []
-
-        var isBold: Bool { boldDepth > 0 }
-        var isItalic: Bool { italicDepth > 0 }
-        var isUnderlined: Bool { underlineDepth > 0 }
-        var color: Color? { colorStack.last }
-    }
-
-    private struct Fragment {
-        let text: String
-        let style: StyleState
-    }
-
-    static func attributedString(from raw: String) -> AttributedString {
-        var result = AttributedString()
-        for fragment in fragments(from: raw) {
-            result += attributedFragment(fragment)
-        }
-        return result
-    }
-
-    private static func fragments(from raw: String) -> [Fragment] {
-        var fragments: [Fragment] = []
-        var state = StyleState()
-        var cursor = raw.startIndex
-        var textStart = raw.startIndex
-
-        func appendText(until end: String.Index) {
-            guard textStart < end else { return }
-            fragments.append(Fragment(text: String(raw[textStart..<end]), style: state))
-        }
-
-        while cursor < raw.endIndex {
-            guard raw[cursor] == "<",
-                  let tagEnd = raw[cursor...].firstIndex(of: ">") else {
-                cursor = raw.index(after: cursor)
-                continue
-            }
-
-            let tag = String(raw[cursor...tagEnd])
-            var nextState = state
-            if apply(tag, to: &nextState) {
-                appendText(until: cursor)
-                state = nextState
-                cursor = raw.index(after: tagEnd)
-                textStart = cursor
-            } else {
-                cursor = raw.index(after: cursor)
-            }
-        }
-
-        appendText(until: raw.endIndex)
-        return fragments
-    }
-
-    private static func attributedFragment(_ fragment: Fragment) -> AttributedString {
-        var attributed = AttributedString(fragment.text)
-        var intents = InlinePresentationIntent()
-        if fragment.style.isBold {
-            intents.insert(.stronglyEmphasized)
-        }
-        if fragment.style.isItalic {
-            intents.insert(.emphasized)
-        }
-        if !intents.isEmpty {
-            attributed.inlinePresentationIntent = intents
-        }
-        if fragment.style.isUnderlined {
-            attributed.underlineStyle = .single
-        }
-        if let color = fragment.style.color {
-            attributed.foregroundColor = color
-        }
-        return attributed
-    }
-
-    private static func apply(_ tag: String, to state: inout StyleState) -> Bool {
-        let lower = tag.lowercased()
-        switch lower {
-        case "<b>":
-            state.boldDepth += 1
-            return true
-        case "</b>":
-            state.boldDepth = max(0, state.boldDepth - 1)
-            return true
-        case "<i>":
-            state.italicDepth += 1
-            return true
-        case "</i>":
-            state.italicDepth = max(0, state.italicDepth - 1)
-            return true
-        case "<u>":
-            state.underlineDepth += 1
-            return true
-        case "</u>":
-            state.underlineDepth = max(0, state.underlineDepth - 1)
-            return true
-        case "</font>":
-            if !state.colorStack.isEmpty {
-                state.colorStack.removeLast()
-            }
-            return true
-        default:
-            guard lower.hasPrefix("<font"),
-                  let color = fontColor(from: tag) else {
-                return false
-            }
-            state.colorStack.append(color)
-            return true
-        }
-    }
-
-    private static func fontColor(from tag: String) -> Color? {
-        guard let regex = try? NSRegularExpression(pattern: #"(?i)color\s*=\s*["']?([^"'\s>]+)"#) else {
-            return nil
-        }
-        let nsRange = NSRange(tag.startIndex..<tag.endIndex, in: tag)
-        guard let match = regex.firstMatch(in: tag, range: nsRange),
-              match.numberOfRanges > 1,
-              let valueRange = Range(match.range(at: 1), in: tag) else {
-            return nil
-        }
-        return color(from: String(tag[valueRange]))
-    }
-
-    private static func color(from raw: String) -> Color? {
-        let value = raw.trimmingCharacters(in: CharacterSet(charactersIn: "\"' "))
-        let named: [String: Color] = [
-            "white": .white,
-            "black": .black,
-            "red": .red,
-            "green": .green,
-            "blue": .blue,
-            "yellow": .yellow,
-            "cyan": .cyan,
-            "magenta": .purple
-        ]
-        if let color = named[value.lowercased()] {
-            return color
-        }
-
-        let hex = value.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
-        let expanded: String
-        if hex.count == 3 {
-            expanded = hex.map { "\($0)\($0)" }.joined()
-        } else {
-            expanded = hex
-        }
-        guard expanded.count == 6,
-              let rgb = Int(expanded, radix: 16) else {
-            return nil
-        }
-        return Color(
-            red: Double((rgb >> 16) & 0xFF) / 255.0,
-            green: Double((rgb >> 8) & 0xFF) / 255.0,
-            blue: Double(rgb & 0xFF) / 255.0
-        )
-    }
-}
-
 private struct EditorColumnHeightPreferenceKey: PreferenceKey {
     static let defaultValue: CGFloat = 300
 
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
-    }
-}
-
-private struct SpeakerBadge: View {
-    let speaker: String?
-    let language: AppLanguage
-
-    var body: some View {
-        Label(displayName, systemImage: speaker == nil ? "person.crop.circle" : "person.crop.circle.fill")
-            .font(.caption.weight(.semibold))
-            .lineLimit(1)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(badgeFill, in: Capsule())
-            .overlay(Capsule().stroke(.quaternary, lineWidth: 0.7))
-            .foregroundStyle(speaker == nil ? .secondary : .primary)
-    }
-
-    private var displayName: String {
-        speaker ?? Copy.text("editor.speaker.none", language: language)
-    }
-
-    private var badgeFill: some ShapeStyle {
-        speaker == nil ? AnyShapeStyle(.quinary) : AnyShapeStyle(.thinMaterial)
-    }
-}
-
-struct TimingAdjustmentSheet: View {
-    let language: AppLanguage
-    let cueCount: Int
-    @Binding var mode: TimingAdjustmentMode
-    @Binding var shiftSeconds: Double
-    @Binding var gapSeconds: Double
-    let apply: () -> Void
-
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(Copy.text("timing.title", language: language))
-                    .font(.headline)
-                Text(String(format: Copy.text("timing.cueCount", language: language), cueCount))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Picker("", selection: $mode) {
-                Text(Copy.text("timing.mode.shift", language: language)).tag(TimingAdjustmentMode.shift)
-                Text(Copy.text("timing.mode.closeGaps", language: language)).tag(TimingAdjustmentMode.closeGaps)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-
-            GroupBox {
-                VStack(alignment: .leading, spacing: 10) {
-                    switch mode {
-                    case .shift:
-                        secondsControl(
-                            titleKey: "timing.shift.seconds",
-                            helpKey: "timing.shift.help",
-                            value: $shiftSeconds,
-                            range: -86_400...86_400
-                        )
-                    case .closeGaps:
-                        secondsControl(
-                            titleKey: "timing.gap.seconds",
-                            helpKey: "timing.gap.help",
-                            value: $gapSeconds,
-                            range: 0...60
-                        )
-                    }
-                }
-                .padding(.vertical, 4)
-            }
-
-            HStack {
-                Spacer()
-                Button(Copy.text("button.cancel", language: language)) {
-                    dismiss()
-                }
-                Button(Copy.text("button.apply", language: language)) {
-                    apply()
-                    dismiss()
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(cueCount == 0)
-            }
-        }
-        .padding(20)
-        .frame(width: 380)
-    }
-
-    private func secondsControl(
-        titleKey: String,
-        helpKey: String,
-        value: Binding<Double>,
-        range: ClosedRange<Double>
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(Copy.text(titleKey, language: language))
-                .font(.subheadline.weight(.semibold))
-            HStack(spacing: 8) {
-                TextField("", value: value, format: .number)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 96)
-                Stepper("", value: value, in: range, step: 0.1)
-                    .labelsHidden()
-                Text("s")
-                    .foregroundStyle(.secondary)
-            }
-            Text(Copy.text(helpKey, language: language))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-}
-
-private struct CueStatusBadges: View {
-    struct EditedFields: Equatable {
-        var text: Bool = false
-        var time: Bool = false
-        var speaker: Bool = false
-    }
-
-    let cue: SubtitleCue
-    let canReset: Bool
-    let language: AppLanguage
-    var showsSpeaker: Bool = true
-    var onReset: (() -> Void)? = nil
-    var editedFields: EditedFields = .init()
-    var speakerColor: Color? = nil
-    var onCycleSpeaker: (() -> Void)? = nil
-
-    var body: some View {
-        HStack(spacing: 4) {
-            if canReset {
-                if let onReset {
-                    EditedResetBadge(language: language, fields: editedFields, onReset: onReset)
-                } else {
-                    iconBadge(
-                        systemImage: "pencil",
-                        title: Copy.text("cue.edited", language: language),
-                        tint: .accentColor
-                    )
-                }
-            }
-            if isEmptyText {
-                iconBadge(
-                    systemImage: "text.badge.xmark",
-                    title: Copy.text("cue.empty", language: language),
-                    tint: .red
-                )
-            }
-            if showsSpeaker, let speaker {
-                speakerBadge(speaker)
-            }
-            if isLowConfidence {
-                iconBadge(
-                    systemImage: "questionmark.circle.fill",
-                    title: Copy.text("cue.lowConfidence", language: language),
-                    tint: .orange
-                )
-            }
-        }
-        .animation(.easeInOut(duration: 0.12), value: canReset)
-        .animation(.easeInOut(duration: 0.12), value: cue.text)
-        .animation(.easeInOut(duration: 0.12), value: cue.confidence)
-        .animation(.easeInOut(duration: 0.12), value: cue.speaker)
-    }
-
-    private var isEmptyText: Bool {
-        cue.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    private var isLowConfidence: Bool {
-        guard let confidence = cue.confidence else { return false }
-        return confidence < SubtitleConfidence.lowThreshold
-    }
-
-    private var speaker: String? {
-        SubtitleDocument.normalizedSpeakerName(cue.speaker)
-    }
-
-    private func iconBadge(systemImage: String, title: String, tint: Color) -> some View {
-        Image(systemName: systemImage)
-            .font(.caption2.weight(.semibold))
-            .foregroundStyle(tint)
-            .frame(width: 18, height: 18)
-            .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 4))
-            .help(title)
-            .accessibilityLabel(title)
-            .transition(.scale.combined(with: .opacity))
-    }
-
-    private func speakerBadge(_ speaker: String) -> some View {
-        let title = String(format: Copy.text("cue.speakerAssigned", language: language), speaker)
-        let helpText = onCycleSpeaker != nil
-            ? "\(title) — \(Copy.text("cue.speaker.cycleHint", language: language))"
-            : title
-        let background: AnyShapeStyle = speakerColor.map { AnyShapeStyle($0.opacity(0.18)) } ?? AnyShapeStyle(.quaternary)
-        let content = Label(speaker, systemImage: "person.crop.circle.fill")
-            .font(.caption2.weight(.medium))
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-            .truncationMode(.tail)
-            .frame(maxWidth: 74, alignment: .leading)
-            .padding(.horizontal, 5)
-            .frame(height: 18)
-            .background(background, in: RoundedRectangle(cornerRadius: 4))
-
-        return Group {
-            if let onCycleSpeaker {
-                Button(action: onCycleSpeaker) { content }
-                    .buttonStyle(.plain)
-            } else {
-                content
-            }
-        }
-        .help(helpText)
-        .accessibilityLabel(helpText)
-        .transition(.scale.combined(with: .opacity))
-    }
-}
-
-private struct EditedResetBadge: View {
-    let language: AppLanguage
-    let fields: CueStatusBadges.EditedFields
-    let onReset: () -> Void
-    @State private var isHovered = false
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Image(systemName: "pencil")
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(Color.accentColor)
-            if isHovered {
-                if fields.text {
-                    fieldChip(Copy.text("editor.edited.text", language: language))
-                }
-                if fields.time {
-                    fieldChip(Copy.text("editor.edited.time", language: language))
-                }
-                if fields.speaker {
-                    fieldChip(Copy.text("editor.edited.speaker", language: language))
-                }
-                Divider()
-                    .frame(height: 10)
-                Button(action: onReset) {
-                    Image(systemName: "arrow.counterclockwise")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(Color.accentColor)
-                }
-                .buttonStyle(.plain)
-                .help(Copy.text("editor.resetCue.help", language: language))
-                .accessibilityLabel(Copy.text("editor.resetCue", language: language))
-                .transition(.move(edge: .trailing).combined(with: .opacity))
-            }
-        }
-        .padding(.horizontal, 5)
-        .frame(height: 18)
-        .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 4))
-        .help(Copy.text("cue.edited", language: language))
-        .accessibilityLabel(Copy.text("cue.edited", language: language))
-        .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.18)) {
-                isHovered = hovering
-            }
-        }
-    }
-
-    private func fieldChip(_ title: String) -> some View {
-        Text(title)
-            .font(.caption2.weight(.medium))
-            .foregroundStyle(Color.accentColor)
-            .lineLimit(1)
-            .fixedSize()
-            .transition(.opacity.combined(with: .move(edge: .trailing)))
-    }
-}
-
-private struct SubtitleCueBlockRow: View {
-    @Binding var cue: SubtitleCue
-    let isSelected: Bool
-    let canReset: Bool
-    let select: () -> Void
-    let reset: () -> Void
-    let duplicate: () -> Void
-    let insertBefore: () -> Void
-    let insertAfter: () -> Void
-    let closeGap: () -> Void
-    let delete: () -> Void
-    let deleteMatching: () -> Void
-    let language: AppLanguage
-    var speakerColor: Color? = nil
-    var cycleSpeaker: (() -> Void)? = nil
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Text("#\(cue.index)")
-                    .font(.caption.monospacedDigit().bold())
-                    .foregroundStyle(isSelected ? .primary : .secondary)
-                Text(timeRange)
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                Spacer()
-                CueStatusBadges(
-                    cue: cue,
-                    canReset: canReset,
-                    language: language,
-                    speakerColor: speakerColor,
-                    onCycleSpeaker: cycleSpeaker
-                )
-                Text(durationText)
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.tertiary)
-            }
-
-            StyledSubtitleText(SubtitleDocument.displayText(for: cue), font: .body, lineLimit: nil)
-                .equatable()
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, minHeight: 36, alignment: .topLeading)
-                .padding(6)
-                .frame(maxWidth: .infinity, alignment: .topLeading)
-                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
-                .contentShape(RoundedRectangle(cornerRadius: 6))
-                .onTapGesture(perform: select)
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(rowBackground, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(
-                    isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.quaternary),
-                    lineWidth: isSelected ? 1.2 : 0.6
-                )
-            )
-        .contentShape(RoundedRectangle(cornerRadius: 8))
-        .onTapGesture(perform: select)
-        .contextMenu {
-            Button {
-                reset()
-            } label: {
-                Label(Copy.text("editor.resetCue", language: language), systemImage: "arrow.counterclockwise")
-            }
-            .disabled(!canReset)
-
-            Button {
-                duplicate()
-            } label: {
-                Label(Copy.text("editor.duplicateCue", language: language), systemImage: "plus.square.on.square")
-            }
-
-            Divider()
-
-            Button {
-                insertBefore()
-            } label: {
-                Label(Copy.text("editor.addBefore", language: language), systemImage: "arrow.up.to.line.compact")
-            }
-
-            Button {
-                insertAfter()
-            } label: {
-                Label(Copy.text("editor.addAfter", language: language), systemImage: "arrow.down.to.line.compact")
-            }
-
-            Button {
-                closeGap()
-            } label: {
-                Label(Copy.text("editor.closeGap", language: language), systemImage: "arrow.left.and.right")
-            }
-
-            Divider()
-
-            Button(role: .destructive) {
-                deleteMatching()
-            } label: {
-                Label(Copy.text("editor.deleteMatchingCues", language: language), systemImage: "trash.slash")
-            }
-
-            Button(role: .destructive) {
-                delete()
-            } label: {
-                Label(Copy.text("editor.deleteCue", language: language), systemImage: "trash")
-            }
-        }
-    }
-
-    private var timeRange: String {
-        "\(SubtitleDocument.displayTime(cue.start)) -> \(SubtitleDocument.displayTime(cue.end))"
-    }
-
-    private var durationText: String {
-        String(format: "%.2fs", cue.duration)
-    }
-
-    private var rowBackground: Color {
-        isSelected ? Color.accentColor.opacity(0.14) : Color(nsColor: .controlBackgroundColor)
-    }
-
-}
-
-enum SubtitleConfidence {
-    static let lowThreshold: Double = 0.6
-}
-
-private struct SelectableTextEditor: NSViewRepresentable {
-    @Binding var text: String
-    @Binding var selection: NSRange?
-    let onActivate: () -> Void
-
-    init(
-        text: Binding<String>,
-        selection: Binding<NSRange?> = .constant(nil),
-        onActivate: @escaping () -> Void
-    ) {
-        _text = text
-        _selection = selection
-        self.onActivate = onActivate
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text, selection: $selection, onActivate: onActivate)
-    }
-
-    func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSScrollView()
-        scrollView.drawsBackground = false
-        scrollView.hasVerticalScroller = true
-        scrollView.borderType = .noBorder
-
-        let textView = ActivatingTextView()
-        textView.onActivate = onActivate
-        textView.delegate = context.coordinator
-        textView.string = text
-        textView.font = .preferredFont(forTextStyle: .body)
-        textView.allowsUndo = false
-        textView.drawsBackground = false
-        textView.isRichText = false
-        textView.isAutomaticQuoteSubstitutionEnabled = false
-        textView.isAutomaticDashSubstitutionEnabled = false
-        textView.textContainerInset = NSSize(width: 6, height: 6)
-        textView.minSize = NSSize(width: 0, height: 0)
-        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
-        textView.autoresizingMask = [.width]
-        textView.textContainer?.widthTracksTextView = true
-
-        scrollView.documentView = textView
-        return scrollView
-    }
-
-    func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        guard let textView = scrollView.documentView as? NSTextView else { return }
-        context.coordinator.text = $text
-        context.coordinator.selection = $selection
-        context.coordinator.onActivate = onActivate
-        if let activatingTextView = textView as? ActivatingTextView {
-            activatingTextView.onActivate = onActivate
-        }
-        // Bail out while an input method (Chinese, Japanese, etc.) is composing —
-        // touching `string` or `selectedRange` would cancel the composition.
-        if textView.hasMarkedText() { return }
-
-        // Suppress delegate writes back to the SwiftUI binding while we mutate
-        // the text view programmatically. Without this guard, setting `string`
-        // or `setSelectedRange` synchronously triggers the delegate, which would
-        // try to write SwiftUI state mid-update.
-        context.coordinator.isApplyingUpdate = true
-        defer { context.coordinator.isApplyingUpdate = false }
-
-        if textView.string != text {
-            let selectedRanges = textView.selectedRanges
-            textView.string = text
-            if let selection, NSMaxRange(selection) <= textView.string.utf16.count {
-                textView.setSelectedRange(selection)
-            } else {
-                restoreSelection(selectedRanges, in: textView)
-            }
-        } else if let selection,
-                  NSMaxRange(selection) <= textView.string.utf16.count,
-                  textView.selectedRange() != selection {
-            textView.setSelectedRange(selection)
-        }
-    }
-
-    private func restoreSelection(_ ranges: [NSValue], in textView: NSTextView) {
-        let textLength = textView.string.utf16.count
-        let validRanges: [NSValue] = ranges.compactMap { value in
-            let range = value.rangeValue
-            guard NSMaxRange(range) <= textLength else { return nil }
-            return value
-        }
-        if validRanges.isEmpty {
-            textView.setSelectedRange(NSRange(location: textLength, length: 0))
-        } else {
-            textView.selectedRanges = validRanges
-        }
-    }
-
-    @MainActor
-    final class Coordinator: NSObject, NSTextViewDelegate {
-        var text: Binding<String>
-        var selection: Binding<NSRange?>
-        var onActivate: () -> Void
-        var isApplyingUpdate = false
-
-        init(text: Binding<String>, selection: Binding<NSRange?>, onActivate: @escaping () -> Void) {
-            self.text = text
-            self.selection = selection
-            self.onActivate = onActivate
-        }
-
-        func textDidBeginEditing(_ notification: Notification) {
-            onActivate()
-        }
-
-        func textDidChange(_ notification: Notification) {
-            guard let textView = notification.object as? NSTextView else { return }
-            // Don't propagate intermediate IME composition states upward —
-            // the final string will be delivered once the user picks a candidate.
-            if textView.hasMarkedText() { return }
-            if isApplyingUpdate { return }
-            if text.wrappedValue != textView.string {
-                text.wrappedValue = textView.string
-            }
-            updateSelection(from: textView)
-        }
-
-        func textViewDidChangeSelection(_ notification: Notification) {
-            guard let textView = notification.object as? NSTextView else { return }
-            if textView.hasMarkedText() { return }
-            // Ignore selection callbacks driven by our own setSelectedRange — they would
-            // try to write back into the SwiftUI binding mid view-update.
-            if isApplyingUpdate { return }
-            updateSelection(from: textView)
-        }
-
-        private func updateSelection(from textView: NSTextView) {
-            let range = textView.selectedRange()
-            let newValue: NSRange?
-            if range.length > 0 {
-                newValue = range
-            } else if textView.window?.firstResponder === textView {
-                newValue = nil
-            } else {
-                return
-            }
-            if selection.wrappedValue != newValue {
-                selection.wrappedValue = newValue
-            }
-        }
-    }
-
-    final class ActivatingTextView: NSTextView {
-        var onActivate: (() -> Void)?
-
-        override func mouseDown(with event: NSEvent) {
-            onActivate?()
-            super.mouseDown(with: event)
-        }
-
-        override func becomeFirstResponder() -> Bool {
-            onActivate?()
-            return super.becomeFirstResponder()
-        }
-
-        @objc func undo(_ sender: Any?) {
-            guard let undoManager = window?.undoManager, undoManager.canUndo else {
-                NSSound.beep()
-                return
-            }
-            undoManager.undo()
-        }
-
-        @objc func redo(_ sender: Any?) {
-            guard let undoManager = window?.undoManager, undoManager.canRedo else {
-                NSSound.beep()
-                return
-            }
-            undoManager.redo()
-        }
     }
 }

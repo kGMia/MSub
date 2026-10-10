@@ -9,6 +9,28 @@ enum TranslationOutputMode: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+/// Apply delayed results by identity, leaving edits made during translation intact.
+enum SubtitleTranslationEdits {
+    static func apply(snapshot: [SubtitleCue], translated: [String], current: [SubtitleCue],
+                      mode: TranslationOutputMode) -> [SubtitleCue] {
+        let results = Dictionary(zip(snapshot, translated).map { ($0.0.id, ($0.0, $0.1)) },
+                                 uniquingKeysWith: { first, _ in first })
+        return current.map { cue in
+            guard let (original, translation) = results[cue.id], original == cue else { return cue }
+            var updated = cue
+            switch mode {
+            case .replace:
+                updated.bilingual = nil
+                updated.text = translation
+            case .bilingual:
+                updated.setBilingual(.init(source: original.translationSourceText, translation: translation,
+                                            translationFirst: original.bilingualText?.translationFirst ?? false))
+            }
+            return updated
+        }
+    }
+}
+
 /// A common target language identifier the user can pick.
 struct TranslationLanguageChoice: Identifiable, Hashable {
     let id: String
