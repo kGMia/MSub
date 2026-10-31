@@ -1,4 +1,146 @@
+## 2026-10-31: release pairing
+
+Backend/ now tracks the external Python workspace as an explicit source snapshot with SHA-256 manifest. After backend edits run Scripts/backend-snapshot.py --sync --workspace /Users/august/Project/Huz, review and commit together. Release preflight/package rejects drift, Debug still uses live workspace. CI backend-contract runs CPU tests without model downloads. See RELEASE_PAIRING_2026-10-31.md and README reconstruction instructions. No model/media/runtime files included.
+
+## 2026-10-30: Qwen within-cue phrase loops
+
+User reports sentence repetition in native AND Python. Native now uses1.05/100 sign-aware recent-token penalty matching Python; both modes retry suspected substantial sentence loops once with stronger1.15/140 policy on the same audio/time range. Native reuses features. Keep original if retry empty/still looping; no text deletion/cross-cue deduplication. Python's generic retry is skipped after a repetition retry; cancellation exceptions propagate. See QWEN_REPETITION_2026-10-30.md. Actual JA fixture reproduces364-char loop without penalty,57 chars/no loop with1.05; other cues17/14 unchanged. New Python qwen_repetition.py must be included in packaging (normal package inclusion). Historical feature-reuse docs' penalty1/no-recovery contract is superseded.
+
+## 2026-10-30: list undo and Japanese filler refinements
+
+Cue list text/speaker, insert/delete, shift and gap changes now register document undo/redo with stable file IDs and selection snapshots. Continuous typing coalesces; bulk edits publish one array. Japanese standalone/repeated うん and わー/わあ/わぁ/うわ variants are flagged, meaningful sentences kept. Equatable reason badges and indexed/static-regex classification reduce list refresh work. See LIST_EDIT_FIX_2026-10-30.md for targeted checks and UI validation limits. Xcode build passes; no recognition changes this iteration.
+
+## 2026-10-30: native Qwen greedy decoding overhead
+
+Single-segment decoding now reuses the public greedy adapter (default enabled) without unused per-token text events. Evaluate argmax with model output, reuse selected on-device token and skip final unused forward at maxTokens. Full stream compatibility fallback remains; MSUB_NATIVE_QWEN_STREAM_REFERENCE=1 forces original stream and disables pair encoding. Actual JA model warmed benchmark: mean5.938s reference vs5.873s optimized single (~1.1%, modest short-fixture result), pair5.846s. Exact text/timing/live callbacks and checkpoint cancel/retry passed; additional Japanese/auto/context and maxTokens1/32 parity passed. See QWEN_FEATURE_REUSE_2026-10-30.md and Performance/qwen-ja-decoding-2026-10-30.json. Batch still default-off. No dependency changes, no full-video test.
+
+## 2026-10-30 evening: native Qwen batch integration
+
+Native Qwen settings now include a persisted, default-off experimental batch encoding toggle. Request-local Options captures it; explicit MSUB_NATIVE_QWEN_BATCH_SIZE overrides (2=on, other=off). Actual service benchmark verified exact text/timing/live callbacks, odd tail, checkpoint cancellation/retry and empty input. Warm total ~5.94 s for either mode on21s fixture: no significant throughput gain; pair first cue ~0.13s later. Keep optional. See QWEN_FEATURE_REUSE_2026-10-30.md and Performance/qwen-ja-pipeline-2026-10-30.json. New Scripts/benchmark-qwen-pipeline.swift plus root scripts/benchmark_qwen_encoder.py --pipeline makes checks reproducible. No model modifications. Fixed clearModel allocator access before successful Metal runtime validation. Xcode build passes; no full-video ASR/pressure stress tests.
+
 # MSub handoff 2026-09-11
+
+## Optional native Qwen feature reuse — 2026-10-30
+
+- Implemented explicit MSUB_NATIVE_QWEN_BATCH_SIZE=2 in NativeQwenService, default off. At most two<=30 s segments on>=16 GiB hosts, guard feature counts/public embedding module; independent sequential greedy decode consumes preencoded features via public APIs. No dependency patch. Actor-confined features cleared at request completion/error/cancel; transient per-segment allocator clearing retained. Existing timeOffset/onCue streaming and synchronized audio preparation unchanged.
+- Actual JA BF166 s/10 s probes: specified ja and auto, four final-text comparisons against upstream all match (maxTokens128; not a quality corpus). Saved report Performance/qwen-ja-feature-decode-parity-2026-10-30.json, reusable scripts/benchmark_qwen_encoder.py --decode + Scripts/benchmark-qwen-decode.swift. Production actor with flag2 passes two live callbacks before final progress and12 s offset on2×5 s test. Xcode build succeeded20.631 s, no errors.
+- See QWEN_FEATURE_REUSE_2026-10-30.md for limits/repro. This is a maintained narrow greedy adapter; upstream generation-policy changes require parity recheck. No end-to-end speedup or broad cancellation/other-model validation claim; do not auto-enable. Older MSUB_NATIVE_QWEN_ENCODER_PROBE adds duplicate diagnostics and should stay unset for normal batch mode.
+
+
+## Confirmed compressed-audio drift / live Qwen preview — 2026-10-30
+
+- User supplied problem.mp4, Pyannote+native JA Qwen; confirmed native AVAssetReader decoded clock ahead9.58/19.50/39.16 s at30/60/120 min versus PTS-synchronized PCM. AAC nominal sample duration differs from container clock by~43.56 s. AudioMixOutput trial also drifted. NativeAudioExporter now routes compressed/unknown audio through managed FFmpeg to synchronized mono16k PCM, PCM remains native. Waveform follows same clock, disk key timeline-pcm-v4 and preview key audio-sync-v4-packet-clock invalidate old data.
+- Actual fixed extraction compared at60/1800/3600/7200 s:0.00 s envelope offset at10 ms resolution; whole audio extraction12.1 s, no full ASR rerun. Source unchanged. See AUDIO_TIMELINE_FIX_2026-10-30.md.
+- NativeQwenService new ordered onCue callback emits completed nonempty segments before progress; ContentView displays partial text and only installs editable final cues at success. Stable ID/cancel guards; clear partial before Python fallback. Actual2×5 s JA model check passed with12 s offset. Added opt-in NativeQwenStreamingTests and compressed timestamp regression; latter test body passed in standalone production-code harness. Xcode build passed, no errors.
+
+
+## Hybrid Pyannote / measured native encoder — 2026-10-30
+
+- Traced strict synthetic parity failure to all-zero input MLX SincNet frontend. predict_batch now defaults CPU frontend + GPU recurrent/dense, retains frontend="mlx" for comparison. Explicit optional MSUB_PYANNOTE_MLX_BACKEND=mlx_batch (requires MLX_ENABLE_TF32=0) is wired through bounded4-window reading and original aggregation. Default unchanged. Actual40 s pipeline:11 identical segment boundaries, max error6.56e-7; cold0.531 s slower than CPU0.343 s, while4-window synthetic warm0.107 s vs CPU0.204 s. No automatic switch.
+- Measured actual native JA BF16 encoder via standalone Swift linked against Xcode Debug packages:2×10 s warm sequential~226 ms, batch~158 ms, feature difference0.0006422, process MLX peak5.05 GB. Production decode not changed; decoder API must accept preencoded features and final text parity needs verification before integration. Repro Swift/Python helpers and JSON results saved; see M5_BATCH_EXPERIMENT_2026-10-30.md updated section.
+-57 CPU/progress/boundary tests and6 local Metal checks pass. Existing single-window path preserved, batch tail/order and bounded reads covered. No full long-video test or Instruments/NAX utilization capture.
+
+
+## M5 bounded batch experiments — 2026-10-30
+
+- Added experimental PyannoteMLX.predict_batch (1–4 fixed 10 s windows) and scripts/benchmark_pyannote_batches.py. Default CPU and existing opt-in single-window path retained. Local M5 Metal real-audio batch4 warm67–74 ms /4 windows versus CPU200 ms; error1.55e-6 and no0.5 flips. Synthetic error7.99e-5 fails strict tolerance, so do not promote to production. Saved JSON reports in Performance/. Five opt-in GPU tests passed including independent/reordered windows.
+- Native Qwen now emits segment/first-text signposts/logs with honest combined-stage naming. Optional MSUB_NATIVE_QWEN_ENCODER_PROBE=1 compares separate/batched encoding of first two segments, each<=30 s, on>=16 GiB hosts, once per request; adds duplicate work and never feeds experimental features to decoder. No native encoder runtime measurements or Instruments capture yet. Upstream stream cannot consume preencoded features and reports prefillTime=0; API work needed before production batch reuse.
+- See M5_BATCH_EXPERIMENT_2026-10-30.md for reproduction, limits and remaining work. Xcode build passed; no dependency/precision/default-engine changes.
+
+
+## SwiftUI slider and M5 audit — 2026-10-30
+
+- Replaced TimelineZoomSlider NSSlider bridge with SwiftUI Slider, retaining logarithmic mapping and drag-state behavior. Preserved AppKit text editor and player pending IME/selection/undo/fullscreen parity.
+- Fused NumPy Pyannote gate activations: 40-window actual-weight probe 69.72→49.91 ms mean with identical probability arrays; not an end-to-end gain claim. 39 targeted Python checks pass, 1 MLX opt-in skipped.
+- Audited local mlx-swift0.31.6: eligible matrix operations already have M5 NAX dispatch; Neural Accelerator is GPU hardware distinct from ANE. No dependency/default/precision changes. See SWIFTUI_M5_PLAN_2026-10-30.md for sources, limits and next steps.
+
+
+## Live long-video VAD diagnosis / preview progress correction — 2026-10-30
+
+- Captured running preview 90ed65e6b97d4789a4cd444439eb703e: audio 7272.533 s, NumPy Pyannote, 1454 overlapping windows, VAD 112.627 s. First half inference 52.260 s, second half 60.011 s (~15% slower); per-decile mean ms: 71.0,72.6,70.9,71.8,73.2,75.6,88.4,71.8,88.3,88.7. Non-inference window-loop overhead only 0.234 s. Not a continuously growing slowdown or callback/disk bottleneck. Thermal status unavailable via pmset; cannot attribute transient CPU variation to thermal/scheduling with certainty.
+- Alternating actual 10 s PCM excerpts at seconds 100/3500/4500/6500, six runs each after completion: median inference 69.83/68.95/69.12/69.99 ms. Selected late audio does not reproduce the slowdown; no full-file replay. Timing-only evidence saved /tmp/msub-live-vad-timings-20261030.txt, without source filename/transcript.
+- Confirmed misleading preview progress: extraction took 0.052 s but bar already reached 48%; 112.6 s VAD squeezed into 48–68%, integer-stepped. Now metadata/extraction use 2–8%, VAD 10–95% when audio-event model disabled, 10–68% when enabled; events retain 72–95%, export96%. This is a phase-weighted completion indicator, not an ETA. Backend supplies fractionalCurrent alongside compatible integer current; Swift preview consumes it. Audio-event callbacks and final done refresh fractionalCurrent to prevent stale/backward progress. No model/threshold/overlap changes this turn.
+- Five targeted preview/progress tests passed (optional-events on/off, monotonic progression, fractional values, existing write-coalescing/variant checks). Xcode BuildProject succeeded in21.917 s, no errors, log20261030-023701. Current task was observed to completion without stopping/restarting it. Relaunch rebuilt app to use revised display. Real ~15% second-half variation remains unexplained; do not claim the UI fix speeds inference.
+
+
+## Pyannote continued slowdown investigation — 2026-10-30
+
+- User reports slowdown remains, then clarifies restarted app but has not completed a full run. No matching job logs available: web shutdown deletes task directories. Do not require a full run; capture vad_backend/vad_window_timing while slow task/app remains open. Root cause of reported mid-VAD slowdown remains unconfirmed.
+- Profiled actual local Pyannote weights on fixed 10 s inputs: NumPy recurrent gate work dominates. sigmoid now computes one bounded exp(-abs(x)) instead of three eager exponentials; avoids overflow in unselected np.where branch. Recurrent output is preallocated and assigned by original time index in either direction, replacing per-frame copies/list/vstack. No thresholds/backend/precision changes.
+- Limited same-process comparison, 40 alternating silent/random windows per implementation, actual weights: old mean 87.42 ms, new 69.20 ms (~21% less time). New first/last 10 means 69.00/69.07 ms. All 40 speech-probability arrays exactly equal, 0.5 decisions equal. This is synthetic-input CPU inference evidence, not real-video end-to-end or long-run slowdown resolution. Probe /tmp/msub-pyannote-gate-probe.py.
+- 37 targeted Python checks passed, one opt-in real MLX test skipped. Xcode BuildProject passed 4.925 s with no errors (20261030-023241). Verified bundled cli.py/web.py/pyannote_mlx.py match workspace. Restart freshly built app to load changes.
+
+
+## Long-recording Pyannote bounded reads — 2026-10-30
+
+- User reports slowdown after ~50% within VAD, not overall workflow progress. Root cause is not yet reproduced on their media. Removed full-file PCM loading from `pyannote_mlx_speech_probabilities`: one WAV handle reads fixed-size overlapping windows; validates mono PCM16/rate and rejects truncated reads. Float32 PCM now bounded to 10 s (~0.64 MB by default), while probability/count arrays still scale with recording length. Window starts, tail padding, overlap, averaging and thresholds unchanged. This removes a memory-pressure contributor, not proof that thermal/compute slowdown is resolved.
+- Added `vad_window_timing` events about every 10% (actual backend, recent mean inference/window, cumulative inference and elapsed seconds). Preview logs now retain these and `vad_backend`; transcription already logs generic events. Default Pyannote backend remains NumPy; no precision/backend switch or aggressive GPU cache flush.
+- Targeted Python checks: 36 passed, 1 opt-in real-MLX check skipped. Streaming parity covers empty/short/exact/tail/longer WAV, three overlaps, bounded reads, exact aggregation and cancellation cleanup; py_compile passed. Xcode MCP reports no open workspaces, so no app rebuild performed. Rebuild/relaunch app to refresh packaged Python; retry affected long recording and inspect job log timings if slowdown remains. No full long-video performance claim.
+
+
+## Bounded native Qwen PCM read-ahead — 2026-10-29
+
+- Added NativeQwenAudioSource actor owning the existing validated/reusable AVAudioFile and PCM buffer. All ranges remain validated before MLX model loading. Service waits for current samples, schedules only the next read and then decodes current audio; CPU I/O may overlap GPU work without concurrent MLX models. At most one next-segment Float array is prefetched (30 s / 16 kHz limit); no full-recording preload.
+- AVFoundation objects stay actor-confined; only owned Float arrays cross isolation. Pause does not queue further work beyond the one already scheduled read. Error/cancellation cancels and awaits pending CPU read; existing bounded GPU stream drain remains. NativePreparation now measures time waiting for PCM, not total overlapped CPU work; do not add CPU work to decoder duration when interpreting diagnostics.
+- Four standalone Swift 6 test bodies with real temporary Float32 WAV passed: reader range validation, sequential/overlap/reverse samples and retained ownership, actor read-ahead, cancelled read and recovery. No model/GPU benchmark. Xcode BuildProject passed in 20.369 s with no warning/error diagnostics (20261029-185218).
+- User's Xcode recommended-settings screenshot proposes removing ARCHS at both project and target levels. Advised not to accept both: project arm64 restriction matches current ffmpeg/release contract. Target override alone may be removed to inherit project's arm64; no architecture build setting was changed this turn. Automatic architecture selection alone does not validate an Intel distribution.
+
+
+## Preserve confirmed pauses and accepted short replies — 2026-10-29
+
+- Added confirmed_silence_boundaries from each VAD path's existing speech mask. Internal non-speech runs meeting min_silence create protected midpoints (leading/trailing silence excluded). Initial padded-range merge and final short-range merge cannot cross these boundaries. Binary search keeps individual merge checks logarithmic; no extra model inference. Python energy fallback, Pyannote and FireRed paths use the helper; native FireRed implements matching guards.
+- Pyannote bridges only gaps strictly shorter than min_silence; exactly-at-threshold pauses are now consistent with protected boundaries. Existing probability thresholds, min_speech, padding and max segment duration are unchanged. Native preview key bumped to v3-silence.
+- A pair of accepted 250 ms speech responses separated by 500 ms silence is preserved as two padded intervals (0...0.45 and 0.75...1.2) instead of being rejoined. The one-second minSegment is not treated as a deletion threshold. Shorter-than-threshold gaps can still merge. This does not recover speech already rejected by minSpeech or prove speech/non-speech model accuracy.
+- Updated native full-pipeline cyclic fixtures: confirmed pauses now remain separate instead of being merged toward maximum duration. Four standalone native Swift 6 test bodies passed. Fourteen targeted Python checks passed; one actual MLX/audio opt-in check skipped. Python FireRed cleanup test uses mocked probabilities and real postprocessing, matching native short-reply fixture. Xcode BuildProject passed in 22.354 s without warning/error diagnostics (20261029-184020). No full media/quality benchmark.
+
+
+## Patch audit and VAD boundary correction — 2026-10-29
+
+- User confirms Japanese Qwen runs. Audited current mlx-swift 0.31.6 device.h versus upstream MLX v0.32.4: current set_vector_bytes still binds empty vec.data directly; upstream handles zero-length with a local placeholder. Retain current Gather patch until coordinated runtime upgrade and Metal validation. Metal constexpr issue #342 remains open; no patch/lockfile changes this turn. See VAD_BOUNDARIES_2026-10-29.md for evidence/limits.
+- Fixed Pyannote ranges_from_vad_probabilities polarity: split_long_ranges minimizes scores, so passing -prob_values cut at high speech probability. Now passes positive probabilities. Existing hysteresis/trim preserved.
+- find_low_energy_cut now scores 100 ms means, centers widest equally quiet plateaus (later tie), and keeps target for flat/nonfinite windows. Native FireRed matches this logic; native preview key bumped to v2-valley. Single-frame minima no longer automatically outrank sustained quiet valleys. No extra model inference or parameter UI.
+- Updated complete FireRed fixtures from Python production postprocessing. Constant voice now yields 20/20/20 s instead of early cuts at 18/36/54; cyclic and short-tail fixture expectations updated intentionally. Python targeted tests: 11 passed, 1 real MLX/audio opt-in skipped. Three standalone Swift 6 test bodies passed. Xcode BuildProject passed in 24.104 s with no warning/error diagnostics, log 20261029-183017. No full audio accuracy benchmark.
+
+
+## Bounded native residency and focused module split — 2026-10-29
+
+- Successful NativeQwenService requests now retain at most one model for 45 seconds by default on Macs with >=16 GiB physical memory. Smaller Macs default to immediate release. MSUB_NATIVE_QWEN_IDLE_SECONDS accepts finite seconds clamped to 0...120; 0 disables retention. Transient MLX allocator cache is cleared at completion. No model is retained after failed/cancelled requests.
+- NativeQwenResidency is a pure lifecycle state machine. Generation tokens invalidate stale timers before a new request; concurrent requests remain rejected. release() while busy now marks a pending release, applied only after the existing decode/drain path completes. GCD warning/critical memory pressure requests release and suppresses retention for 60 seconds. Native model replacement still drops the previous model before loading a different path.
+- Removed unconditional release after successful batch and successful cue re-recognition. Batch cancellation, native fallback, Python preview/job handoff and main-window disappearance explicitly release. Idle expiration handles successful single-file use and batch gaps. This supersedes earlier notes saying separate clicks always force native cold loads.
+- Extracted unchanged library-search, diagnostics and PCM reader helpers into NativeQwenSupport.swift; residency/pressure ownership lives in NativeQwenResidency.swift. Registered both in Xcode; SwiftPM discovers them automatically. No broad UI architecture rewrite.
+- Four lifecycle test bodies passed as standalone Swift 6 assertions against production state/policy: warm reuse/stale timer rejection, busy rejection, pressure/release deferral, failure/cancellation and time/memory bounds. These do not simulate OS pressure delivery, real timeout scheduling or GPU inference. Xcode BuildProject passed (28.564 s; BuildProject-Log-20261029-181641.txt). No real warm-speed, memory high-water or full-model benchmark.
+- Dependency audit: upstream mlx-swift 0.33.0 and mlx-audio-swift v0.1.7 are available. 0.33.0 changes Sendable compile APIs, eval locking, module parameter behavior and adds materialized arrays; upgrade merits a separate coordinated runtime migration. Current pins and scalar Gather/Metal header patches remain unchanged. Do not drop source-hash guards merely to make upgraded sources compile. See RUNTIME_PLAN_2026-10-29.md.
+
+
+## Interrupted cleanup closeout and downloaded Japanese model — 2026-10-29
+
+- Audited interrupted work: actual new changes were source resource cleanup, ffmpeg packaging/runtime lookup and ignore rules. No module split or native idle-retention implementation had landed; native release behavior is unchanged. SwiftPM and Xcode dependency pins match the existing pinned runtime, and tested Metal compatibility patches remain. Do not treat these deferred items as completed upgrades.
+- Removed dangling Xcode resource references to deleted Sources/MSub/ffmpeg. Retained cached binary at .cache/bin/ffmpeg and packaging script copy before cache-hit exit; missing executable now fails with an actionable setup message. Deleted legacy Media.xcassets is unused; Xcode uses AppIcon.icon. No further directory deletion performed. New checkouts must supply ffmpeg via MSUB_FFMPEG_SOURCE, .cache/bin/ffmpeg, or PATH.
+- BackendService now discovers Japanese Qwen via explicit environment override, workspace, packaged manifest source path, or application support using the existing model-access mechanism. Cached/fresh catalog refreshes register the installed variant without resetting current selections. Package manifest records sourceQwen3JAModelPath but does not embed the 4.08 GB weights. Python receives MSUB_QWEN3_JA_MODEL, exposes its local path in Qwen variants, and Model Manager shows external weights as installed with Finder access, not owned/deletable content.
+- Local user model models/Qwen3-ASR-1.7B-JA-MLX-bf16 has 707 BF16 tensors; safetensors index references and byte ranges validated without loading into GPU. Existing native loader supports nonquantized weights; no model conversion or weight edits. Actual native speech decoding/quality has NOT been tested this turn.
+- Final Xcode MCP BuildProject succeeded in 10.339 s with no warning/error diagnostics (BuildProject-Log-20261029-180223.txt). Confirmed built app contains executable ffmpeg and correct Japanese source path. 34 backend variant/API tests and 4 Metal patch tests passed; shell syntax, dependency pin equality and diff checks passed. No full suite, UI, Archive, model-memory or GPU-throughput benchmark.
+
+
+## Settings scene dependency fix and Swift toolchain — 2026-10-29
+
+- Command-comma opened an independent Settings scene without BackendService, while its ModelManagerView requires @Environment(BackendService.self). Injected the app-owned backend into PreferencesView alongside APIClient and TranscriptionSettings; main and Settings windows now share the same service.
+- Verified installed Xcode compiler is Apple Swift 6.4 (swiftlang-6.4.0.34.1). Xcode Debug/Release already use SWIFT_VERSION=6.0 (language mode, not compiler minor version); build log confirms MSub -swift-version 6 using XcodeDefault/swiftc. Package.swift now requires tools 6.4 and explicitly declares swiftLanguageModes [.v6]. Do not set SWIFT_VERSION=6.4: compiler and language-mode versions differ. Dependency manifests are unchanged.
+- Xcode MCP BuildProject succeeded with no reported errors (9.852 s); SwiftPM dump-package passed under Xcode toolchain. Command-comma interaction itself was not UI-tested; no full recognition or Archive run.
+
+
+## Japanese Qwen variant, vocal candidates and progress persistence — 2026-10-29
+
+- Added ph0ryn/Qwen3-ASR-1.7B-JA-MLX-bf16 to Python model registry and Qwen catalog variants, plus a compact native model-selection menu. Selection sets Japanese; installed variants resolve to local directories for both native Qwen and Python submission. General 8bit default remains. Optional variant decoding supports older catalogs. Source/config audit and user-facing steps: JAPANESE_MODEL_2026-10-29.md. No weights downloaded or dependency upgrade.
+- Per explicit user request, standalone/repeated あう is a meaningless-cue candidate. Added multi-kana vocalization units, halfwidth/Katakana normalization preserving ー, and meaningful Japanese repetition protection. This remains editor review, not automatic transcript deletion. Dynamic reachable-position matching avoids nested regex backtracking.
+- Python chunk_progress keeps every in-memory/cancellation update while coalescing synchronous status.json persistence to 250 ms; boundaries and terminal updates remain immediate. Timer state cleared at termination/cleanup. No claim of measured GPU/throughput improvement; unchanged generation, prefetch and memory policies.
+- Limited validation: 10 detector and 2 catalog compatibility test bodies passed as standalone Swift assertions using production code; 7 targeted Python tests passed. xcodebuild app build succeeded without warning/error diagnostics (/tmp/msub-ja-pipeline-build.log); Xcode MCP reported no open workspaces. No full model/Archive suite. Earlier Archive pre-action path fix remains in this working tree.
+
+
+## Archive pre-action path fix — 2026-10-10
+
+- Actual Xcode Archive logs (4F7E377C-955C-46C4-9674-EE5ACF8EA4C3) show patch-mlx-metal.py failed before compilation: the fixed BUILD_DIR parent count pointed into Build/Intermediates.noindex/ArchiveIntermediates/SourcePackages instead of DerivedData/SourcePackages.
+- Resolve the enclosing SourcePackages/checkouts by walking BUILD_DIR ancestors and requiring the MLX Gather source to exist. Explicit CLI checkout paths, source hash checks, patch idempotence and Metal validation are unchanged. Missing dependencies now produce an actionable error.
+- All four patch/path tests passed with Xcode's /usr/bin/python3, including ordinary Build, Archive and a scheme name containing spaces. Replayed the pre-action using the exact failing Archive BUILD_DIR against the existing checkout: exit 0. Full Archive/signing/packaging was not rerun; user can retry Product > Archive without cleaning dependencies.
 
 ## Milestone closeout and native runtime search — 2026-10-10
 

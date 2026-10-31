@@ -21,10 +21,13 @@ MSub is a native macOS subtitle app for Apple Silicon Macs. It turns local video
 
 See the [milestone notes](MILESTONE_2026-10-10.md) for scope and validation limits, and the [model audit](MODEL_UPDATE_2026-10-10.md) for current versions (Chinese).
 
+Japanese-specialized Qwen selection and vocalization review: [usage and validation notes](JAPANESE_MODEL_2026-10-29.md) (Chinese).
+
 ## Requirements
 
 - Apple Silicon Mac.
 - macOS 27 or newer for the current native app target.
+- Building from source requires a Swift 6.4 toolchain; MSub uses Swift 6 language mode.
 - Python 3.10-3.13 for backend engines such as FireRedASR2 and native fallback; configured native workflows can run without starting Python.
 - `uv` for Python dependency management.
 - `ffmpeg` for audio extraction.
@@ -130,3 +133,52 @@ Please check each model and dependency license before redistribution or commerci
 - `MSub.xcodeproj`: Xcode project.
 - `Package.swift`: Swift Package manifest for local builds.
 - `RELEASE.md`: release build notes.
+
+
+### FFmpeg for source builds
+
+The large FFmpeg executable is no longer stored under `Sources/MSub`. Set
+`MSUB_FFMPEG_SOURCE` to an executable, place it at `.cache/bin/ffmpeg` under this
+app directory, or make `ffmpeg` available on the build process PATH. Xcode's
+packaging phase copies it into the app resources. Use a standalone Apple Silicon
+binary for distribution; a package-manager binary may depend on local libraries.
+For `swift run`, `MSUB_FFMPEG` can point to a local executable.
+
+
+### Native Qwen idle residency
+
+After successful native recognition, one model stays resident for up to 45 seconds
+on Macs with at least 16 GiB memory, reducing repeated model loads. Smaller Macs
+release immediately by default. Set `MSUB_NATIVE_QWEN_IDLE_SECONDS=0` to disable,
+or choose a finite duration up to 120 seconds. Failure, cancellation, Python
+handoff, window closure and memory-pressure handling release the model (active
+decoding must finish draining first). This trades short-lived memory use for
+potentially faster repeated recognition; no throughput improvement is guaranteed.
+
+### Frontend/backend release pairing
+
+`Backend/` is the reviewed snapshot of the Python workspace: source, tests,
+maintenance scripts, `pyproject.toml` and `uv.lock`. Its `manifest.json` records
+SHA-256 for each input and a content-based backend revision. The Git commit
+containing this snapshot identifies the matching frontend. Models, media,
+virtual environments, credentials and generated outputs are not included.
+
+After backend changes, from the app repository run:
+
+```sh
+python3 Scripts/backend-snapshot.py --sync --workspace /path/to/Huz
+python3 Scripts/backend-snapshot.py --workspace /path/to/Huz
+```
+
+Review and commit the snapshot together with app changes. Release preflight and
+Release packaging reject drift between the live workspace and snapshot; the
+app bundle receives `backend/backend-source-manifest.json`. Debug remains free
+to use live edits and does not claim release provenance. CI verifies the
+manifest and runs lightweight Python contracts without downloading ML models.
+
+To reconstruct a clean full workspace, place this repository at
+`<workspace>/apps/MSub`, copy the contents of its `Backend/` directory into the
+workspace root (excluding `manifest.json`), then install dependencies from
+`uv.lock` using `uv sync --frozen`. Provision required models and ffmpeg
+separately as described above. The snapshot is a release boundary, not a second
+place for day-to-day backend edits.

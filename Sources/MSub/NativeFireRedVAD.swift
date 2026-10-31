@@ -351,10 +351,12 @@ enum FireRedVADSegmentation {
             }
         }
         if lastStart > 0 { append(probabilities.count) }
+        let protectedBoundaries = silenceBoundaries(smoothed, threshold: Float(o.threshold), minimumFrames: minimumSilence)
         ranges = ranges.map { .init(start: max(0, $0.start - o.padding), end: min(duration, $0.end + o.padding)) }
         var merged: [FireRedSpeechRange] = []
         for range in ranges {
-            if let last = merged.last, range.start - last.end <= o.minSilence {
+            if let last = merged.last, range.start - last.end <= o.minSilence,
+               !crossesBoundary(protectedBoundaries, start: last.start, end: range.end) {
                 merged[merged.count - 1].end = max(last.end, range.end)
             } else { merged.append(range) }
         }
@@ -386,6 +388,7 @@ enum FireRedVADSegmentation {
                 let gap = range.start - last.end
                 let short = min(last.end - last.start, range.end - range.start) <= shortTail
                 if gap >= -0.001, gap <= mergeGap, range.end - last.start <= o.maxSegment + 1e-6,
+                   !crossesBoundary(protectedBoundaries, start: last.start, end: range.end),
                    short || gap <= tightGap {
                     merged[merged.count - 1].end = range.end
                     continue
@@ -394,6 +397,58 @@ enum FireRedVADSegmentation {
             merged.append(range)
         }
         return preventOverlaps(merged)
+    }
+
+    static func silenceBoundaries(_ probabilities: [Float], threshold: Float, minimumFrames: Int) -> [Double] {
+        var boundaries: [Double] = []
+        var silenceStart: Int?
+        for (index, probability) in probabilities.enumerated() {
+            if probability < threshold {
+                if silenceStart == nil { silenceStart = index }
+            } else if let start = silenceStart {
+                if start > 0, index - start >= max(1, minimumFrames) {
+                    boundaries.append(Double(start + index) * 0.01 / 2)
+                }
+                silenceStart = nil
+            }
+        }
+        return boundaries
+    }
+
+    private static func crossesBoundary(_ boundaries: [Double], start: Double, end: Double) -> Bool {
+        var lo = 0, hi = boundaries.count
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if boundaries[mid] <= start { lo = mid + 1 } else { hi = mid }
+        }
+        return lo < boundaries.count && boundaries[lo] < end
+    }
+
+    /// Same 100 ms valley scoring as Python find_low_energy_cut (10 ms frames).
+    static func lowProbabilityCut(_ probabilities: [Float], lo: Int, hi: Int, target: Double,
+                                  windowStart: Double, windowEnd: Double) -> Double {
+        guard lo >= 0, hi <= probabilities.count, hi > lo else { return target }
+        let values = probabilities[lo..<hi].map(Double.init)
+        guard values.allSatisfy(\.isFinite) else { return target }
+        let width = min(values.count, 10)
+        var sums = [Double](repeating: 0, count: values.count + 1)
+        for i in values.indices { sums[i + 1] = sums[i] + values[i] }
+        let scores = (0...(values.count - width)).map { (sums[$0 + width] - sums[$0]) / Double(width) }
+        guard let best = scores.min(), let highest = scores.max() else { return target }
+        let tolerance = max(1e-7, abs(best) * 1e-6)
+        guard highest - best > tolerance else { return target }
+        var bestStart = 0, bestEnd = 0
+        var runStart: Int?
+        for i in 0...scores.count {
+            if i < scores.count && scores[i] <= best + tolerance {
+                if runStart == nil { runStart = i }
+            } else if let start = runStart {
+                if i - start >= bestEnd - bestStart { bestStart = start; bestEnd = i }
+                runStart = nil
+            }
+        }
+        let frame = Double(lo) + Double(bestStart + bestEnd - 1 + width) / 2
+        return rounded(min(windowEnd, max(windowStart, frame * 0.01)))
     }
 
     private static func split(_ ranges: [FireRedSpeechRange], options o: FireRedVADOptions,
@@ -417,9 +472,8 @@ enum FireRedVADSegmentation {
                     let lo = max(0, Int(windowStart / 0.01))
                     let hi = min(probabilities.count, Int(ceil(windowEnd / 0.01)))
                     if windowEnd > windowStart, hi > lo {
-                        var best = lo
-                        for i in (lo + 1)..<hi where probabilities[i] < probabilities[best] { best = i }
-                        cut = rounded(Double(best) * 0.01)
+                        cut = lowProbabilityCut(probabilities, lo: lo, hi: hi, target: target,
+                                                windowStart: windowStart, windowEnd: windowEnd)
                     }
                 }
                 if cut <= low || cut >= high { cut = target }

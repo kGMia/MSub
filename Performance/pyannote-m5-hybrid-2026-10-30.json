@@ -1,0 +1,46 @@
+{
+  "device": "Apple M5",
+  "windows": 4,
+  "cpuSeconds": 0.20432170799176674,
+  "input": "synthetic",
+  "frontend": "numpy",
+  "batches": [
+    {
+      "batch": 1,
+      "coldSeconds": 0.48455100000137463,
+      "warmSeconds": [
+        0.3081303749931976,
+        0.2847279580018949
+      ],
+      "maxProbabilityError": 2.980232238769531e-07,
+      "thresholdFlips": 0,
+      "parity": true,
+      "peakBytes": 10334696
+    },
+    {
+      "batch": 2,
+      "coldSeconds": 0.3663222500035772,
+      "warmSeconds": [
+        0.18407145800301805,
+        0.1796536249894416
+      ],
+      "maxProbabilityError": 2.980232238769531e-07,
+      "thresholdFlips": 0,
+      "parity": true,
+      "peakBytes": 14789812
+    },
+    {
+      "batch": 4,
+      "coldSeconds": 0.2830846249999013,
+      "warmSeconds": [
+        0.10663075000047684,
+        0.10818754200590774
+      ],
+      "maxProbabilityError": 2.980232238769531e-07,
+      "thresholdFlips": 0,
+      "parity": true,
+      "peakBytes": 23550540
+    }
+  ],
+  "note": "Fixed windows only; not boundary-quality or end-to-end validation."
+}

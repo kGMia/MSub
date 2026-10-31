@@ -45,6 +45,41 @@ final class NativeAudioPreparationReuseTests: XCTestCase {
         XCTAssertThrowsError(try reader.samples(in: 1200..<1210))
     }
 
+    func testAudioSourceReadAheadPreservesOwnedSamples() async throws {
+        let url = FileManager.default.temporaryDirectory.appending(path: "\(UUID()).wav")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let values = try writePCM(url)
+        let ranges = [0..<400, 400..<800, 700..<1200]
+        let source = try NativeQwenAudioSource(audioURL: url, segments: ranges.map(segment))
+        let first = try await source.samples(in: ranges[0])
+        let next = Task { try await source.samples(in: ranges[1]) }
+        let second = try await next.value
+        let overlap = try await source.samples(in: ranges[2])
+        XCTAssertEqual(first, Array(values[ranges[0]]))
+        XCTAssertEqual(second, Array(values[ranges[1]]))
+        XCTAssertEqual(overlap, Array(values[ranges[2]]))
+    }
+
+    func testCancelledAudioSourceReadDrainsAndRemainsUsable() async throws {
+        let url = FileManager.default.temporaryDirectory.appending(path: "\(UUID()).wav")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let values = try writePCM(url)
+        let source = try NativeQwenAudioSource(audioURL: url, segments: [segment(0..<400)])
+        let (gate, signal) = AsyncStream<Void>.makeStream()
+        let read = Task {
+            for await _ in gate { break }
+            return try await source.samples(in: 0..<400)
+        }
+        read.cancel()
+        signal.finish()
+        do {
+            _ = try await read.value
+            XCTFail("Cancelled PCM read unexpectedly succeeded")
+        } catch is CancellationError {}
+        let recovered = try await source.samples(in: 0..<400)
+        XCTAssertEqual(recovered, Array(values[0..<400]))
+    }
+
     private func cmvn(mean: Float = 0) -> Data {
         var data = Data([0, 66, 70, 77, 32, 4]) // Kaldi binary FM matrix
         func append<T: FixedWidthInteger>(_ value: T) {

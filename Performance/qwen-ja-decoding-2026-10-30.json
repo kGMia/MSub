@@ -1,0 +1,50 @@
+{
+  "autoLanguageContextAndTokenLimits" : true,
+  "checkpointCancellationAndRetry" : true,
+  "emptySegments" : true,
+  "oddTailTimingAndLiveCallbacks" : true,
+  "peakMLXBytes" : 4918062468,
+  "runs" : [
+    {
+      "firstCueSeconds" : 2.9386652499961201,
+      "mode" : "cold-single",
+      "seconds" : 8.1386934583424591
+    },
+    {
+      "firstCueSeconds" : 0.67249170833383687,
+      "mode" : "warm-optimized-single",
+      "seconds" : 5.8978835000016261,
+      "textEqual" : true
+    },
+    {
+      "firstCueSeconds" : 0.68133799999486655,
+      "mode" : "warm-reference",
+      "seconds" : 5.9634054999914952,
+      "textEqual" : true
+    },
+    {
+      "firstCueSeconds" : 0.80000800002017058,
+      "mode" : "warm-pair",
+      "seconds" : 5.8572025416651741,
+      "textEqual" : true
+    },
+    {
+      "firstCueSeconds" : 0.68512229164480232,
+      "mode" : "warm-reference",
+      "seconds" : 5.9129975833347999,
+      "textEqual" : true
+    },
+    {
+      "firstCueSeconds" : 0.67961974997888319,
+      "mode" : "warm-optimized-single",
+      "seconds" : 5.8488302916521206,
+      "textEqual" : true
+    },
+    {
+      "firstCueSeconds" : 0.80198908332386054,
+      "mode" : "warm-pair",
+      "seconds" : 5.8343215833592694,
+      "textEqual" : true
+    }
+  ]
+}

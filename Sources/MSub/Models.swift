@@ -159,13 +159,23 @@ struct AppConfig: Decodable {
 
 struct ASRModelInfo: Decodable, Identifiable {
     let engine: ASREngine
-    let title: String
-    let defaultModel: String
-    let localModel: String
-    let localModelAvailable: Bool
+    var title: String
+    var defaultModel: String
+    var localModel: String
+    var localModelAvailable: Bool
     let supports: [String]
+    var variants: [ASRModelVariant]? = nil
 
     var id: ASREngine { engine }
+}
+
+struct ASRModelVariant: Decodable, Identifiable {
+    let repo: String
+    let title: String
+    let localModel: String
+    let localModelAvailable: Bool
+    let language: RecognitionLanguage?
+    var id: String { repo }
 }
 
 struct VADModelInfo: Decodable, Identifiable {
@@ -393,6 +403,7 @@ struct ManagedModel: Decodable, Identifiable, Equatable {
     let installed: Bool
     let sizeBytes: Int64
     let downloadable: Bool
+    var externalPath: String? = nil
     let downloadStatus: String?
     let downloadError: String?
     let downloadedBytes: Int64?

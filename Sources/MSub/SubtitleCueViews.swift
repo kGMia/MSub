@@ -1151,3 +1151,23 @@ struct SelectableTextEditor: NSViewRepresentable {
         }
     }
 }
+
+/// Selection/playback changes do not require reclassifying unchanged text.
+struct MeaninglessCueBadge: View, Equatable {
+    let text: String
+    let language: AppLanguage
+
+    var body: some View {
+        if let reason = MeaninglessCueDetector.classification(for: text).reason {
+            Text(Copy.text("cueList.reason.\(reason.rawValue)", language: language))
+                .font(.caption2)
+                .lineLimit(1)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(.secondary.opacity(0.12), in: Capsule())
+                .foregroundStyle(.secondary)
+        } else {
+            Text("")
+        }
+    }
+}

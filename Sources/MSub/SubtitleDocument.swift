@@ -4345,7 +4345,6 @@ struct SubtitleEditorPanel: View {
                     let cues = try await NativeQwenService.shared.transcribeClip(audioURL: cueClip.url, options: options)
                     try Task.checkCancellation()
                     applyRetranscribedCueOutput(SubtitleDocument.serialize(cues, format: slot.outputFormat), cueID: cueID)
-                    await NativeQwenService.shared.release()
                     return
                 } catch {
                     await NativeQwenService.shared.release()
@@ -4354,6 +4353,7 @@ struct SubtitleEditorPanel: View {
                     AppLog.api.error("Native cue fallback: \(error.localizedDescription, privacy: .public)")
                 }
             }
+            await NativeQwenService.shared.release()
             let isReady = await backend.ensureRunning(timeout: 25.0)
             api.baseURL = backend.baseURL
             guard isReady else {

@@ -245,6 +245,7 @@ struct MSubApp: App {
             PreferencesView()
                 .environment(settings)
                 .environment(api)
+                .environment(backend)
                 .environment(\.locale, language.locale)
                 .preferredColorScheme(appearance.colorScheme)
                 .frame(width: 480, height: 400)
@@ -377,6 +378,14 @@ struct ModelManagerView: View {
             } else if model.isDownloading || busyModels.contains(model.name) {
                 MSubSpinner()
                     .controlSize(.small)
+            } else if model.installed, let path = model.externalPath {
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+                } label: {
+                    Label("Finder", systemImage: "folder")
+                }
+                .help(path)
+                .controlSize(.small)
             } else if model.installed {
                 Button(t("models.delete"), role: .destructive) {
                     pendingDeletion = model
@@ -402,6 +411,7 @@ struct ModelManagerView: View {
                 if !list.models.contains(where: { $0.isDownloading }) {
                     if let config = try? await api.fetchConfig(), !Task.isCancelled {
                         settings.refreshCatalog(config: config)
+                        settings.registerLocalQwenVariant(backend.localJapaneseQwenVariant())
                     }
                     return
                 }

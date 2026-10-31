@@ -638,6 +638,10 @@ enum FFmpegRunner {
     }()
 
     private static func locateBinary() -> URL? {
+        if let envPath = ProcessInfo.processInfo.environment["MSUB_FFMPEG"],
+           FileManager.default.isExecutableFile(atPath: envPath) {
+            return URL(fileURLWithPath: envPath)
+        }
         if let bundled = Bundle.main.url(forResource: "ffmpeg", withExtension: nil) {
             let path = bundled.path
             if !FileManager.default.isExecutableFile(atPath: path) {
@@ -651,6 +655,11 @@ enum FFmpegRunner {
                 NSLog("[MSub] FFmpeg bundled at %@ is not executable; run `chmod +x` on the source file before building.", path)
             }
         }
+        let localCacheCandidate = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appending(path: ".cache/bin/ffmpeg")
+        if FileManager.default.isExecutableFile(atPath: localCacheCandidate.path) {
+            return localCacheCandidate
+        }
         for path in searchPaths where FileManager.default.isExecutableFile(atPath: path) {
             return URL(fileURLWithPath: path)
         }
@@ -663,13 +672,14 @@ enum FFmpegRunner {
         FFmpegProcessRegistry.shared.terminateAll()
     }
 
-    /// Extracts the audio track of `source` to `dest` as AAC-in-m4a. When `start`
-    /// and `duration` are provided, only that slice is exported.
+    /// Extracts timeline-synchronized audio as AAC-in-m4a or mono 16 kHz PCM.
+    /// PCM requires a finite output duration, including any trailing silence.
     static func extractAudio(
         from source: URL,
         to dest: URL,
         start: Double? = nil,
-        duration: Double? = nil
+        duration: Double? = nil,
+        pcm: Bool = false
     ) async -> URL? {
         guard let binary else { return nil }
         try? FileManager.default.removeItem(at: dest)
@@ -677,23 +687,25 @@ enum FFmpegRunner {
         var args: [String] = ["-y", "-nostdin", "-loglevel", "error", "-fflags", "+genpts"]
         if let start {
             args.append("-ss")
-            args.append(String(format: "%.3f", max(0, start)))
+            args.append(String(format: pcm ? "%.9f" : "%.3f", max(0, start)))
         }
-        if let duration {
+        if let duration, !pcm {
             args.append("-t")
             args.append(String(format: "%.3f", max(0.05, duration)))
         }
-        args.append(contentsOf: [
-            "-i", source.path,
-            "-map", "0:a:0",
-            "-vn",
-            "-af", "aresample=async=1000:first_pts=0",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-ar", "44100",
-            "-movflags", "+faststart",
-            dest.path
-        ])
+        args.append(contentsOf: ["-i", source.path, "-map", "0:a:0", "-vn"])
+        if pcm {
+            args.append(contentsOf: ["-af", "aresample=async=1000:first_pts=0,apad",
+                                    "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le"])
+            // Output duration is on the synchronized media clock, not the
+            // compressed stream's decoded sample-count clock.
+            guard let duration, duration.isFinite, duration > 0 else { return nil }
+            args.append(contentsOf: ["-t", String(format: "%.9f", duration), "-f", "wav", dest.path])
+        } else {
+            args.append(contentsOf: ["-af", "aresample=async=1000:first_pts=0",
+                                    "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
+                                    "-movflags", "+faststart", dest.path])
+        }
 
         let rangeNote: String
         if let start, let duration {
@@ -1176,6 +1188,15 @@ enum WaveformLoader {
             return []
         }
 
+        // Match recognition's media clock. TrackOutput can synthesize a
+        // sample-count clock for compressed audio with nonstandard packet durations.
+        if (try? await NativeAudioExporter.requiresTimelineDecoder(track)) == true {
+            guard let duration = try? await asset.load(.duration).seconds,
+                  let pcm = try? await NativeAudioExporter.shared.extract(source: url, start: 0, duration: duration) else { return [] }
+            defer { try? FileManager.default.removeItem(at: pcm.url) }
+            return await readSamples(for: pcm.url, targetSamples: targetSamples)
+        }
+
         let output = AVAssetReaderTrackOutput(
             track: track,
             outputSettings: [
@@ -1369,7 +1390,7 @@ enum WaveformLoader {
             let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
             let modified = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
             let size = values?.fileSize ?? 0
-            return "\(url.standardizedFileURL.path)#\(modified)#\(size)"
+            return "timeline-pcm-v4#\(url.standardizedFileURL.path)#\(modified)#\(size)"
         }
 
         private func trimIfNeeded() {
@@ -1412,6 +1433,14 @@ actor NativeAudioExporter {
 
     enum Failure: Error { case invalidRange, missingAudio, decodingFailed }
 
+    static func requiresTimelineDecoder(_ track: AVAssetTrack) async throws -> Bool {
+        let descriptions = try await track.load(.formatDescriptions)
+        guard !descriptions.isEmpty else { return true }
+        return descriptions.contains {
+            CMAudioFormatDescriptionGetStreamBasicDescription($0)?.pointee.mFormatID != kAudioFormatLinearPCM
+        }
+    }
+
     func extract(source: URL, start: Double, duration: Double) async throws -> Output {
         guard start.isFinite, duration.isFinite, start >= 0, duration > 0 else {
             throw Failure.invalidRange
@@ -1425,6 +1454,23 @@ actor NativeAudioExporter {
         let length = min(duration, assetDuration - start)
         guard length.isFinite, length > 0, length < Double(Int64.max / 16000) else {
             throw Failure.invalidRange
+        }
+        if try await Self.requiresTimelineDecoder(track) {
+            let url = FileManager.default.temporaryDirectory.appending(path: "msub-pcm-\(UUID().uuidString).wav")
+            guard let result = await FFmpegRunner.extractAudio(from: source, to: url,
+                                                               start: start > 0 ? start : nil,
+                                                               duration: length, pcm: true) else {
+                try Task.checkCancellation()
+                throw Failure.decodingFailed
+            }
+            do {
+                try Task.checkCancellation()
+                let audio = try AVAudioFile(forReading: result)
+                return Output(url: result, duration: Double(audio.length) / audio.processingFormat.sampleRate)
+            } catch {
+                try? FileManager.default.removeItem(at: url)
+                throw error
+            }
         }
         let frameLimit = Int64((length * 16000).rounded())
         guard frameLimit > 0 else { throw Failure.invalidRange }

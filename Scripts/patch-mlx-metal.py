@@ -88,6 +88,25 @@ def patch(checkouts):
         print(f'Applied scoped MLX Metal compatibility: {relative}')
 
 
+def checkouts_for_build(build_dir):
+    """Find the enclosing Xcode dependency checkout for Build and Archive.
+
+    Archive nests BUILD_DIR under Build/Intermediates.noindex/
+    ArchiveIntermediates/<scheme>/BuildProductsPath; SourcePackages remains
+    at the DerivedData root, so a fixed parent count is not sufficient.
+    """
+    build_dir = Path(build_dir)
+    for root in (build_dir, *build_dir.parents):
+        candidate = root / 'SourcePackages/checkouts'
+        if (candidate / GATHER_PATH).is_file():
+            return candidate
+    raise FileNotFoundError(
+        f'Cannot locate the resolved mlx-swift checkout above BUILD_DIR={build_dir}. '
+        'Resolve package dependencies in Xcode, or pass the checkout directory '
+        'explicitly: patch-mlx-metal.py /path/to/SourcePackages/checkouts'
+    )
+
+
 if __name__ == '__main__':
     if len(sys.argv) == 2:
         checkouts = Path(sys.argv[1])
@@ -96,5 +115,8 @@ if __name__ == '__main__':
         build_dir = os.environ.get('BUILD_DIR')
         if not build_dir:
             sys.exit('Usage: patch-mlx-metal.py /path/to/SourcePackages/checkouts')
-        checkouts = Path(build_dir).parent.parent / 'SourcePackages/checkouts'
+        try:
+            checkouts = checkouts_for_build(build_dir)
+        except FileNotFoundError as error:
+            sys.exit(f'error: {error}')
     patch(checkouts)

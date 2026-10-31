@@ -2,9 +2,9 @@
 .build/
 .swiftpm/
 .swift-module-cache/
-.xcode-derived/
-.xcode-derived-release/
+.xcode-derived*/
 DerivedData/
+.cache/
 
 # Release/package output
 .release/

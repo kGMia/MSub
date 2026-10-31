@@ -1,0 +1,46 @@
+{
+  "maxTokens" : 128,
+  "note" : "Greedy decode against upstream; literal text comparison, not a quality corpus or end-to-end speed benchmark.",
+  "rows" : [
+    {
+      "batchDecodeSeconds" : 0.60807808332901914,
+      "batchFeatureTextMatches" : true,
+      "index" : 0,
+      "language" : "ja",
+      "referenceCharacters" : 17,
+      "referenceSeconds" : 0.95940154166601133,
+      "singleFeatureTextMatches" : true
+    },
+    {
+      "batchDecodeSeconds" : 4.8147941250063013,
+      "batchFeatureTextMatches" : true,
+      "index" : 1,
+      "language" : "ja",
+      "referenceCharacters" : 353,
+      "referenceSeconds" : 4.961389500007499,
+      "singleFeatureTextMatches" : true
+    },
+    {
+      "batchDecodeSeconds" : 0.94301408332830761,
+      "batchFeatureTextMatches" : true,
+      "index" : 0,
+      "language" : "auto",
+      "referenceCharacters" : 25,
+      "referenceSeconds" : 1.0388807916606311,
+      "singleFeatureTextMatches" : true
+    },
+    {
+      "batchDecodeSeconds" : 0.81360475000110455,
+      "batchFeatureTextMatches" : true,
+      "index" : 1,
+      "language" : "auto",
+      "referenceCharacters" : 27,
+      "referenceSeconds" : 0.92211245834187139,
+      "singleFeatureTextMatches" : true
+    }
+  ],
+  "windowsSeconds" : [
+    6,
+    10
+  ]
+}

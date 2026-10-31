@@ -5,6 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$APP_ROOT/../.." && pwd)"
 
+python3 "$SCRIPT_DIR/backend-snapshot.py" --workspace "$REPO_ROOT"
+
 INCLUDE_MODEL="${MSUB_INCLUDE_MODEL:-0}"
 INCLUDE_SENSEVOICE_MODEL="${MSUB_INCLUDE_SENSEVOICE_MODEL:-0}"
 INCLUDE_MIMO_MODEL="${MSUB_INCLUDE_MIMO_MODEL:-0}"
@@ -146,9 +148,13 @@ else
     note "MSUB_INCLUDE_VENV=0; release will require uv and dependencies on the user's Mac."
 fi
 
-require_executable "$APP_ROOT/Sources/MSub/ffmpeg" "bundled ffmpeg"
+FFMPEG_CANDIDATE="${MSUB_FFMPEG_SOURCE:-$APP_ROOT/.cache/bin/ffmpeg}"
+if [ ! -x "$FFMPEG_CANDIDATE" ]; then
+    FFMPEG_CANDIDATE="$(command -v ffmpeg || true)"
+fi
+require_executable "$FFMPEG_CANDIDATE" "bundled ffmpeg"
 
-case "$(file "$APP_ROOT/Sources/MSub/ffmpeg")" in
+case "$(file "$FFMPEG_CANDIDATE")" in
     *arm64*) ;;
     *) fail "bundled ffmpeg is not arm64; current release defaults to Apple Silicon" ;;
 esac

@@ -34,13 +34,14 @@
 		9740751A2FCAEB210019F9A1 /* TranslationSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 974075192FCAEB210019F9A1 /* TranslationSheet.swift */; };
 		9740751C2FCB43230019F9A1 /* FolderAuthorizationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9740751B2FCB43230019F9A1 /* FolderAuthorizationStore.swift */; };
 		974192942FBD973900E74858 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 974192942FBD973900E74857 /* Localizable.xcstrings */; };
-		978E671F2FC1B89C0054DBBA /* ffmpeg in Resources */ = {isa = PBXBuildFile; fileRef = 978E671E2FC1B89C0054DBBA /* ffmpeg */; };
 		9798620E2FD1641A00D14772 /* README.zh-Hant.md in Resources */ = {isa = PBXBuildFile; fileRef = 9798620D2FD1641A00D14772 /* README.zh-Hant.md */; };
 		97E76DA82FD0722E0044D7D8 /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 97E76DA62FD0722E0044D7D8 /* README.md */; };
 		97E76DA92FD0722E0044D7D8 /* README.zh-CN.md in Resources */ = {isa = PBXBuildFile; fileRef = 97E76DA72FD0722E0044D7D8 /* README.zh-CN.md */; };
 		DAF700000000000000000001 /* SubtitleDraftStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAF700000000000000000002 /* SubtitleDraftStore.swift */; };
 		DAF700000000000000000003 /* SubtitleQuality.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAF700000000000000000004 /* SubtitleQuality.swift */; };
 		DAF700000000000000000005 /* NativeFireRedVAD.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAF700000000000000000006 /* NativeFireRedVAD.swift */; };
+		000000000000000000000131 /* NativeQwenSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000231 /* NativeQwenSupport.swift */; };
+		000000000000000000000132 /* NativeQwenResidency.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000232 /* NativeQwenResidency.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -73,7 +74,6 @@
 		974075192FCAEB210019F9A1 /* TranslationSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranslationSheet.swift; sourceTree = "<group>"; };
 		9740751B2FCB43230019F9A1 /* FolderAuthorizationStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderAuthorizationStore.swift; sourceTree = "<group>"; };
 		974192942FBD973900E74857 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; name = Localizable.xcstrings; path = Sources/MSub/Localizable.xcstrings; sourceTree = "<group>"; };
-		978E671E2FC1B89C0054DBBA /* ffmpeg */ = {isa = PBXFileReference; lastKnownFileType = text; path = ffmpeg; sourceTree = "<group>"; };
 		9798620D2FD1641A00D14772 /* README.zh-Hant.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = "README.zh-Hant.md"; sourceTree = "<group>"; };
 		979A48422FBF74DD00FEF70A /* MSub-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "MSub-Info.plist"; sourceTree = SOURCE_ROOT; };
 		97E76DA62FD0722E0044D7D8 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
@@ -81,6 +81,8 @@
 		DAF700000000000000000002 /* SubtitleDraftStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubtitleDraftStore.swift; sourceTree = "<group>"; };
 		DAF700000000000000000004 /* SubtitleQuality.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubtitleQuality.swift; sourceTree = "<group>"; };
 		DAF700000000000000000006 /* NativeFireRedVAD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeFireRedVAD.swift; sourceTree = "<group>"; };
+		000000000000000000000231 /* NativeQwenSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeQwenSupport.swift; sourceTree = "<group>"; };
+		000000000000000000000232 /* NativeQwenResidency.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeQwenResidency.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -122,7 +124,6 @@
 				00000000000000000000020D /* MeaninglessCueDetector.swift */,
 				00000000000000000000020E /* MediaPreview.swift */,
 				00000000000000000000020F /* MediaProcessing.swift */,
-				978E671E2FC1B89C0054DBBA /* ffmpeg */,
 				000000000000000000000206 /* Models.swift */,
 				000000000000000000000207 /* Settings.swift */,
 				000000000000000000000209 /* SubtitleDocument.swift */,
@@ -133,6 +134,8 @@
 				000000000000000000000210 /* TimelineEditor.swift */,
 				000000000000000000000211 /* SubtitleCueViews.swift */,
 				000000000000000000000212 /* NativeQwenService.swift */,
+				000000000000000000000232 /* NativeQwenResidency.swift */,
+				000000000000000000000231 /* NativeQwenSupport.swift */,
 				974075112FCAE5890019F9A1 /* NotificationsService.swift */,
 				974075132FCAE5EE0019F9A1 /* AppIntents.swift */,
 				974075152FCAE6480019F9A1 /* AppleSpeechService.swift */,
@@ -228,7 +231,6 @@
 				97E76DA92FD0722E0044D7D8 /* README.zh-CN.md in Resources */,
 				9798620E2FD1641A00D14772 /* README.zh-Hant.md in Resources */,
 				974192942FBD973900E74858 /* Localizable.xcstrings in Resources */,
-				978E671F2FC1B89C0054DBBA /* ffmpeg in Resources */,
 				973399062FBE32A400FDA459 /* AppIcon.icon in Resources */,
 			);
 		};
@@ -294,6 +296,8 @@
 				00000000000000000000010F /* TimelineEditor.swift in Sources */,
 				000000000000000000000110 /* SubtitleCueViews.swift in Sources */,
 				000000000000000000000111 /* NativeQwenService.swift in Sources */,
+				000000000000000000000132 /* NativeQwenResidency.swift in Sources */,
+				000000000000000000000131 /* NativeQwenSupport.swift in Sources */,
 				974075182FCAEA950019F9A1 /* TranslationService.swift in Sources */,
 			);
 		};

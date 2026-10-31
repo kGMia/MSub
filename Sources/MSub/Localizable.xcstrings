@@ -1204,35 +1204,6 @@
         }
       }
     },
-    "diagnostics.stage.nativePreparation" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Native audio and runtime setup"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ネイティブ音声・実行環境の準備"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "原生音频与运行时准备"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "原生音訊與執行環境準備"
-          }
-        }
-      }
-    },
     "diagnostics.stage.nativeCheckpoint" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1287,6 +1258,35 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "原生模型與辨識"
+          }
+        }
+      }
+    },
+    "diagnostics.stage.nativePreparation" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Native audio and runtime setup"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ネイティブ音声・実行環境の準備"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "原生音频与运行时准备"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "原生音訊與執行環境準備"
           }
         }
       }
@@ -3285,6 +3285,9 @@
         }
       }
     },
+    "Finder" : {
+
+    },
     "help.audioEventFilter" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
@@ -3598,6 +3601,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "使用已安裝的本地模型和貪心解碼進行 Swift MLX 辨識，分段遵循 VAD 設定。不支援的附加分析功能或原生失敗時使用 Python 引擎。"
+          }
+        }
+      }
+    },
+    "help.nativeQwenBatch" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Encode up to two segments together on Macs with at least 16 GB memory. May delay the first subtitle; automatically uses single segments under memory pressure."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在至少 16 GB 内存的 Mac 上同时编码两个片段。首条字幕可能稍晚出现；内存压力较高时自动改用单片段。"
           }
         }
       }
@@ -6309,6 +6329,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "原生 FireRedVAD（實驗性）"
+          }
+        }
+      }
+    },
+    "settings.nativeQwenBatch" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Batch audio encoding (experimental)"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "批量音频编码（实验性）"
           }
         }
       }

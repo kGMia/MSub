@@ -1,0 +1,101 @@
+{
+  "runs" : [
+    {
+      "characters" : [
+        17,
+        364,
+        14
+      ],
+      "loopFlags" : [
+        false,
+        true,
+        false
+      ],
+      "optimized" : true,
+      "penalty" : 1,
+      "recovery" : false,
+      "seconds" : 8.1947827499825507
+    },
+    {
+      "characters" : [
+        17,
+        364,
+        14
+      ],
+      "loopFlags" : [
+        false,
+        true,
+        false
+      ],
+      "optimized" : true,
+      "penalty" : 1,
+      "recovery" : false,
+      "seconds" : 6.1318800416775048
+    },
+    {
+      "characters" : [
+        17,
+        34,
+        14
+      ],
+      "loopFlags" : [
+        false,
+        false,
+        false
+      ],
+      "optimized" : true,
+      "penalty" : 1,
+      "recovery" : true,
+      "seconds" : 6.7073748749971855
+    },
+    {
+      "characters" : [
+        17,
+        57,
+        14
+      ],
+      "loopFlags" : [
+        false,
+        false,
+        false
+      ],
+      "optimized" : true,
+      "penalty" : 1.0499999523162842,
+      "recovery" : false,
+      "seconds" : 2.2035014166613109
+    },
+    {
+      "characters" : [
+        17,
+        57,
+        14
+      ],
+      "loopFlags" : [
+        false,
+        false,
+        false
+      ],
+      "optimized" : true,
+      "penalty" : 1.0499999523162842,
+      "recovery" : true,
+      "seconds" : 2.2334847500023898
+    },
+    {
+      "characters" : [
+        17,
+        57,
+        14
+      ],
+      "loopFlags" : [
+        false,
+        false,
+        false
+      ],
+      "optimized" : false,
+      "penalty" : 1.0499999523162842,
+      "recovery" : true,
+      "seconds" : 2.2591064166626893
+    }
+  ],
+  "signAwarePenaltyAndContext" : true
+}

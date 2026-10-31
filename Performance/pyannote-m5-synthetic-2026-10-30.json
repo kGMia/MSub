@@ -1,0 +1,45 @@
+{
+  "device": "Apple M5",
+  "windows": 4,
+  "cpuSeconds": 0.20452779099287,
+  "input": "synthetic",
+  "batches": [
+    {
+      "batch": 1,
+      "coldSeconds": 1.075490000002901,
+      "warmSeconds": [
+        0.23694741699728183,
+        0.23803937500633765
+      ],
+      "maxProbabilityError": 7.992982864379883e-05,
+      "thresholdFlips": 0,
+      "parity": false,
+      "peakBytes": 35302332
+    },
+    {
+      "batch": 2,
+      "coldSeconds": 0.3578629580006236,
+      "warmSeconds": [
+        0.1366577500011772,
+        0.14866004200302996
+      ],
+      "maxProbabilityError": 7.992982864379883e-05,
+      "thresholdFlips": 0,
+      "parity": false,
+      "peakBytes": 65434684
+    },
+    {
+      "batch": 4,
+      "coldSeconds": 0.2569808749976801,
+      "warmSeconds": [
+        0.07550995799829252,
+        0.07137237499409821
+      ],
+      "maxProbabilityError": 7.992982864379883e-05,
+      "thresholdFlips": 0,
+      "parity": false,
+      "peakBytes": 129534676
+    }
+  ],
+  "note": "Fixed windows only; not boundary-quality or end-to-end validation."
+}

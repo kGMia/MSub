@@ -1,6 +1,6 @@
 # CI for the MSub macOS app (this repository covers apps/MSub only; the
-# Python backend lives outside the repo and has its own pytest suite that
-# runs locally via `uv run pytest tests/`).
+# Python development backend lives outside the repo; Backend is the tracked
+# release snapshot and has a lightweight CPU regression job below).
 name: CI
 
 on:
@@ -26,3 +26,21 @@ jobs:
         run: swift build
       - name: Test
         run: swift test
+
+  backend-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify backend source manifest
+        run: python Scripts/backend-snapshot.py
+      - name: Install CPU test dependencies
+        run: python -m pip install pytest numpy
+      - name: Check syntax and backend contracts without model downloads
+        working-directory: Backend
+        run: |
+          python -m compileall -q src
+          python -m pytest tests/test_qwen_repetition.py tests/test_args_and_engines.py tests/test_timestamps_and_text.py -q

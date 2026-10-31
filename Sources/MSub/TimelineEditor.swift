@@ -1,62 +1,24 @@
 import AppKit
 import SwiftUI
 
-struct TimelineZoomSlider: NSViewRepresentable {
+struct TimelineZoomSlider: View {
     @Binding var value: Double
     @Binding var isDragging: Bool
     let range: ClosedRange<Double>
     let step: Double
 
-    private final class TrackingSlider: NSSlider {
-        var onTrackingBegan: (() -> Void)?
-        var onTrackingEnded: (() -> Void)?
-
-        override func mouseDown(with event: NSEvent) {
-            onTrackingBegan?()
-            super.mouseDown(with: event)
-            onTrackingEnded?()
-        }
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(parent: self)
-    }
-
-    func makeNSView(context: Context) -> NSSlider {
-        let slider = TrackingSlider(
-            value: normalizedValue(for: value),
-            minValue: 0,
-            maxValue: 1,
-            target: context.coordinator,
-            action: #selector(Coordinator.valueChanged(_:))
+    var body: some View {
+        Slider(
+            value: Binding(
+                get: { normalizedValue(for: value) },
+                set: { value = self.value(for: $0) }
+            ),
+            in: 0...1,
+            onEditingChanged: { isDragging = $0 }
         )
-        slider.isContinuous = true
-        slider.numberOfTickMarks = 0
-        slider.allowsTickMarkValuesOnly = false
-        slider.controlSize = .small
-        slider.onTrackingBegan = {
-            context.coordinator.parent.isDragging = true
-        }
-        slider.onTrackingEnded = {
-            context.coordinator.parent.isDragging = false
-        }
-        return slider
-    }
-
-    func updateNSView(_ slider: NSSlider, context: Context) {
-        context.coordinator.parent = self
-        if let slider = slider as? TrackingSlider {
-            slider.onTrackingBegan = {
-                context.coordinator.parent.isDragging = true
-            }
-            slider.onTrackingEnded = {
-                context.coordinator.parent.isDragging = false
-            }
-        }
-        let normalized = normalizedValue(for: value)
-        if abs(slider.doubleValue - normalized) > 0.0001 {
-            slider.doubleValue = normalized
-        }
+        .controlSize(.small)
+        .accessibilityValue(Text(String(format: "%.1f×", value)))
+        .onDisappear { isDragging = false }
     }
 
     private func normalizedValue(for rawValue: Double) -> Double {
@@ -85,18 +47,6 @@ struct TimelineZoomSlider: NSViewRepresentable {
         min(max(value, lower), upper)
     }
 
-    @MainActor
-    final class Coordinator: NSObject {
-        var parent: TimelineZoomSlider
-
-        init(parent: TimelineZoomSlider) {
-            self.parent = parent
-        }
-
-        @objc func valueChanged(_ sender: NSSlider) {
-            parent.value = parent.value(for: sender.doubleValue)
-        }
-    }
 }
 
 struct PlaybackZoomableTimeline: View {

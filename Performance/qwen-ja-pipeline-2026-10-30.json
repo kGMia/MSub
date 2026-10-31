@@ -1,0 +1,37 @@
+{
+  "checkpointCancellationAndRetry" : true,
+  "emptySegments" : true,
+  "oddTailTimingAndLiveCallbacks" : true,
+  "peakMLXBytes" : 4918060564,
+  "runs" : [
+    {
+      "firstCueSeconds" : 5.2284078333177604,
+      "mode" : "cold-single",
+      "seconds" : 10.565590041660471
+    },
+    {
+      "firstCueSeconds" : 0.8237725000071805,
+      "mode" : "warm-pair",
+      "seconds" : 5.933411583333509,
+      "textEqual" : true
+    },
+    {
+      "firstCueSeconds" : 0.68248516667517833,
+      "mode" : "warm-single",
+      "seconds" : 5.9230803333339281,
+      "textEqual" : true
+    },
+    {
+      "firstCueSeconds" : 0.68116658332291991,
+      "mode" : "warm-single",
+      "seconds" : 5.9691293750074692,
+      "textEqual" : true
+    },
+    {
+      "firstCueSeconds" : 0.80259804165689275,
+      "mode" : "warm-pair",
+      "seconds" : 5.9584539166535251,
+      "textEqual" : true
+    }
+  ]
+}

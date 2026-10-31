@@ -1,0 +1,19 @@
+{
+  "runs": [
+    {
+      "backend": "numpy",
+      "seconds": 0.3429183749976801,
+      "frames": 2356,
+      "segments": 11
+    },
+    {
+      "backend": "mlx_batch",
+      "seconds": 0.5310450830002083,
+      "frames": 2356,
+      "segments": 11
+    }
+  ],
+  "maxError": 6.556510925292969e-07,
+  "boundariesEqual": true,
+  "note": "40 s overlap-and-tail pipeline; includes cold model setup."
+}

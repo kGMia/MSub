@@ -74,6 +74,8 @@ struct ContentView: View {
     @State private var isTranslating = false
     @State private var translationUndo = TranslationUndoCoordinator()
     @State private var timingUndo = TranslationUndoCoordinator()
+    @State private var cueListUndo = CueListUndoCoordinator()
+    @State private var cueListEditBurst: (slotID: UUID, cueID: SubtitleCue.ID, field: String, time: TimeInterval)?
     @State private var pendingSidecarAuthorizationURL: URL?
     @Environment(\.undoManager) private var undoManager
     @FocusState private var focusedMediaNameSlotID: UUID?
@@ -244,6 +246,7 @@ struct ContentView: View {
         .task {
             if let config = api.cachedConfig() {
                 settings.apply(config: config)
+                settings.registerLocalQwenVariant(backend.localJapaneseQwenVariant())
                 connectionState = backend.isRunning ? .connected : .disconnected
                 // Python-only recognition still needs a server. Start it while the
                 // user selects media, rather than adding startup to the first job.
@@ -405,7 +408,11 @@ struct ContentView: View {
         .onAppear {
             syncCueListSelectionFromActiveCue(activeSelectedCueID)
         }
+        .onChange(of: detailTab) { _, _ in
+            cueListEditBurst = nil
+        }
         .onChange(of: activeIndex) { _, _ in
+            cueListEditBurst = nil
             selectedFrequentTerm = nil
             syncCueListSelectionFromActiveCue(activeSelectedCueID)
         }
@@ -413,11 +420,13 @@ struct ContentView: View {
             syncCueListSelectionFromActiveCue(newValue)
         }
         .onChange(of: cueListSelection) { _, newValue in
+            cueListEditBurst = nil
             syncActiveCueFromCueListSelection(newValue)
         }
     }
 
     private func cleanupOnDisappear() {
+        Task { await NativeQwenService.shared.release() }
         processingTask?.cancel()
         processingTask = nil
     }
@@ -1268,6 +1277,18 @@ struct ContentView: View {
                 if settings.effectiveASREngine != .apple {
                     stackedField(t("settings.model"), help: modelHelpText()) {
                         HStack(spacing: 6) {
+                            if !settings.availableModelVariants.isEmpty {
+                                Menu {
+                                    ForEach(settings.availableModelVariants) { variant in
+                                        Button(variant.title) { settings.selectModelVariant(variant) }
+                                    }
+                                } label: {
+                                    Image(systemName: "list.bullet")
+                                }
+                                .controlSize(.small)
+                                .accessibilityLabel(t("settings.model"))
+                                .help(t("settings.model"))
+                            }
                             TextField("", text: $settings.model)
                                 .textFieldStyle(.roundedBorder)
                                 .onChange(of: settings.model) { _, _ in
@@ -1461,6 +1482,8 @@ struct ContentView: View {
                         Toggle(t("settings.nativeQwen"), isOn: $settings.nativeQwenEnabled)
                             .help(t("help.nativeQwen"))
                         if settings.nativeQwenEnabled {
+                            Toggle(t("settings.nativeQwenBatch"), isOn: $settings.nativeQwenBatchEncodingEnabled)
+                                .help(t("help.nativeQwenBatch"))
                             Text(t(settings.canUseNativeQwen ? "nativeQwen.ready" : "nativeQwen.fallbackOptions"))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -2915,6 +2938,7 @@ struct ContentView: View {
 
             TableColumn(t("cueList.speaker")) { cue in
                 TextField("", text: cueSpeakerBinding(for: cue.id))
+                    .onSubmit { cueListEditBurst = nil }
                     .textFieldStyle(.plain)
                     .font(.caption)
                     .lineLimit(1)
@@ -2924,23 +2948,14 @@ struct ContentView: View {
             .customizationID("speaker")
 
             TableColumn(t("cueList.reason")) { cue in
-                if let reason = MeaninglessCueDetector.classification(for: cue.text).reason {
-                    Text(meaninglessCueReasonTitle(reason))
-                        .font(.caption2)
-                        .lineLimit(1)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(.secondary.opacity(0.12), in: Capsule())
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("")
-                }
+                MeaninglessCueBadge(text: cue.text, language: language).equatable()
             }
             .width(min: 52, ideal: 66, max: 92)
             .customizationID("meaninglessReason")
 
             TableColumn(t("cueList.content")) { cue in
                 TextField("", text: cueTextDisplayBinding(for: cue.id))
+                    .onSubmit { cueListEditBurst = nil }
                     .textFieldStyle(.plain)
                     .font(.caption)
                     .lineLimit(1)
@@ -3158,10 +3173,11 @@ struct ContentView: View {
             confidence: nil,
             speaker: anchorCue.speaker
         )
-        files[activeIndex].cues.insert(newCue, at: insertIdx)
-        for offset in files[activeIndex].cues.indices {
-            files[activeIndex].cues[offset].index = offset + 1
-        }
+        registerCueListEdit("undo.insertCue")
+        var cues = files[activeIndex].cues
+        cues.insert(newCue, at: insertIdx)
+        for offset in cues.indices { cues[offset].index = offset + 1 }
+        files[activeIndex].cues = cues
         files[activeIndex].selectedCueID = newCue.id
         cueListSelection = [newCue.id]
     }
@@ -3204,6 +3220,7 @@ struct ContentView: View {
     }
 
     private func registerTimingUndoStep(slotID: UUID, cues: [SubtitleCue]) {
+        cueListEditBurst = nil
         guard let undoManager else { return }
         undoManager.registerUndo(withTarget: timingUndo) { coordinator in
             coordinator.restore(slotID: slotID, cues: cues)
@@ -3216,29 +3233,36 @@ struct ContentView: View {
         let targets = files[activeIndex].cues.filter { ids.contains($0.id) }
         let earliestStart = targets.map(\.start).min() ?? 0
         let safeOffset = max(seconds, -earliestStart)
-        guard abs(safeOffset) > 0.0001 else { return }
-        for offset in files[activeIndex].cues.indices where ids.contains(files[activeIndex].cues[offset].id) {
-            files[activeIndex].cues[offset].start += safeOffset
-            files[activeIndex].cues[offset].end += safeOffset
+        guard abs(safeOffset) > 0.0001, !targets.isEmpty else { return }
+        registerCueListEdit("undo.adjustTiming")
+        var cues = files[activeIndex].cues
+        for offset in cues.indices where ids.contains(cues[offset].id) {
+            cues[offset].start += safeOffset
+            cues[offset].end += safeOffset
         }
+        files[activeIndex].cues = cues
     }
 
     private func closeGapsAmongSelectedCues(targetGap rawGap: Double, ids: Set<SubtitleCue.ID>) {
         guard files.indices.contains(activeIndex) else { return }
         let targetGap = max(0, rawGap.isFinite ? rawGap : 0)
+        var cues = files[activeIndex].cues
         var previousEnd: Double?
-        for offset in files[activeIndex].cues.indices where ids.contains(files[activeIndex].cues[offset].id) {
-            let cueDuration = max(0.05, files[activeIndex].cues[offset].end - files[activeIndex].cues[offset].start)
+        for offset in cues.indices where ids.contains(cues[offset].id) {
+            let cueDuration = max(0.05, cues[offset].end - cues[offset].start)
             if let previousEnd {
                 let desiredStart = previousEnd + targetGap
-                if files[activeIndex].cues[offset].start > desiredStart {
-                    files[activeIndex].cues[offset].start = desiredStart
-                    files[activeIndex].cues[offset].end = desiredStart + cueDuration
+                if cues[offset].start > desiredStart {
+                    cues[offset].start = desiredStart
+                    cues[offset].end = desiredStart + cueDuration
                 }
             }
-            files[activeIndex].cues[offset].end = max(files[activeIndex].cues[offset].start + 0.05, files[activeIndex].cues[offset].end)
-            previousEnd = files[activeIndex].cues[offset].end
+            cues[offset].end = max(cues[offset].start + 0.05, cues[offset].end)
+            previousEnd = cues[offset].end
         }
+        guard cues != files[activeIndex].cues else { return }
+        registerCueListEdit("undo.adjustTiming")
+        files[activeIndex].cues = cues
     }
 
     private func cueFrameNumber(_ seconds: Double, frameRate: Double) -> String {
@@ -3254,6 +3278,31 @@ struct ContentView: View {
         return String(format: "%.1f", rate)
     }
 
+    private func cueListSnapshot(at index: Int) -> CueListUndoSnapshot {
+        CueListUndoSnapshot(slotID: files[index].id, cues: files[index].cues,
+                            selectedCueID: files[index].selectedCueID,
+                            selection: activeIndex == index ? cueListSelection : [])
+    }
+
+    private func registerCueListSnapshot(_ snapshot: CueListUndoSnapshot, action: String) {
+        guard let undoManager else { return }
+        undoManager.levelsOfUndo = 80
+        undoManager.registerUndo(withTarget: cueListUndo) { $0.restore(snapshot, action: action) }
+        undoManager.setActionName(t(action))
+    }
+
+    private func registerCueListEdit(_ action: String, cueID: SubtitleCue.ID? = nil, field: String = "") {
+        guard files.indices.contains(activeIndex), let undoManager,
+              !undoManager.isUndoing, !undoManager.isRedoing else { return }
+        let slotID = files[activeIndex].id
+        let now = ProcessInfo.processInfo.systemUptime
+        let continues = cueID != nil && cueListEditBurst.map {
+            $0.slotID == slotID && $0.cueID == cueID && $0.field == field && now - $0.time < 2
+        } == true
+        if !continues { registerCueListSnapshot(cueListSnapshot(at: activeIndex), action: action) }
+        cueListEditBurst = cueID.map { (slotID, $0, field, now) }
+    }
+
     private func cueSpeakerBinding(for cueID: SubtitleCue.ID) -> Binding<String> {
         Binding {
             guard files.indices.contains(activeIndex),
@@ -3265,7 +3314,10 @@ struct ContentView: View {
             guard files.indices.contains(activeIndex),
                   let idx = files[activeIndex].cues.firstIndex(where: { $0.id == cueID }) else { return }
             let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            files[activeIndex].cues[idx].speaker = trimmed.isEmpty ? nil : newValue
+            let speaker = trimmed.isEmpty ? nil : newValue
+            guard files[activeIndex].cues[idx].speaker != speaker else { return }
+            registerCueListEdit("undo.editSpeaker", cueID: cueID, field: "speaker")
+            files[activeIndex].cues[idx].speaker = speaker
         }
     }
 
@@ -3279,16 +3331,20 @@ struct ContentView: View {
         } set: { newValue in
             guard files.indices.contains(activeIndex),
                   let idx = files[activeIndex].cues.firstIndex(where: { $0.id == cueID }) else { return }
-            files[activeIndex].cues[idx].text = newValue.replacingOccurrences(of: Self.cueListNewlineSentinel, with: "\n")
+            let text = newValue.replacingOccurrences(of: Self.cueListNewlineSentinel, with: "\n")
+            guard files[activeIndex].cues[idx].text != text else { return }
+            registerCueListEdit("undo.editSubtitle", cueID: cueID, field: "text")
+            files[activeIndex].cues[idx].text = text
         }
     }
 
     private func deleteCuesFromActiveCueList(_ ids: Set<SubtitleCue.ID>) {
         guard files.indices.contains(activeIndex) else { return }
-        files[activeIndex].cues.removeAll { ids.contains($0.id) }
-        for offset in files[activeIndex].cues.indices {
-            files[activeIndex].cues[offset].index = offset + 1
-        }
+        guard files[activeIndex].cues.contains(where: { ids.contains($0.id) }) else { return }
+        registerCueListEdit("undo.deleteCue")
+        var cues = files[activeIndex].cues.filter { !ids.contains($0.id) }
+        for offset in cues.indices { cues[offset].index = offset + 1 }
+        files[activeIndex].cues = cues
         cueListSelection.subtract(ids)
         if let selectedID = files[activeIndex].selectedCueID, ids.contains(selectedID) {
             files[activeIndex].selectedCueID = nil
@@ -3658,19 +3714,6 @@ struct ContentView: View {
         t("settings.audioEventPreset.\(preset.rawValue)")
     }
 
-    private func meaninglessCueReasonTitle(_ reason: MeaninglessCueReason) -> String {
-        switch reason {
-        case .empty:
-            t("cueList.reason.empty")
-        case .symbols:
-            t("cueList.reason.symbols")
-        case .repetition:
-            t("cueList.reason.repetition")
-        case .interjection:
-            t("cueList.reason.interjection")
-        }
-    }
-
     private func speakerLabelingEngineTitle(_ engine: SpeakerLabelingEngine) -> String {
         t("settings.speakerLabelingEngine.\(engine.rawValue)")
     }
@@ -3928,6 +3971,15 @@ struct ContentView: View {
     }
 
     private func configureTranslationUndo() {
+        cueListUndo.restoreHandler = { snapshot, action in
+            guard let index = files.firstIndex(where: { $0.id == snapshot.slotID }) else { return }
+            cueListEditBurst = nil
+            registerCueListSnapshot(cueListSnapshot(at: index), action: action)
+            files[index].cues = snapshot.cues
+            files[index].selectedCueID = snapshot.selectedCueID
+            files[index].previewText = SubtitleDocument.serialize(snapshot.cues, format: files[index].outputFormat)
+            if activeSlot?.id == snapshot.slotID { cueListSelection = snapshot.selection }
+        }
         translationUndo.restoreHandler = { slotID, restoredCues in
             self.applyTranslationSnapshot(slotID: slotID, cues: restoredCues)
         }
@@ -3956,6 +4008,7 @@ struct ContentView: View {
     }
 
     private func registerTranslationUndoStep(slotID: UUID, cues: [SubtitleCue]) {
+        cueListEditBurst = nil
         guard let undoManager else { return }
         undoManager.registerUndo(withTarget: translationUndo) { coordinator in
             coordinator.restore(slotID: slotID, cues: cues)
@@ -4500,6 +4553,7 @@ struct ContentView: View {
             }
             let config = try await api.fetchConfig()
             settings.apply(config: config)
+            settings.registerLocalQwenVariant(backend.localJapaneseQwenVariant())
             connectionState = .connected
         } catch {
             connectionState = .disconnected
@@ -4529,6 +4583,7 @@ struct ContentView: View {
         let config = try await api.fetchConfig()
         try Task.checkCancellation()
         settings.refreshCatalog(config: config)
+        settings.registerLocalQwenVariant(backend.localJapaneseQwenVariant())
         await waitWhileProcessingPaused()
         try Task.checkCancellation()
     }
@@ -4694,7 +4749,7 @@ struct ContentView: View {
         }
         processingTask = task
         await task.value
-        await NativeQwenService.shared.release()
+        if task.isCancelled { await NativeQwenService.shared.release() }
     }
 
     private func togglePauseProcessing() {
@@ -4863,7 +4918,7 @@ struct ContentView: View {
         let attributes = try? FileManager.default.attributesOfItem(atPath: slot.url.path)
         let modified = (attributes?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
         return [
-            "audio-sync-v3",
+            "audio-sync-v4-packet-clock",
             slot.url.standardizedFileURL.path,
             "\(modified)",
             "\((attributes?[.size] as? NSNumber)?.int64Value ?? 0)",
@@ -4885,7 +4940,7 @@ struct ContentView: View {
     // reuses PCM across recognition/VAD option changes when media is unchanged.
     private func nativePreviewKey(for slot: FileSlot, clipRange: MediaClipRange?) -> String? {
         guard let directory = settings.nativeFireRedVADDirectory else { return nil }
-        var parts = ["native-firered-v1", previewReuseKey(for: slot, clipRange: clipRange), directory.standardizedFileURL.path]
+        var parts = ["native-firered-v3-silence", previewReuseKey(for: slot, clipRange: clipRange), directory.standardizedFileURL.path]
         for path in ["cmvn.ark", "FireRedVAD.mlpackage/Data/com.apple.CoreML/model.mlmodel",
                      "FireRedVAD.mlpackage/Data/com.apple.CoreML/weights/weight.bin"] {
             guard let attributes = try? FileManager.default.attributesOfItem(atPath: directory.appending(path: path).path) else { return nil }
@@ -4986,6 +5041,7 @@ struct ContentView: View {
                     update(at: index) { $0.progress = 0.02; $0.processingFacts["nativeVAD"] = "fallback"; $0.statusDetail = t("nativeFireRedVAD.fallback") }
                 }
             }
+            await NativeQwenService.shared.release()
             try await requireBackendForProcessing(fileIndex: index)
             let created = try await api.createPreviewJob(fileURL: preparedInput.uploadURL, settings: settings)
             update(at: index) {
@@ -5072,6 +5128,7 @@ struct ContentView: View {
                     $0.statusKey = "status.starting"
                     $0.statusDetail = t("status.reusingPreview")
                 }
+                await NativeQwenService.shared.release()
                 try await requireBackendForProcessing(fileIndex: index)
                 do {
                     let created = try await api.createJobFromPreview(previewID: reusablePreviewID, settings: settings)
@@ -5130,7 +5187,7 @@ struct ContentView: View {
                     await NativeQwenService.shared.release()
                     AppLog.api.error("Native Qwen fallback: \(error.localizedDescription, privacy: .public)")
                     nativeFallbackDetail = t("nativeQwen.fallbackError") + ": " + error.localizedDescription
-                    update(at: index) { $0.statusDetail = nativeFallbackDetail ?? ""; $0.processingFacts["nativeQwen"] = "fallback" }
+                    update(at: index) { $0.previewText = ""; $0.statusDetail = nativeFallbackDetail ?? ""; $0.processingFacts["nativeQwen"] = "fallback" }
                     if reusingNativePreview {
                         // The Python fallback still needs a correctly cropped
                         // input if its saved preview has expired.
@@ -5139,6 +5196,7 @@ struct ContentView: View {
                 }
             }
             try Task.checkCancellation()
+            await NativeQwenService.shared.release()
             try await requireBackendForProcessing(fileIndex: index)
             var backendNativeSegments: [SubtitleSegment]?
             if settings.backendSupportsNativeSegments, let directory = settings.nativeFireRedVADDirectory {
@@ -5221,7 +5279,8 @@ struct ContentView: View {
             language: settings.recognitionLanguage == .auto ? nil : settings.recognitionLanguage.rawValue,
             context: settings.asrContext,
             maxTokens: settings.mimoMaxTokens,
-            lineCharacters: settings.lineChars
+            lineCharacters: settings.lineChars,
+            batchEncodingEnabled: settings.nativeQwenBatchEncodingEnabled
         )
         var nativeSegments = nativePreviewSegments
         if nativeSegments != nil {
@@ -5313,6 +5372,19 @@ struct ContentView: View {
                 await MainActor.run {
                     guard let index = self.files.firstIndex(where: { $0.id == nativeDiagnosticsID }) else { return }
                     self.update(at: index) { $0.progress = 0.15 + progress * 0.85 }
+                }
+            },
+            onCue: { cue in
+                await MainActor.run {
+                    guard !Task.isCancelled,
+                          let index = self.files.firstIndex(where: { $0.id == nativeDiagnosticsID }),
+                          self.files[index].processingState == .transcribing else { return }
+                    // Like the Python live preview, keep completed text visible
+                    // without installing an editable document until completion.
+                    self.update(at: index) { slot in
+                        if !slot.previewText.isEmpty { slot.previewText += "\n\n" }
+                        slot.previewText += cue.text
+                    }
                 }
             },
             onDiagnostics: { snapshot in
@@ -5415,7 +5487,8 @@ struct ContentView: View {
             }
             let total = max(job.total ?? 100, 1)
             let current = max(job.current ?? 0, 0)
-            let progress = min(max(Double(current) / Double(total), 0), 0.99)
+            let fractionalCurrent = job.fractionalCurrent ?? Double(current)
+            let progress = min(max(fractionalCurrent / Double(total), 0), 0.99)
             let progressText = job.progressText ?? ""
 
             update(at: fileIndex) {
@@ -7610,4 +7683,17 @@ enum FileQueueOrder {
         remaining.insert(contentsOf: moved, at: insertion)
         return remaining
     }
+}
+
+private struct CueListUndoSnapshot {
+    let slotID: UUID
+    let cues: [SubtitleCue]
+    let selectedCueID: SubtitleCue.ID?
+    let selection: Set<SubtitleCue.ID>
+}
+
+@MainActor
+private final class CueListUndoCoordinator {
+    var restoreHandler: ((CueListUndoSnapshot, String) -> Void)?
+    func restore(_ snapshot: CueListUndoSnapshot, action: String) { restoreHandler?(snapshot, action) }
 }

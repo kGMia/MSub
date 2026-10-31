@@ -29,6 +29,10 @@ final class TranscriptionSettings {
         didSet { UserDefaults.standard.set(nativeQwenEnabled, forKey: "msub.nativeQwen.enabled") }
     }
 
+    var nativeQwenBatchEncodingEnabled = UserDefaults.standard.bool(forKey: "msub.nativeQwen.batchEncoding") {
+        didSet { UserDefaults.standard.set(nativeQwenBatchEncodingEnabled, forKey: "msub.nativeQwen.batchEncoding") }
+    }
+
     var nativeFireRedVADEnabled = UserDefaults.standard.bool(forKey: "msub.nativeFireRedVAD.enabled") {
         didSet { UserDefaults.standard.set(nativeFireRedVADEnabled, forKey: "msub.nativeFireRedVAD.enabled") }
     }
@@ -73,7 +77,11 @@ final class TranscriptionSettings {
         if selected.hasPrefix("/") || selected.hasPrefix("~") {
             return URL(fileURLWithPath: (selected as NSString).expandingTildeInPath)
         }
-        // Only map the known default repo to its installed counterpart.
+        // Resolve catalog variants, retaining the general-model fallback for old catalogs.
+        if let variant = currentModelInfo?.variants?.first(where: { $0.repo == selected }),
+           variant.localModelAvailable {
+            return URL(fileURLWithPath: variant.localModel)
+        }
         if selected == "mlx-community/Qwen3-ASR-1.7B-8bit",
            let info = currentModelInfo, info.localModelAvailable {
             return URL(fileURLWithPath: info.localModel)
@@ -238,7 +246,48 @@ final class TranscriptionSettings {
     }
 
     var currentModelInfo: ASRModelInfo? {
-        modelCatalog.first { $0.engine == effectiveASREngine }
+        guard var info = modelCatalog.first(where: { $0.engine == effectiveASREngine }) else { return nil }
+        let selected = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let variant = info.variants?.first(where: { $0.repo == selected || $0.localModel == selected }) {
+            info.title = variant.title
+            info.defaultModel = variant.localModelAvailable ? variant.localModel : variant.repo
+            info.localModel = variant.localModel
+            info.localModelAvailable = variant.localModelAvailable
+        }
+        return info
+    }
+
+    var availableModelVariants: [ASRModelVariant] {
+        guard effectiveASREngine == .qwen3 else { return [] }
+        if let variants = currentModelInfo?.variants, !variants.isEmpty { return variants }
+        // Older cached/backend catalogs remain usable; refresh after downloading
+        // through Model Manager to resolve an installed native model directory.
+        return [
+            ASRModelVariant(repo: "mlx-community/Qwen3-ASR-1.7B-8bit", title: "Qwen3-ASR 1.7B · 8bit",
+                            localModel: currentModelInfo?.localModel ?? "",
+                            localModelAvailable: currentModelInfo?.localModelAvailable ?? false, language: nil),
+            ASRModelVariant(repo: "ph0ryn/Qwen3-ASR-1.7B-JA-MLX-bf16", title: "Qwen3-ASR 1.7B JA · bf16",
+                            localModel: "", localModelAvailable: false, language: .ja)
+        ]
+    }
+
+    func registerLocalQwenVariant(_ variant: ASRModelVariant?) {
+        guard let variant, let index = modelCatalog.firstIndex(where: { $0.engine == .qwen3 }) else { return }
+        var variants = modelCatalog[index].variants ?? []
+        if variants.isEmpty {
+            let general = modelCatalog[index]
+            variants.append(ASRModelVariant(repo: "mlx-community/Qwen3-ASR-1.7B-8bit",
+                title: "Qwen3-ASR 1.7B · 8bit", localModel: general.localModel,
+                localModelAvailable: general.localModelAvailable, language: nil))
+        }
+        variants.removeAll { $0.repo == variant.repo }
+        variants.append(variant)
+        modelCatalog[index].variants = variants
+    }
+
+    func selectModelVariant(_ variant: ASRModelVariant) {
+        model = variant.localModelAvailable ? variant.localModel : variant.repo
+        if let language = variant.language { recognitionLanguage = language }
     }
 
     var currentVADInfo: VADModelInfo? {
@@ -768,6 +817,8 @@ final class TranscriptionSettings {
     private var submittedModel: String {
         let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
+            if let variant = currentModelInfo?.variants?.first(where: { $0.repo == trimmed }),
+               variant.localModelAvailable { return variant.localModel }
             return trimmed
         }
         return currentModelInfo?.defaultModel ?? trimmed

@@ -28,7 +28,25 @@ enum MeaninglessCueDetector {
         "ははは", "はぁ", "へ", "へへ", "へぇ", "ふ", "ふふ", "ふう",
         "ほ", "ほほ", "む", "あの", "えっと"
     ]
-    private static let japaneseLooseScalars = Set("あぁえぇうぅおぉんはへふほハヘフホー〜".unicodeScalars)
+    // Whole-cue candidates, not arbitrary strings made from "filler" kana.
+    // In this editing workflow standalone/repeated あう is intentionally included.
+    private static let japaneseVocalUnits: [(head: [Character], tail: Set<Character>)] = {
+        let extensions = Set("ーっぁぃぅぇぉ")
+        let heads = ["うん", "わー", "わあ", "わぁ", "わっ", "うわー", "うわあ", "うわぁ", "うわっ", "あう", "うあ", "んあ", "んん", "あの", "えっと", "ええと", "そのお", "ふむ",
+                     "あぁ", "あぅ", "うぅ", "おぉ", "えぇ", "んぅ", "うむ", "んふ",
+                     "あー", "えー", "うー", "おー", "んー", "あっ", "えっ", "うっ", "おっ", "んっ",
+                     "はぁ", "はあ", "ふぅ", "ふう", "へぇ", "へえ"]
+        var units = heads.map { (Array($0), extensions) }
+        for (head, sound) in [("あは", "は"), ("うふ", "ふ"), ("えへ", "へ"),
+                              ("おほ", "ほ"), ("あひ", "ひ"), ("うひ", "ひ"),
+                              ("はは", "は"), ("へへ", "へ"), ("ふふ", "ふ"), ("ほほ", "ほ")] {
+            units.append((Array(head), extensions.union(Set(sound))))
+        }
+        return units
+    }()
+
+    private static let vocalUnitsByFirstCharacter = Dictionary(grouping: japaneseVocalUnits) { $0.head[0] }
+    private static let markupPattern = try! NSRegularExpression(pattern: "<[^>]+>")
 
     static func isMeaningless(_ rawText: String) -> Bool {
         classification(for: rawText).isMeaningless
@@ -52,9 +70,11 @@ enum MeaninglessCueDetector {
     }
 
     private static func normalizedText(_ text: String) -> String {
-        text
-            .replacingOccurrences(of: #"<[^>]+>"#, with: " ", options: .regularExpression)
-            .replacingOccurrences(of: "&nbsp;", with: " ")
+        let compatible = text.precomposedStringWithCompatibilityMapping
+        // Compile markup matching once, rather than on every visible table row.
+        let plain = compatible.contains("<") ? markupPattern.stringByReplacingMatches(
+            in: compatible, range: NSRange(compatible.startIndex..., in: compatible), withTemplate: " ") : compatible
+        return plain.replacingOccurrences(of: "&nbsp;", with: " ")
             .replacingOccurrences(of: "\u{3000}", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -64,6 +84,9 @@ enum MeaninglessCueDetector {
     }
 
     private static func isLargeRepetition(_ text: String) -> Bool {
+        // Repeated Japanese words can be meaningful (はいはいはい / まだまだまだ).
+        // Vocal repetitions are handled by the Japanese rules below.
+        guard !text.unicodeScalars.contains(where: isKana) else { return false }
         let characters = lexicalCharacters(in: text)
         guard characters.count >= 4 else { return false }
         let maxUnitLength = min(4, characters.count / 2)
@@ -146,7 +169,12 @@ enum MeaninglessCueDetector {
     }
 
     private static func isOnlyJapaneseFillers(_ text: String) -> Bool {
-        let groups = japaneseLexicalGroups(in: text)
+        // ICU's reverse Hiragana-Katakana transform expands ー into vowels.
+        // Map letters directly so vocal-length marks retain their meaning.
+        let hiragana = String(String.UnicodeScalarView(text.unicodeScalars.map { scalar in
+            (0x30A1...0x30F6).contains(scalar.value) ? Unicode.Scalar(scalar.value - 0x60)! : scalar
+        }))
+        let groups = japaneseLexicalGroups(in: hiragana)
         guard !groups.isEmpty else { return false }
         return groups.allSatisfy { isJapaneseFillerGroup($0) }
     }
@@ -177,7 +205,28 @@ enum MeaninglessCueDetector {
         if japaneseFillers.contains(compact) {
             return true
         }
-        return compact.unicodeScalars.allSatisfy { japaneseLooseScalars.contains($0) }
+        let scalars = compact.unicodeScalars
+        if let first = scalars.first, "あえうおん".unicodeScalars.contains(first),
+           scalars.allSatisfy({ $0 == first }) { return true }
+        // Segment recognized units without a nested repeated regex: long rejected
+        // kana strings must not cause exponential backtracking on the editor thread.
+        let characters = Array(compact)
+        var reachable = Array(repeating: false, count: characters.count + 1)
+        reachable[characters.count] = true
+        for start in characters.indices.reversed() {
+            for unit in vocalUnitsByFirstCharacter[characters[start]] ?? [] {
+                var end = start + unit.head.count
+                guard end <= characters.count,
+                      characters[start..<end].elementsEqual(unit.head) else { continue }
+                if reachable[end] { reachable[start] = true; break }
+                while end < characters.count, unit.tail.contains(characters[end]) {
+                    end += 1
+                    if reachable[end] { reachable[start] = true; break }
+                }
+                if reachable[start] { break }
+            }
+        }
+        return reachable[0]
     }
 
     private static func isLexicalScalar(_ scalar: Unicode.Scalar) -> Bool {

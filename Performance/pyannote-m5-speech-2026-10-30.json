@@ -1,0 +1,45 @@
+{
+  "device": "Apple M5",
+  "windows": 4,
+  "cpuSeconds": 0.1995623330003582,
+  "input": "audio",
+  "batches": [
+    {
+      "batch": 1,
+      "coldSeconds": 0.40923016700253356,
+      "warmSeconds": [
+        0.3496255409991136,
+        0.30433041699870955
+      ],
+      "maxProbabilityError": 1.4901161193847656e-06,
+      "thresholdFlips": 0,
+      "parity": true,
+      "peakBytes": 35302332
+    },
+    {
+      "batch": 2,
+      "coldSeconds": 0.3479081249970477,
+      "warmSeconds": [
+        0.15411575000325684,
+        0.15855649999866728
+      ],
+      "maxProbabilityError": 1.5497207641601562e-06,
+      "thresholdFlips": 0,
+      "parity": true,
+      "peakBytes": 65762364
+    },
+    {
+      "batch": 4,
+      "coldSeconds": 0.24627804099873174,
+      "warmSeconds": [
+        0.07431045798875857,
+        0.06709083300665952
+      ],
+      "maxProbabilityError": 1.5497207641601562e-06,
+      "thresholdFlips": 0,
+      "parity": true,
+      "peakBytes": 129534676
+    }
+  ],
+  "note": "Fixed windows only; not boundary-quality or end-to-end validation."
+}

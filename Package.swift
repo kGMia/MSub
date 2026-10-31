@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.4
 
 import PackageDescription
 
@@ -18,12 +18,8 @@ let package = Package(
             name: "MSub",
             dependencies: [.product(name: "MLXAudioSTT", package: "mlx-audio-swift")],
             path: "Sources/MSub",
-            exclude: [
-                "Media.xcassets"
-            ],
             resources: [
-                .process("Localizable.xcstrings"),
-                .copy("ffmpeg")
+                .process("Localizable.xcstrings")
             ]
         ),
         .testTarget(
@@ -31,5 +27,6 @@ let package = Package(
             dependencies: ["MSub"],
             path: "Tests/MSubTests"
         )
-    ]
+    ],
+    swiftLanguageModes: [.v6]
 )

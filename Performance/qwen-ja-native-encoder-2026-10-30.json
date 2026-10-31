@@ -1,0 +1,40 @@
+{
+  "note" : "Encoder only; no transcript\/decoder parity claim. Same-process, sequential-first order.",
+  "rounds" : [
+    {
+      "batchSeconds" : 0.21568925000610761,
+      "maxFeatureError" : 0.00064220279455184937,
+      "processPeakBytes" : 5049545792,
+      "round" : 0,
+      "sequentialSeconds" : 1.3806932500010589,
+      "shape" : [
+        262,
+        2048
+      ]
+    },
+    {
+      "batchSeconds" : 0.15648791666899342,
+      "maxFeatureError" : 0.00064220279455184937,
+      "processPeakBytes" : 5049545792,
+      "round" : 1,
+      "sequentialSeconds" : 0.2269687916705152,
+      "shape" : [
+        262,
+        2048
+      ]
+    },
+    {
+      "batchSeconds" : 0.16018008333048783,
+      "maxFeatureError" : 0.00064220279455184937,
+      "processPeakBytes" : 5049545792,
+      "round" : 2,
+      "sequentialSeconds" : 0.2255835000105435,
+      "shape" : [
+        262,
+        2048
+      ]
+    }
+  ],
+  "secondsPerWindow" : 10,
+  "windows" : 2
+}

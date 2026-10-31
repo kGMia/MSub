@@ -11,6 +11,7 @@ private struct BackendManifest: Decodable {
     let sourceMiMoTokenizerPath: String?
     let sourceMegaModelPath: String?
     let sourceQwen3ModelPath: String?
+    let sourceQwen3JAModelPath: String?
     let sourceFunASRModelPath: String?
     let sourceFireRedVADModelPath: String?
     let sourceDiarizationModelPath: String?
@@ -110,6 +111,9 @@ final class BackendService {
         }
         if let qwen3ModelPath = bundledOrWorkspaceQwen3Model(in: workspace, allowAuthorizationPrompt: false) {
             environment["MSUB_QWEN3_MODEL"] = qwen3ModelPath.path
+        }
+        if let variant = localJapaneseQwenVariant() {
+            environment["MSUB_QWEN3_JA_MODEL"] = variant.localModel
         }
         if let funASRModelPath = bundledOrWorkspaceFunASRModel(in: workspace, allowAuthorizationPrompt: false) {
             environment["MSUB_FUNASR_MODEL"] = funASRModelPath.path
@@ -1071,6 +1075,21 @@ final class BackendService {
         }
 
         return nil
+    }
+
+    /// Discover downloaded Japanese weights without starting Python or changing defaults.
+    func localJapaneseQwenVariant() -> ASRModelVariant? {
+        guard let workspace = findWorkspaceRoot() else { return nil }
+        let manifest = (try? Data(contentsOf: workspace.appending(path: "backend-manifest.json")))
+            .flatMap { try? JSONDecoder().decode(BackendManifest.self, from: $0) }
+        let source = manifest?.sourceQwen3JAModelPath.map { URL(fileURLWithPath: $0) }
+        guard let directory = bundledOrWorkspaceOptionalASRModel(
+            in: workspace, environmentKey: "MSUB_QWEN3_JA_MODEL",
+            modelDirectoryName: "Qwen3-ASR-1.7B-JA-MLX-bf16", displayName: "Qwen3-ASR Japanese bf16",
+            manifestPath: source, allowAuthorizationPrompt: false) else { return nil }
+        return ASRModelVariant(repo: "ph0ryn/Qwen3-ASR-1.7B-JA-MLX-bf16",
+                               title: "Qwen3-ASR 1.7B JA · bf16", localModel: directory.path,
+                               localModelAvailable: true, language: .ja)
     }
 
     private func bundledOrWorkspaceQwen3Model(in workspace: URL, allowAuthorizationPrompt: Bool = true) -> URL? {

@@ -55,6 +55,35 @@ final class NativeAudioExporterTests: XCTestCase {
         catch is CancellationError {} catch { XCTFail("Unexpected error: \(error)") }
     }
 
+    @MainActor
+    func testCompressedPacketClockDoesNotAccumulateDrift() async throws {
+        guard let ffmpeg = FFmpegRunner.binary else { throw XCTSkip("FFmpeg fixture encoder unavailable") }
+        let source = FileManager.default.temporaryDirectory.appending(path: "msub-clock-\(UUID().uuidString).m4a")
+        defer { try? FileManager.default.removeItem(at: source) }
+        let process = Process()
+        process.executableURL = ffmpeg
+        // AAC packet clock runs 1% longer than decoded samples. Pulse should
+        // remain around 40.4...42.42 s, not collapse back to 40...42 s.
+        process.arguments = ["-nostdin", "-y", "-loglevel", "error", "-f", "lavfi",
+            "-i", "aevalsrc=if(between(t,40,42),0.5*sin(2*PI*440*t),0):s=16000:d=60".replacingOccurrences(of: ",", with: "\\,"),
+            "-af", "asetpts=PTS*1.01", "-c:a", "aac", source.path]
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+        let output = try await NativeAudioExporter.shared.extract(source: source, start: 0, duration: 60.6)
+        defer { try? FileManager.default.removeItem(at: output.url) }
+        let audio = try AVAudioFile(forReading: output.url)
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: audio.processingFormat, frameCapacity: 1600))
+        func energy(at seconds: Double) throws -> Float {
+            audio.framePosition = AVAudioFramePosition(seconds * 16000)
+            try audio.read(into: buffer, frameCount: 1600)
+            let data = try XCTUnwrap(buffer.floatChannelData?[0])
+            return (0..<Int(buffer.frameLength)).reduce(Float(0)) { $0 + abs(data[$1]) } / Float(buffer.frameLength)
+        }
+        XCTAssertLessThan(try energy(at: 40.05), 0.01)
+        XCTAssertGreaterThan(try energy(at: 40.6), 0.1)
+    }
+
     private func makeSource() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appending(path: "msub-export-test-\(UUID().uuidString).wav")
         let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 2))

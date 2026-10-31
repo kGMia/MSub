@@ -12,6 +12,29 @@ spec.loader.exec_module(module)
 
 
 class GatherPatchTests(unittest.TestCase):
+    def testBuildAndArchiveFindTheSameDependencyCheckout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkouts = root / 'SourcePackages/checkouts'
+            source = checkouts / module.GATHER_PATH
+            source.parent.mkdir(parents=True)
+            source.write_text('// resolved source')
+            for relative in (
+                'Build/Products',
+                'Build/Intermediates.noindex/ArchiveIntermediates/MSub/BuildProductsPath',
+                'Build/Intermediates.noindex/ArchiveIntermediates/My App/BuildProductsPath',
+            ):
+                with self.subTest(relative=relative):
+                    self.assertEqual(module.checkouts_for_build(root / relative), checkouts)
+
+    def testMissingCheckoutReportsHowToResolveIt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            # An empty SourcePackages directory is not a resolved MLX checkout.
+            (root / 'SourcePackages/checkouts').mkdir(parents=True)
+            with self.assertRaisesRegex(FileNotFoundError, 'Resolve package dependencies'):
+                module.checkouts_for_build(root / 'Build/Products')
+
     def testPatchIsIdempotentAndPreservesPermissions(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / module.GATHER_PATH

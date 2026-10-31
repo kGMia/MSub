@@ -33,6 +33,7 @@ MIMO_MODEL_SOURCE="$REPO_ROOT/models/MiMo-V2.5-ASR-MLX-4bit"
 MIMO_TOKENIZER_SOURCE="$REPO_ROOT/models/MiMo-Audio-Tokenizer"
 MEGA_MODEL_SOURCE="$REPO_ROOT/models/Mega-ASR-bf16"
 QWEN3_MODEL_SOURCE="$REPO_ROOT/models/Qwen3-ASR-1.7B-8bit"
+QWEN3_JA_MODEL_SOURCE="$REPO_ROOT/models/Qwen3-ASR-1.7B-JA-MLX-bf16"
 FUNASR_MODEL_SOURCE="$REPO_ROOT/models/Fun-ASR-Nano-2512"
 FIRERED_VAD_MODEL_SOURCE="$REPO_ROOT/models/FireRedVAD-CoreML"
 DIARIZATION_MODEL_SOURCE="$REPO_ROOT/models/pyannote-speaker-diarization-community-1"
@@ -45,6 +46,14 @@ PANNS_AUDIO_EVENT_MODEL_SOURCE="$REPO_ROOT/models/panns-cnn14-16k-mlx"
 AUDIO_EVENT_MODEL_SOURCE="$PANNS_AUDIO_EVENT_MODEL_SOURCE"
 
 mkdir -p "$DEST"
+# Release must bind the packaged live backend to the app's tracked snapshot.
+if [ "${CONFIGURATION:-Debug}" = "Release" ]; then
+    python3 "$SRCROOT/Scripts/backend-snapshot.py" --workspace "$REPO_ROOT"
+    cp "$SRCROOT/Backend/manifest.json" "$DEST/backend-source-manifest.json"
+else
+    # Never leave an old release provenance stamp on a development backend.
+    rm -f "$DEST/backend-source-manifest.json"
+fi
 
 INCLUDE_MODEL="${MSUB_INCLUDE_MODEL:-${HUZ_INCLUDE_MODEL:-0}}"
 INCLUDE_SENSEVOICE_MODEL="${MSUB_INCLUDE_SENSEVOICE_MODEL:-0}"
@@ -172,6 +181,23 @@ package_signature() {
 }
 
 CURRENT_PACKAGE_SIGNATURE="$(package_signature)"
+RESOURCES_DIR="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}"
+FFMPEG_SOURCE="${MSUB_FFMPEG_SOURCE:-$SRCROOT/.cache/bin/ffmpeg}"
+if [ ! -x "$FFMPEG_SOURCE" ]; then
+    FFMPEG_SOURCE="$(command -v ffmpeg || true)"
+fi
+if [ -n "$FFMPEG_SOURCE" ] && [ -x "$FFMPEG_SOURCE" ]; then
+    mkdir -p "$RESOURCES_DIR"
+    if [ ! -x "$RESOURCES_DIR/ffmpeg" ] || ! cmp -s "$FFMPEG_SOURCE" "$RESOURCES_DIR/ffmpeg"; then
+        cp -p "$FFMPEG_SOURCE" "$RESOURCES_DIR/ffmpeg"
+        chmod +x "$RESOURCES_DIR/ffmpeg"
+        codesign --force --sign - "$RESOURCES_DIR/ffmpeg" >/dev/null 2>&1 || true
+    fi
+else
+    echo "ffmpeg is missing. Set MSUB_FFMPEG_SOURCE or place an executable at $SRCROOT/.cache/bin/ffmpeg." >&2
+    exit 1
+fi
+
 if [ "${MSUB_FORCE_PACKAGE_BACKEND:-0}" != "1" ] \
     && [ "$RUNTIME_UNCHANGED" = "1" ] \
     && [ -f "$PACKAGE_STAMP" ] \
@@ -600,6 +626,7 @@ cat > "$DEST/backend-manifest.json" <<EOF
   "sourceMiMoTokenizerPath": $SOURCE_MIMO_TOKENIZER_JSON,
   "sourceMegaModelPath": $SOURCE_MEGA_MODEL_JSON,
   "sourceQwen3ModelPath": $SOURCE_QWEN3_MODEL_JSON,
+  "sourceQwen3JAModelPath": "$QWEN3_JA_MODEL_SOURCE",
   "sourceFunASRModelPath": $SOURCE_FUNASR_MODEL_JSON,
   "sourceFireRedVADModelPath": $SOURCE_FIRERED_VAD_MODEL_JSON,
   "sourceDiarizationModelPath": $SOURCE_DIARIZATION_MODEL_JSON,
